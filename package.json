@@ -1,0 +1,28 @@
+{
+  "name": "webwaka-transport",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://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@github.com/WebWakaDOS/webwaka-transport.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/WebWakaDOS/webwaka-transport/issues"
+  },
+  "homepage": "https://github.com/WebWakaDOS/webwaka-transport#readme",
+  "description": "",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260313.1",
+    "@types/node": "^25.5.0",
+    "dexie": "^4.3.0",
+    "hono": "^4.12.8",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}
