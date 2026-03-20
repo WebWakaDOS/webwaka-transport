@@ -1,13 +1,19 @@
 {
   "name": "webwaka-transport",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "src/worker.ts",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && echo 'TypeCheck passed'",
+    "deploy": "wrangler deploy --env production",
+    "deploy:staging": "wrangler deploy --env staging"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://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@github.com/WebWakaDOS/webwaka-transport.git"
+    "url": "git+https://github.com/WebWakaDOS/webwaka-transport.git"
   },
   "keywords": [],
   "author": "",
@@ -16,17 +22,19 @@
     "url": "https://github.com/WebWakaDOS/webwaka-transport/issues"
   },
   "homepage": "https://github.com/WebWakaDOS/webwaka-transport#readme",
-  "description": "",
+  "description": "WebWaka Transport Suite — TRN-1 Seat Inventory, TRN-2 Agent Sales, TRN-3 Booking Portal, TRN-4 Operator Management",
+  "dependencies": {
+    "dexie": "^4.3.0",
+    "hono": "^4.12.8",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260313.1",
     "@types/node": "^25.5.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitest/coverage-v8": "^2.1.9",
-    "dexie": "^4.3.0",
-    "hono": "^4.12.8",
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4",
     "typescript": "^5.9.3",
     "vitest": "^2.1.9"
   }
