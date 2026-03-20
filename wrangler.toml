@@ -1,0 +1,20 @@
+name = "webwaka-transport-api"
+main = "src/worker.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+[env.staging]
+name = "webwaka-transport-api-staging"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "webwaka-transport-db-staging"
+database_id = "b687d819-f83b-4d54-95ac-f123500aaae4"
+
+[env.production]
+name = "webwaka-transport-api-prod"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "webwaka-transport-db-prod"
+database_id = "1faa6600-d4ce-4c1c-9868-ec23566da100"
