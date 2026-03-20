@@ -61,6 +61,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: '4'
           command: d1 execute webwaka-transport-db-prod --env production --file migrations/001_transport_schema.sql --remote
 
       - name: Deploy Workers to Production
@@ -68,6 +69,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: '4'
           command: deploy --env production
 
       - name: Verify API health (Production)
@@ -157,6 +159,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: '4'
           command: d1 execute webwaka-transport-db-staging --env staging --file migrations/001_transport_schema.sql --remote
 
       - name: Deploy Workers to Staging
@@ -164,6 +167,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: '4'
           command: deploy --env staging
 
       - name: Verify API health (Staging)
