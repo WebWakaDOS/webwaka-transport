@@ -29,7 +29,7 @@ seatInventoryRouter.get('/trips', async (c) => {
     COUNT(s.id) as total_seats
     FROM trips t
     JOIN routes r ON t.route_id = r.id
-    LEFT JOIN seats s ON t.trip_id = s.trip_id
+    LEFT JOIN seats s ON s.trip_id = t.id
     WHERE t.deleted_at IS NULL AND t.state != 'cancelled'`;
 
   const params: unknown[] = [];
