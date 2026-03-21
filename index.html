@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en-NG">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#1e40af" />
+    <meta name="description" content="WebWaka Transport — Book intercity bus tickets, manage agent sales, and operate routes across Nigeria and Africa." />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="WebWaka Transport" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <title>WebWaka Transport</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body { font-family: system-ui, -apple-system, sans-serif; background: #f8fafc; }
+      #root { min-height: 100vh; }
+      /* Prevent flash of unstyled content */
+      .app-loading {
+        display: flex; align-items: center; justify-content: center;
+        min-height: 100vh; font-size: 14px; color: #64748b;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div class="app-loading">Loading WebWaka Transport...</div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
