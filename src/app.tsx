@@ -359,7 +359,7 @@ export function TransportApp() {
   ];
 
   return (
-    <div style={{ maxWidth: 430, margin: '0 auto', minHeight: '100vh', display: 'flex', flexDirection: 'column', fontFamily: 'system-ui, sans-serif', background: '#f8fafc' }}>
+    <div data-testid="transport-app" style={{ maxWidth: 430, margin: '0 auto', minHeight: '100vh', display: 'flex', flexDirection: 'column', fontFamily: 'system-ui, sans-serif', background: '#f8fafc' }}>
       <StatusBar online={online} pendingSync={pendingSync} lang={lang} onLangChange={handleLangChange} />
       <div style={{ background: '#1e40af', color: '#fff', padding: '12px 16px', fontWeight: 800, fontSize: 18 }}>
         🚌 {t('app_name')}
