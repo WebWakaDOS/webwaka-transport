@@ -11,6 +11,10 @@ binding = "DB"
 database_name = "webwaka-transport-db-staging"
 database_id = "b687d819-f83b-4d54-95ac-f123500aaae4"
 
+[[env.staging.kv_namespaces]]
+binding = "SESSIONS_KV"
+id = "bde8befc71da40c5a5979ee35830022a"
+
 [env.production]
 name = "webwaka-transport-api-prod"
 
@@ -18,3 +22,7 @@ name = "webwaka-transport-api-prod"
 binding = "DB"
 database_name = "webwaka-transport-db-prod"
 database_id = "1faa6600-d4ce-4c1c-9868-ec23566da100"
+
+[[env.production.kv_namespaces]]
+binding = "SESSIONS_KV"
+id = "f176cebbdf8445838c72d9fde0173628"

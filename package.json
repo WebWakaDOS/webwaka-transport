@@ -1,6 +1,7 @@
 {
   "name": "webwaka-transport",
   "version": "1.0.0",
+  "type": "module",
   "main": "src/worker.ts",
   "scripts": {
     "test": "vitest run",
