@@ -133,6 +133,37 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  deploy-pages-production:
+    name: Deploy PWA to Cloudflare Pages (Production)
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    needs: [lint-and-test]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build PWA (Vite)
+        run: npm run build:ui
+        env:
+          VITE_API_BASE: https://webwaka-transport-api-prod.webwaka.workers.dev
+
+      - name: Deploy PWA to Cloudflare Pages (Production)
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: '4'
+          command: pages deploy dist --project-name webwaka-transport-ui --branch main
+
   # ============================================================================
   # STAGING DEPLOYMENT (develop branch)
   # ============================================================================
@@ -177,3 +208,34 @@ jobs:
             -H "Content-Type: application/json" \
             -o /tmp/health.json || echo "Health check pending..."
           cat /tmp/health.json || true
+
+  deploy-pages-staging:
+    name: Deploy PWA to Cloudflare Pages (Staging)
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop'
+    needs: [lint-and-test]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build PWA (Vite)
+        run: npm run build:ui
+        env:
+          VITE_API_BASE: https://webwaka-transport-api-staging.webwaka.workers.dev
+
+      - name: Deploy PWA to Cloudflare Pages (Staging)
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: '4'
+          command: pages deploy dist --project-name webwaka-transport-ui --branch develop

@@ -1,0 +1,49 @@
+{
+  "name": "WebWaka Transport",
+  "short_name": "WW Transport",
+  "description": "Book intercity bus tickets, manage agent sales, and operate routes across Nigeria and Africa.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f8fafc",
+  "theme_color": "#1e40af",
+  "lang": "en-NG",
+  "dir": "ltr",
+  "orientation": "portrait-primary",
+  "categories": ["travel", "transportation", "business"],
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ],
+  "shortcuts": [
+    {
+      "name": "Search Trips",
+      "short_name": "Search",
+      "description": "Search for available bus trips",
+      "url": "/?tab=search",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "My Bookings",
+      "short_name": "Bookings",
+      "description": "View your bookings",
+      "url": "/?tab=bookings",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Agent POS",
+      "short_name": "Agent",
+      "description": "Agent point-of-sale ticketing",
+      "url": "/?tab=agent",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "/screenshot-mobile.png",
+      "sizes": "390x844",
+      "type": "image/png",
+      "form_factor": "narrow",
+      "label": "WebWaka Transport on mobile"
+    }
+  ]
+}

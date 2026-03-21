@@ -9,7 +9,12 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit && echo 'TypeCheck passed'",
     "deploy": "wrangler deploy --env production",
-    "deploy:staging": "wrangler deploy --env staging"
+    "deploy:staging": "wrangler deploy --env staging",
+    "build:ui": "vite build",
+    "dev:ui": "vite",
+    "preview:ui": "vite preview",
+    "test:e2e": "playwright test",
+    "test:e2e:report": "playwright test --reporter=html"
   },
   "repository": {
     "type": "git",
@@ -31,11 +36,14 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260313.1",
+    "@playwright/test": "^1.58.2",
     "@types/node": "^25.5.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
     "@vitest/coverage-v8": "^2.1.9",
     "typescript": "^5.9.3",
+    "vite": "^8.0.1",
     "vitest": "^2.1.9",
     "wrangler": "^4.76.0"
   }
