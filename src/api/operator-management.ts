@@ -4,6 +4,7 @@
  * Invariants: Multi-tenancy (operator_id), Nigeria-First, Build Once Use Infinitely
  */
 import { Hono } from 'hono';
+import { requireRole } from '@webwaka/core';
 import type { Env } from './seat-inventory';
 
 export const operatorManagementRouter = new Hono<{ Bindings: Env }>();
@@ -27,7 +28,7 @@ operatorManagementRouter.get('/operators', async (c) => {
 });
 
 // POST /operators — register an operator
-operatorManagementRouter.post('/operators', async (c) => {
+operatorManagementRouter.post('/operators', requireRole(['SUPER_ADMIN']), async (c) => {
   const body = await c.req.json() as any;
   const { name, code, phone, email } = body;
 
@@ -55,7 +56,7 @@ operatorManagementRouter.post('/operators', async (c) => {
 });
 
 // PATCH /operators/:id — update operator status
-operatorManagementRouter.patch('/operators/:id', async (c) => {
+operatorManagementRouter.patch('/operators/:id', requireRole(['SUPER_ADMIN']), async (c) => {
   const id = c.req.param('id');
   const body = await c.req.json() as any;
   const { status, name, phone, email } = body;
@@ -95,7 +96,7 @@ operatorManagementRouter.get('/routes', async (c) => {
 });
 
 // POST /routes — create a route
-operatorManagementRouter.post('/routes', async (c) => {
+operatorManagementRouter.post('/routes', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
   const body = await c.req.json() as any;
   const { operator_id, origin, destination, distance_km, duration_minutes, base_fare } = body;
 
@@ -138,7 +139,7 @@ operatorManagementRouter.get('/vehicles', async (c) => {
 });
 
 // POST /vehicles — register a vehicle
-operatorManagementRouter.post('/vehicles', async (c) => {
+operatorManagementRouter.post('/vehicles', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
   const body = await c.req.json() as any;
   const { operator_id, plate_number, vehicle_type, total_seats } = body;
 
@@ -187,7 +188,7 @@ operatorManagementRouter.get('/trips/:id/state', async (c) => {
 });
 
 // POST /trips/:id/transition — advance trip state
-operatorManagementRouter.post('/trips/:id/transition', async (c) => {
+operatorManagementRouter.post('/trips/:id/transition', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
   const id = c.req.param('id');
   const body = await c.req.json() as any;
   const { to_state, reason } = body;
@@ -228,7 +229,7 @@ operatorManagementRouter.post('/trips/:id/transition', async (c) => {
 });
 
 // PATCH /trips/:id/location — update GPS location
-operatorManagementRouter.patch('/trips/:id/location', async (c) => {
+operatorManagementRouter.patch('/trips/:id/location', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
   const id = c.req.param('id');
   const body = await c.req.json() as any;
   const { latitude, longitude } = body;
