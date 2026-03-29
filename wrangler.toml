@@ -6,6 +6,11 @@ compatibility_flags = ["nodejs_compat"]
 [env.staging]
 name = "webwaka-transport-api-staging"
 
+[env.staging.vars]
+ENVIRONMENT = "staging"
+# JWT_SECRET must be set via: wrangler secret put JWT_SECRET --env staging
+
+
 [[env.staging.d1_databases]]
 binding = "DB"
 database_name = "webwaka-transport-db-staging"
@@ -15,8 +20,17 @@ database_id = "b687d819-f83b-4d54-95ac-f123500aaae4"
 binding = "SESSIONS_KV"
 id = "bde8befc71da40c5a5979ee35830022a"
 
+[[env.staging.kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "REPLACE_WITH_STAGING_RATE_LIMIT_KV_ID"
+
 [env.production]
 name = "webwaka-transport-api-prod"
+
+[env.production.vars]
+ENVIRONMENT = "production"
+# JWT_SECRET must be set via: wrangler secret put JWT_SECRET --env production
+
 
 [[env.production.d1_databases]]
 binding = "DB"
@@ -26,3 +40,7 @@ database_id = "1faa6600-d4ce-4c1c-9868-ec23566da100"
 [[env.production.kv_namespaces]]
 binding = "SESSIONS_KV"
 id = "f176cebbdf8445838c72d9fde0173628"
+
+[[env.production.kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "REPLACE_WITH_PROD_RATE_LIMIT_KV_ID"

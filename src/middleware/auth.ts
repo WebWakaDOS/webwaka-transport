@@ -1,7 +1,9 @@
 /**
  * WebWaka Transport Suite — JWT Authentication Middleware
- * Reuses the Super Admin V2 auth pattern for consistency (Build Once Use Infinitely).
- * All /api/* routes require a valid Bearer token stored in SESSIONS_KV.
+ * Security hardened 2026-03-29:
+ *   - Validates HS256-signed JWTs via JWT_SECRET (replaces KV session lookup)
+ *   - tenantId read exclusively from JWT payload (never from x-tenant-id header)
+ *   - requireRole() and requirePermission() available for route-level enforcement
  *
  * Public routes (no auth required):
  *   GET /health
@@ -16,15 +18,18 @@ export interface AuthUser {
   email: string;
   role: string;
   tenantId: string;
+  permissions: string[];
 }
 
 export interface AuthEnv {
   DB: D1Database;
   SESSIONS_KV: KVNamespace;
+  RATE_LIMIT_KV?: KVNamespace;
   TENANT_CONFIG?: KVNamespace;
+  JWT_SECRET: string;
+  ENVIRONMENT?: string;
 }
 
-/** Routes that do NOT require authentication */
 const PUBLIC_ROUTES: { method: string; path: string }[] = [
   { method: 'GET', path: '/health' },
   { method: 'GET', path: '/api/booking/routes' },
@@ -38,83 +43,90 @@ function isPublicRoute(method: string, path: string): boolean {
   );
 }
 
-/**
- * JWT Auth Middleware
- * Validates the Bearer token against SESSIONS_KV and attaches the user payload to context.
- */
+async function verifyJWT(token: string, secret: string): Promise<any | null> {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const [headerB64, payloadB64, sigB64] = parts;
+    const enc = new TextEncoder();
+    const key = await crypto.subtle.importKey(
+      'raw', enc.encode(secret),
+      { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']
+    );
+    const sigBytes = Uint8Array.from(
+      atob(sigB64.replace(/-/g, '+').replace(/_/g, '/')),
+      (ch) => ch.charCodeAt(0)
+    );
+    const valid = await crypto.subtle.verify(
+      'HMAC', key, sigBytes, enc.encode(`${headerB64}.${payloadB64}`)
+    );
+    if (!valid) return null;
+    const payload = JSON.parse(atob(payloadB64.replace(/-/g, '+').replace(/_/g, '/')));
+    if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
 export async function jwtAuthMiddleware(
   c: Context<{ Bindings: AuthEnv }>,
   next: Next
 ): Promise<Response | void> {
-  const method = c.req.method;
-  const path = c.req.path;
-
-  // Allow public routes through without auth
-  if (isPublicRoute(method, path)) {
-    return next();
-  }
+  if (isPublicRoute(c.req.method, c.req.path)) return next();
 
   const authHeader = c.req.header('Authorization');
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return c.json(
-      { success: false, error: 'Unauthorized: missing or malformed Authorization header' },
-      401
-    );
+  if (!authHeader?.startsWith('Bearer ')) {
+    return c.json({ success: false, error: 'Unauthorized: missing or malformed Authorization header' }, 401);
   }
 
-  const token = authHeader.replace('Bearer ', '').trim();
-  if (!token) {
-    return c.json({ success: false, error: 'Unauthorized: empty token' }, 401);
+  const token = authHeader.slice(7).trim();
+  if (!token) return c.json({ success: false, error: 'Unauthorized: empty token' }, 401);
+
+  const secret = c.env.JWT_SECRET;
+  if (!secret) {
+    console.error('FATAL: JWT_SECRET is not configured');
+    return c.json({ success: false, error: 'Auth service misconfigured' }, 503);
   }
 
-  // Validate token against SESSIONS_KV (same pattern as Super Admin V2)
-  let sessionData: string | null = null;
-  try {
-    sessionData = await c.env.SESSIONS_KV.get(`session:${token}`);
-  } catch {
-    return c.json({ success: false, error: 'Auth service unavailable' }, 503);
+  const payload = await verifyJWT(token, secret);
+  if (!payload) {
+    return c.json({ success: false, error: 'Unauthorized: invalid or expired token' }, 401);
   }
 
-  if (!sessionData) {
-    return c.json(
-      { success: false, error: 'Unauthorized: invalid or expired token' },
-      401
-    );
-  }
+  const user: AuthUser = {
+    userId: payload.sub || payload.userId,
+    email: payload.email,
+    role: payload.role,
+    tenantId: payload.tenantId, // ALWAYS from JWT payload — never from headers
+    permissions: payload.permissions || [],
+  };
 
-  let user: AuthUser;
-  try {
-    user = JSON.parse(sessionData) as AuthUser;
-  } catch {
-    return c.json({ success: false, error: 'Unauthorized: malformed session data' }, 401);
-  }
-
-  // Attach user to context for downstream handlers
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (c as any).set('user', user);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (c as any).set('tenantId', user.tenantId);
   return next();
 }
 
-/**
- * Role guard helper — call inside route handlers after jwtAuthMiddleware.
- * Returns null if authorized, or a 403 Response if not.
- */
-export function requireRole(
-  c: Context,
-  allowedRoles: string[]
-): null | Response {
+export function requireRole(c: Context, allowedRoles: string[]): null | Response {
   const user = c.get('user') as AuthUser | undefined;
-  if (!user) {
-    return c.json({ success: false, error: 'Unauthorized' }, 401);
-  }
+  if (!user) return c.json({ success: false, error: 'Unauthorized' }, 401);
   if (!allowedRoles.includes(user.role)) {
-    return c.json(
-      {
-        success: false,
-        error: `Forbidden: requires one of [${allowedRoles.join(', ')}]`,
-      },
-      403
-    );
+    return c.json({ success: false, error: `Forbidden: requires one of [${allowedRoles.join(', ')}]` }, 403);
+  }
+  return null;
+}
+
+export function requirePermission(c: Context, permission: string): null | Response {
+  const user = c.get('user') as AuthUser | undefined;
+  if (!user) return c.json({ success: false, error: 'Unauthorized' }, 401);
+  const hasPermission =
+    user.permissions?.includes(permission) ||
+    user.permissions?.includes('read:all') ||
+    user.role === 'SUPER_ADMIN';
+  if (!hasPermission) {
+    return c.json({ success: false, error: `Forbidden: requires permission '${permission}'` }, 403);
   }
   return null;
 }
