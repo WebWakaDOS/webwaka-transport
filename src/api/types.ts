@@ -79,10 +79,23 @@ export interface DbTrip {
   operator_id: string;
   route_id: string;
   vehicle_id: string;
+  driver_id: string | null;
   departure_time: number;
   state: string;
   current_latitude: number | null;
   current_longitude: number | null;
+  created_at: number;
+  updated_at: number;
+  deleted_at: number | null;
+}
+
+export interface DbDriver {
+  id: string;
+  operator_id: string;
+  name: string;
+  phone: string;
+  license_number: string | null;
+  status: string;
   created_at: number;
   updated_at: number;
   deleted_at: number | null;

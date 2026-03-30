@@ -17,7 +17,7 @@ function createMockDB() {
   const tables: Record<string, any[]> = {
     trips: [], seats: [], operators: [], routes: [], vehicles: [],
     agents: [], sales_transactions: [], receipts: [], customers: [],
-    bookings: [], trip_state_transitions: [], sync_mutations: [],
+    bookings: [], trip_state_transitions: [], sync_mutations: [], drivers: [],
   };
 
   function matchesWhere(row: any, whereClause: string, params: any[]): boolean {
@@ -1014,6 +1014,197 @@ describe('Phase 7: PATCH /bookings/:id/cancel — Booking Cancellation (TRN-3)',
       method: 'PATCH',
     }, makeEnv(db));
     expect(res.status).toBe(404);
+  });
+});
+
+// ============================================================
+// Phase 9 — Driver Management & Assignment Tests
+// ============================================================
+
+describe('Phase 9: POST /drivers — Create Driver (TRN-4)', () => {
+  let db: any;
+  beforeEach(() => { db = createMockDB(); });
+
+  it('creates a driver and returns 201', async () => {
+    const res = await operatorManagementRouter.request('/drivers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ operator_id: 'opr_1', name: 'Emeka Okafor', phone: '08022223333', license_number: 'LG-2024-001' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(201);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.name).toBe('Emeka Okafor');
+    expect(body.data.status).toBe('active');
+    expect(body.data.license_number).toBe('LG-2024-001');
+    expect(db._tables.drivers).toHaveLength(1);
+  });
+
+  it('creates a driver without license_number', async () => {
+    const res = await operatorManagementRouter.request('/drivers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ operator_id: 'opr_1', name: 'Aisha Bello', phone: '08044445555' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(201);
+    const body = await res.json() as any;
+    expect(body.data.license_number).toBeNull();
+  });
+
+  it('returns 400 when name is missing', async () => {
+    const res = await operatorManagementRouter.request('/drivers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ operator_id: 'opr_1', phone: '08022223333' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 when phone is missing', async () => {
+    const res = await operatorManagementRouter.request('/drivers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ operator_id: 'opr_1', name: 'Test Driver' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(400);
+  });
+});
+
+describe('Phase 9: GET /drivers — List Drivers (TRN-4)', () => {
+  let db: any;
+  beforeEach(() => {
+    db = createMockDB();
+    db._tables.drivers.push(
+      { id: 'drv_1', operator_id: 'opr_1', name: 'Musa Garba', phone: '08011112222', license_number: null, status: 'active', created_at: Date.now(), updated_at: Date.now(), deleted_at: null },
+      { id: 'drv_2', operator_id: 'opr_1', name: 'Ngozi Eze', phone: '08033334444', license_number: 'AB-001', status: 'suspended', created_at: Date.now(), updated_at: Date.now(), deleted_at: null },
+      { id: 'drv_3', operator_id: 'opr_1', name: 'Deleted Driver', phone: '08099998888', license_number: null, status: 'inactive', created_at: Date.now(), updated_at: Date.now(), deleted_at: Date.now() },
+    );
+  });
+
+  it('returns all non-deleted drivers for operator', async () => {
+    const res = await operatorManagementRouter.request('/drivers?operator_id=opr_1', {}, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.length).toBeGreaterThanOrEqual(2);
+    expect(body.meta).toBeDefined();
+  });
+
+  it('filters by operator_id', async () => {
+    const res = await operatorManagementRouter.request('/drivers?operator_id=opr_1', {}, makeEnv(db));
+    const body = await res.json() as any;
+    expect(body.data.every((d: any) => d.operator_id === 'opr_1')).toBe(true);
+  });
+});
+
+describe('Phase 9: PATCH /drivers/:id — Update Driver (TRN-4)', () => {
+  let db: any;
+  beforeEach(() => {
+    db = createMockDB();
+    db._tables.drivers.push({
+      id: 'drv_upd1', operator_id: 'opr_1', name: 'Tunde Badmus', phone: '08055556666',
+      license_number: null, status: 'active', created_at: Date.now(), updated_at: Date.now(), deleted_at: null,
+    });
+  });
+
+  it('updates driver status to suspended', async () => {
+    const res = await operatorManagementRouter.request('/drivers/drv_upd1', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'suspended' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.id).toBe('drv_upd1');
+  });
+
+  it('returns 404 for unknown driver', async () => {
+    const res = await operatorManagementRouter.request('/drivers/drv_ghost', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'suspended' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(404);
+    const body = await res.json() as any;
+    expect(body.error).toMatch(/driver not found/i);
+  });
+});
+
+describe('Phase 9: PATCH /trips/:id with driver_id — Assign Driver (TRN-4)', () => {
+  let db: any;
+  beforeEach(() => {
+    db = createMockDB();
+    db._tables.trips.push({
+      id: 'trp_d1', operator_id: 'opr_1', route_id: 'rte_1', vehicle_id: 'veh_1',
+      driver_id: null, state: 'scheduled', departure_time: Date.now() + 3600_000,
+      deleted_at: null, created_at: Date.now(), updated_at: Date.now(),
+    });
+    db._tables.drivers.push({
+      id: 'drv_a1', operator_id: 'opr_1', name: 'Felix Chukwu', phone: '08066667777',
+      license_number: 'FC-001', status: 'active', created_at: Date.now(), updated_at: Date.now(), deleted_at: null,
+    });
+  });
+
+  it('assigns driver_id to an existing trip', async () => {
+    const res = await operatorManagementRouter.request('/trips/trp_d1', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ driver_id: 'drv_a1' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.id).toBe('trp_d1');
+  });
+
+  it('returns 404 when trip does not exist', async () => {
+    const res = await operatorManagementRouter.request('/trips/trp_ghost_d', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ driver_id: 'drv_a1' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('Phase 9: GET /trips/:id/manifest — driver field present', () => {
+  let db: any;
+  beforeEach(() => {
+    db = createMockDB();
+    db._tables.trips.push({
+      id: 'trp_dm1', operator_id: 'opr_1', route_id: 'rte_dm1', driver_id: 'drv_dm1',
+      state: 'boarding', departure_time: Date.now() + 900_000, deleted_at: null,
+      created_at: Date.now(), updated_at: Date.now(),
+    });
+    db._tables.routes.push({
+      id: 'rte_dm1', operator_id: 'opr_1', origin: 'Kano', destination: 'Kaduna',
+      base_fare: 300000, status: 'active', deleted_at: null, created_at: Date.now(), updated_at: Date.now(),
+    });
+    db._tables.seats.push(
+      { id: 'trp_dm1_s1', trip_id: 'trp_dm1', seat_number: '01', status: 'available', version: 0 },
+    );
+    db._tables.drivers.push({
+      id: 'drv_dm1', operator_id: 'opr_1', name: 'Abubakar Suleiman', phone: '08077778888',
+      license_number: 'KN-2025-007', status: 'active', created_at: Date.now(), updated_at: Date.now(), deleted_at: null,
+    });
+  });
+
+  it('manifest trip includes driver name and phone', async () => {
+    const res = await operatorManagementRouter.request('/trips/trp_dm1/manifest', {}, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.data.trip.driver).not.toBeNull();
+    expect(body.data.trip.driver.name).toBe('Abubakar Suleiman');
+    expect(body.data.trip.driver.phone).toBe('08077778888');
+    expect(body.data.trip.driver.license_number).toBe('KN-2025-007');
+  });
+
+  it('manifest trip driver is null when no driver assigned', async () => {
+    db._tables.trips[0].driver_id = null;
+    const res = await operatorManagementRouter.request('/trips/trp_dm1/manifest', {}, makeEnv(db));
+    const body = await res.json() as any;
+    expect(body.data.trip.driver).toBeNull();
   });
 });
 

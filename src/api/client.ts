@@ -88,6 +88,7 @@ export interface TripManifest {
     destination: string;
     base_fare: number;
     total_seats: number;
+    driver: { id: string; name: string; phone: string; license_number: string | null } | null;
   };
   passengers: ManifestEntry[];
   summary: {
@@ -96,6 +97,16 @@ export interface TripManifest {
     load_factor: number;
     confirmed_revenue_kobo: number;
   };
+}
+
+export interface Driver {
+  id: string;
+  operator_id: string;
+  name: string;
+  phone: string;
+  license_number: string | null;
+  status: string;
+  created_at: number;
 }
 
 export interface Route {
@@ -124,6 +135,7 @@ export interface Trip {
   route_id: string;
   state: string;
   departure_time: number;
+  driver_id?: string | null;
   origin?: string;
   destination?: string;
   base_fare?: number;
@@ -412,6 +424,26 @@ export class ApiClient {
 
   async deleteTrip(tripId: string): Promise<void> {
     await this.request('DELETE', `/api/operator/trips/${tripId}`);
+  }
+
+  async updateTrip(tripId: string, data: { vehicle_id?: string; departure_time?: number; driver_id?: string | null }): Promise<void> {
+    await this.request('PATCH', `/api/operator/trips/${tripId}`, data);
+  }
+
+  async createDriver(data: { operator_id: string; name: string; phone: string; license_number?: string }): Promise<Driver> {
+    return this.request<Driver>('POST', '/api/operator/drivers', data);
+  }
+
+  async getDrivers(params?: { operator_id?: string; status?: string }): Promise<Driver[]> {
+    const q = new URLSearchParams();
+    if (params?.operator_id) q.set('operator_id', params.operator_id);
+    if (params?.status) q.set('status', params.status);
+    const qs = q.toString() ? `?${q.toString()}` : '';
+    return this.request<Driver[]>('GET', `/api/operator/drivers${qs}`);
+  }
+
+  async updateDriver(driverId: string, data: { name?: string; phone?: string; license_number?: string; status?: string }): Promise<void> {
+    await this.request('PATCH', `/api/operator/drivers/${driverId}`, data);
   }
 }
 

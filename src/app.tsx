@@ -10,7 +10,7 @@ import { AuthProvider, useAuth, type WakaRole } from './core/auth/context';
 import { LoginScreen } from './components/login-screen';
 import { BookingFlow } from './components/booking-flow';
 import { api, ApiError } from './api/client';
-import type { TripSummary, Route, Vehicle, Trip, OperatorStats, Booking, SeatAvailability, TripManifest, ManifestEntry } from './api/client';
+import type { TripSummary, Route, Vehicle, Trip, OperatorStats, Booking, SeatAvailability, TripManifest, ManifestEntry, Driver } from './api/client';
 
 // ============================================================
 // Error Boundary
@@ -363,7 +363,7 @@ function AgentPOSModule({ online }: { online: boolean }) {
 // ============================================================
 // Operator Dashboard Module (TRN-4) — Routes, Vehicles, Trips
 // ============================================================
-type OperatorView = 'overview' | 'routes' | 'vehicles' | 'trips';
+type OperatorView = 'overview' | 'routes' | 'vehicles' | 'trips' | 'drivers';
 
 function OperatorOverview({ onNav }: { onNav: (v: OperatorView) => void }) {
   const [stats, setStats] = useState<OperatorStats | null>(null);
@@ -415,9 +415,13 @@ function OperatorOverview({ onNav }: { onNav: (v: OperatorView) => void }) {
               <span style={{ fontSize: 24 }}>🚌</span>
               <span style={{ fontSize: 13, fontWeight: 600, marginTop: 4 }}>{t('manage_vehicles')}</span>
             </button>
-            <button onClick={() => onNav('trips')} style={{ ...navCardStyle, gridColumn: 'span 2' }}>
+            <button onClick={() => onNav('trips')} style={navCardStyle}>
               <span style={{ fontSize: 24 }}>📋</span>
               <span style={{ fontSize: 13, fontWeight: 600, marginTop: 4 }}>Manage Trips</span>
+            </button>
+            <button onClick={() => onNav('drivers')} style={navCardStyle}>
+              <span style={{ fontSize: 24 }}>🧑‍✈️</span>
+              <span style={{ fontSize: 13, fontWeight: 600, marginTop: 4 }}>Manage Drivers</span>
             </button>
           </div>
         </>
@@ -624,12 +628,14 @@ function VehiclesPanel({ onBack }: { onBack: () => void }) {
 }
 
 function TripsPanel({ onBack }: { onBack: () => void }) {
+  const { user } = useAuth();
   const [trips, setTrips] = useState<Trip[]>([]);
   const [loading, setLoading] = useState(true);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [routes, setRoutes] = useState<Route[]>([]);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
+  const [drivers, setDrivers] = useState<Driver[]>([]);
   const [createForm, setCreateForm] = useState({ route_id: '', vehicle_id: '', departure_time: '', base_fare: '', total_seats: '' });
   const [saving, setSaving] = useState(false);
   const [createError, setCreateError] = useState('');
@@ -653,9 +659,14 @@ function TripsPanel({ onBack }: { onBack: () => void }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setTrips(await api.getOperatorTrips());
+      const [tripsData, driversData] = await Promise.all([
+        api.getOperatorTrips(),
+        api.getDrivers(user?.operator_id ? { operator_id: user.operator_id } : {}),
+      ]);
+      setTrips(tripsData);
+      setDrivers(driversData.filter(d => d.status === 'active'));
     } catch { setTrips([]); } finally { setLoading(false); }
-  }, []);
+  }, [user?.operator_id]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -666,6 +677,14 @@ function TripsPanel({ onBack }: { onBack: () => void }) {
       .then(([r, v]) => { setRoutes(r); setVehicles(v); })
       .catch(() => {});
   }, [showForm]);
+
+  const assignDriver = async (tripId: string, driverId: string) => {
+    setUpdatingId(tripId);
+    try {
+      await api.updateTrip(tripId, { driver_id: driverId || null });
+      await load();
+    } catch { /* ignore */ } finally { setUpdatingId(null); }
+  };
 
   // Auto-fill base_fare when route changes
   const handleRouteChange = (routeId: string) => {
@@ -821,6 +840,19 @@ function TripsPanel({ onBack }: { onBack: () => void }) {
                 {trip.available_seats ?? '—'} available
                 {trip.base_fare != null && ` · ${formatKoboToNaira(trip.base_fare)}`}
               </div>
+              {drivers.length > 0 && (
+                <select
+                  value={trip.driver_id ?? ''}
+                  disabled={updatingId === trip.id}
+                  onChange={e => void assignDriver(trip.id, e.target.value)}
+                  style={{ ...inputStyle, marginTop: 8, fontSize: 12 }}
+                >
+                  <option value="">— Assign Driver —</option>
+                  {drivers.map(d => (
+                    <option key={d.id} value={d.id}>{d.name} · {d.phone}</option>
+                  ))}
+                </select>
+              )}
               {possibleNext.length > 0 && (
                 <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
                   {possibleNext.map(ns => (
@@ -872,10 +904,16 @@ function TripsPanel({ onBack }: { onBack: () => void }) {
 }
 
 function ManifestPanel({ manifest }: { manifest: TripManifest }) {
-  const { summary, passengers } = manifest;
+  const { summary, passengers, trip } = manifest;
   const payColors: Record<string, string> = { paid: '#16a34a', pending: '#d97706', refunded: '#6366f1' };
   return (
     <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: 10 }}>
+      {trip.driver && (
+        <div style={{ fontSize: 12, color: '#475569', background: '#f1f5f9', borderRadius: 6, padding: '6px 10px', marginBottom: 8 }}>
+          <strong>Driver:</strong> {trip.driver.name} · {trip.driver.phone}
+          {trip.driver.license_number && <span style={{ color: '#64748b' }}> · {trip.driver.license_number}</span>}
+        </div>
+      )}
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 10, fontSize: 12 }}>
         <span style={{ color: '#64748b' }}>
           <strong>{summary.total_bookings}</strong> booked / <strong>{summary.total_seats}</strong> seats
@@ -919,6 +957,121 @@ function ManifestPanel({ manifest }: { manifest: TripManifest }) {
   );
 }
 
+// ============================================================
+// Drivers Panel (TRN-4)
+// ============================================================
+function DriversPanel({ onBack }: { onBack: () => void }) {
+  const { user } = useAuth();
+  const [drivers, setDrivers] = useState<Driver[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ name: '', phone: '', license_number: '', operator_id: user?.operator_id ?? '' });
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState('');
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await api.getDrivers(user?.operator_id ? { operator_id: user.operator_id } : {});
+      setDrivers(data);
+    } catch { setDrivers([]); } finally { setLoading(false); }
+  }, [user?.operator_id]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const handleCreate = async () => {
+    if (!form.name || !form.phone) { setFormError('Name and phone are required'); return; }
+    const operatorId = (form.operator_id || user?.operator_id) ?? '';
+    if (!operatorId) { setFormError('Operator ID required'); return; }
+    setSaving(true); setFormError('');
+    try {
+      await api.createDriver({
+        operator_id: operatorId,
+        name: form.name,
+        phone: form.phone,
+        ...(form.license_number ? { license_number: form.license_number } : {}),
+      });
+      setShowForm(false);
+      setForm({ name: '', phone: '', license_number: '', operator_id: user?.operator_id ?? '' });
+      await load();
+    } catch (e) {
+      setFormError(e instanceof ApiError ? e.message : 'Failed to create driver');
+    } finally { setSaving(false); }
+  };
+
+  const toggleStatus = async (driver: Driver) => {
+    const newStatus = driver.status === 'active' ? 'suspended' : 'active';
+    try {
+      await api.updateDriver(driver.id, { status: newStatus });
+      await load();
+    } catch { /* ignore */ }
+  };
+
+  const statusColors: Record<string, string> = { active: '#16a34a', suspended: '#dc2626', inactive: '#64748b' };
+
+  return (
+    <>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+        <button onClick={onBack} style={backBtnStyle}>←</button>
+        <h2 style={{ margin: 0, fontSize: 18, flex: 1 }}>Manage Drivers</h2>
+        <button onClick={() => void load()} style={{ ...secondaryBtnStyle, padding: '8px 14px', fontSize: 13 }}>↻</button>
+        <button onClick={() => setShowForm(s => !s)} style={{ ...primaryBtnStyle, padding: '8px 14px', fontSize: 13 }}>
+          {showForm ? 'Cancel' : '+ Add'}
+        </button>
+      </div>
+
+      {showForm && (
+        <div style={{ ...cardStyle, marginBottom: 16, cursor: 'default' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <input placeholder="Full name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} style={inputStyle} />
+            <input placeholder="Phone number" value={form.phone} onChange={e => setForm(f => ({ ...f, phone: e.target.value }))} style={inputStyle} />
+            <input placeholder="License number (optional)" value={form.license_number} onChange={e => setForm(f => ({ ...f, license_number: e.target.value }))} style={inputStyle} />
+            {!user?.operator_id && (
+              <input placeholder="Operator ID" value={form.operator_id} onChange={e => setForm(f => ({ ...f, operator_id: e.target.value }))} style={inputStyle} />
+            )}
+            {formError && <p style={{ color: '#dc2626', fontSize: 12, margin: 0 }}>{formError}</p>}
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={handleCreate} disabled={saving} style={{ ...primaryBtnStyle, flex: 1 }}>
+                {saving ? 'Saving…' : 'Create Driver'}
+              </button>
+              <button onClick={() => { setShowForm(false); setFormError(''); }} style={{ ...secondaryBtnStyle, flex: 1 }}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <p style={{ color: '#94a3b8', textAlign: 'center' }}>{t('loading')}</p>
+      ) : drivers.length === 0 ? (
+        <p style={{ color: '#94a3b8', textAlign: 'center', marginTop: 32 }}>No drivers yet. Add one to get started.</p>
+      ) : (
+        drivers.map(d => (
+          <div key={d.id} style={{ ...cardStyle, cursor: 'default', marginBottom: 10 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+              <div>
+                <div style={{ fontWeight: 700 }}>{d.name}</div>
+                <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>{d.phone}</div>
+                {d.license_number && <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 1 }}>🪪 {d.license_number}</div>}
+              </div>
+              <span style={{
+                fontSize: 11, fontWeight: 700, padding: '3px 9px', borderRadius: 12,
+                background: `${statusColors[d.status] ?? '#64748b'}20`,
+                color: statusColors[d.status] ?? '#64748b',
+              }}>{d.status}</span>
+            </div>
+            <button
+              onClick={() => void toggleStatus(d)}
+              style={{ ...secondaryBtnStyle, marginTop: 10, width: '100%', fontSize: 12 }}
+            >
+              {d.status === 'active' ? 'Suspend' : 'Reactivate'}
+            </button>
+          </div>
+        ))
+      )}
+    </>
+  );
+}
+
 function OperatorDashboardModule() {
   const [view, setView] = useState<OperatorView>('overview');
 
@@ -928,6 +1081,7 @@ function OperatorDashboardModule() {
       {view === 'routes' && <RoutesPanel onBack={() => setView('overview')} />}
       {view === 'vehicles' && <VehiclesPanel onBack={() => setView('overview')} />}
       {view === 'trips' && <TripsPanel onBack={() => setView('overview')} />}
+      {view === 'drivers' && <DriversPanel onBack={() => setView('overview')} />}
     </div>
   );
 }

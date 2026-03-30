@@ -5,7 +5,7 @@
  */
 import { Hono } from 'hono';
 import { requireRole } from '@webwaka/core';
-import type { AppContext, DbOperator, DbRoute, DbVehicle, DbTrip } from './types';
+import type { AppContext, DbOperator, DbRoute, DbVehicle, DbTrip, DbDriver } from './types';
 import { genId, parsePagination, metaResponse, requireFields, applyTenantScope } from './types';
 
 export const operatorManagementRouter = new Hono<AppContext>();
@@ -379,17 +379,18 @@ operatorManagementRouter.patch('/trips/:id', requireRole(['SUPER_ADMIN', 'TENANT
     ).bind(id).first<DbTrip>();
     if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
 
-    const { vehicle_id, departure_time } = body as {
-      vehicle_id?: string; departure_time?: number;
+    const { vehicle_id, departure_time, driver_id } = body as {
+      vehicle_id?: string; departure_time?: number; driver_id?: string | null;
     };
 
     await db.prepare(
       `UPDATE trips
        SET vehicle_id = COALESCE(?, vehicle_id),
            departure_time = COALESCE(?, departure_time),
+           driver_id = COALESCE(?, driver_id),
            updated_at = ?
        WHERE id = ?`
-    ).bind(vehicle_id ?? null, departure_time ?? null, now, id).run();
+    ).bind(vehicle_id ?? null, departure_time ?? null, driver_id ?? null, now, id).run();
 
     return c.json({ success: true, data: { id, updated_at: now } });
   } catch {
@@ -522,11 +523,11 @@ operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 
 
   try {
     const trip = await db.prepare(
-      `SELECT id, operator_id, route_id, state, departure_time FROM trips WHERE id = ? AND deleted_at IS NULL`
-    ).bind(id).first<{ id: string; operator_id: string; route_id: string; state: string; departure_time: number }>();
+      `SELECT id, operator_id, route_id, driver_id, state, departure_time FROM trips WHERE id = ? AND deleted_at IS NULL`
+    ).bind(id).first<{ id: string; operator_id: string; route_id: string; driver_id: string | null; state: string; departure_time: number }>();
     if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
 
-    const [routeRow, bookingsResult, seatsResult] = await Promise.all([
+    const [routeRow, bookingsResult, seatsResult, driverRow] = await Promise.all([
       db.prepare(
         `SELECT origin, destination, base_fare FROM routes WHERE id = ?`
       ).bind(trip.route_id).first<{ origin: string; destination: string; base_fare: number }>(),
@@ -538,6 +539,10 @@ operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 
       db.prepare(
         `SELECT id FROM seats WHERE trip_id = ?`
       ).bind(id).all<{ id: string }>(),
+      trip.driver_id
+        ? db.prepare(`SELECT id, name, phone, license_number FROM drivers WHERE id = ?`)
+            .bind(trip.driver_id).first<{ id: string; name: string; phone: string; license_number: string | null }>()
+        : Promise.resolve(null),
     ]);
 
     // Fetch customer details per booking (small list — boarding manifest scenario)
@@ -584,6 +589,9 @@ operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 
           destination: routeRow?.destination ?? '',
           base_fare: routeRow?.base_fare ?? 0,
           total_seats: seatsResult.results.length,
+          driver: driverRow
+            ? { id: driverRow.id, name: driverRow.name, phone: driverRow.phone, license_number: driverRow.license_number }
+            : null,
         },
         passengers,
         summary: {
@@ -598,6 +606,97 @@ operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 
     });
   } catch {
     return c.json({ success: false, error: 'Failed to fetch trip manifest' }, 500);
+  }
+});
+
+// ============================================================
+// Driver Management — TRN-4
+// ============================================================
+
+operatorManagementRouter.post('/drivers', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+  const body = await c.req.json<Record<string, unknown>>();
+  const db = c.env.DB;
+  const now = Date.now();
+
+  const missingErr = requireFields(body, ['operator_id', 'name', 'phone']);
+  if (missingErr) return c.json({ success: false, error: missingErr }, 400);
+
+  const { operator_id, name, phone, license_number } = body as {
+    operator_id: string; name: string; phone: string; license_number?: string;
+  };
+
+  const id = genId('drv');
+
+  try {
+    await db.prepare(
+      `INSERT INTO drivers (id, operator_id, name, phone, license_number, status, created_at, updated_at, deleted_at)
+       VALUES (?, ?, ?, ?, ?, 'active', ?, ?, NULL)`
+    ).bind(id, operator_id, name, phone, license_number ?? null, now, now).run();
+
+    return c.json({ success: true, data: { id, operator_id, name, phone, license_number: license_number ?? null, status: 'active', created_at: now } }, 201);
+  } catch {
+    return c.json({ success: false, error: 'Failed to create driver' }, 500);
+  }
+});
+
+operatorManagementRouter.get('/drivers', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
+  const q = c.req.query();
+  const db = c.env.DB;
+  const { limit, offset } = parsePagination(q);
+
+  let query = `SELECT * FROM drivers WHERE deleted_at IS NULL`;
+  const params: unknown[] = [];
+
+  const scoped = applyTenantScope(c, query, params);
+  query = scoped.query;
+  const scopedParams = scoped.params;
+
+  if (q['operator_id'] && !scopedParams.includes(q['operator_id'])) {
+    query += ` AND operator_id = ?`;
+    scopedParams.push(q['operator_id']);
+  }
+  if (q['status']) { query += ` AND status = ?`; scopedParams.push(q['status']); }
+
+  query += ` ORDER BY name ASC LIMIT ? OFFSET ?`;
+  scopedParams.push(limit, offset);
+
+  try {
+    const result = await db.prepare(query).bind(...scopedParams).all<DbDriver>();
+    return c.json({ success: true, data: result.results, meta: metaResponse(result.results.length, limit, offset) });
+  } catch {
+    return c.json({ success: false, error: 'Failed to list drivers' }, 500);
+  }
+});
+
+operatorManagementRouter.patch('/drivers/:id', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+  const id = c.req.param('id');
+  const body = await c.req.json<Record<string, unknown>>();
+  const db = c.env.DB;
+  const now = Date.now();
+
+  try {
+    const driver = await db.prepare(
+      `SELECT * FROM drivers WHERE id = ? AND deleted_at IS NULL`
+    ).bind(id).first<DbDriver>();
+    if (!driver) return c.json({ success: false, error: 'Driver not found' }, 404);
+
+    const { name, phone, license_number, status } = body as {
+      name?: string; phone?: string; license_number?: string; status?: string;
+    };
+
+    await db.prepare(
+      `UPDATE drivers
+       SET name = COALESCE(?, name),
+           phone = COALESCE(?, phone),
+           license_number = COALESCE(?, license_number),
+           status = COALESCE(?, status),
+           updated_at = ?
+       WHERE id = ?`
+    ).bind(name ?? null, phone ?? null, license_number ?? null, status ?? null, now, id).run();
+
+    return c.json({ success: true, data: { id, updated_at: now } });
+  } catch {
+    return c.json({ success: false, error: 'Failed to update driver' }, 500);
   }
 });
 
