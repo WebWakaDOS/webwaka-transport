@@ -7,6 +7,7 @@ import { seatInventoryRouter } from './seat-inventory';
 import { agentSalesRouter } from './agent-sales';
 import { bookingPortalRouter } from './booking-portal';
 import { operatorManagementRouter } from './operator-management';
+import { paymentsRouter } from './payments';
 
 // ============================================================
 // Mock D1 Database
@@ -1024,5 +1025,163 @@ describe('Phase 2: Input validation and error handling', () => {
     expect(res.status).toBe(404);
     const body = await res.json() as any;
     expect(body.success).toBe(false);
+  });
+});
+
+// ============================================================
+// Paystack Payments API Tests
+// ============================================================
+describe('Paystack Payments API', () => {
+  let db: any;
+  beforeEach(() => { db = createMockDB(); });
+
+  it('POST /initiate returns 400 when booking_id is missing', async () => {
+    const res = await paymentsRouter.request('/initiate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }, makeEnv(db));
+    expect(res.status).toBe(400);
+    const body = await res.json() as any;
+    expect(body.success).toBe(false);
+    expect(body.error).toMatch(/booking_id/i);
+  });
+
+  it('POST /initiate returns 404 for unknown booking', async () => {
+    const res = await paymentsRouter.request('/initiate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ booking_id: 'bkg_notexist', email: 'x@pay.webwaka.ng' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(404);
+    const body = await res.json() as any;
+    expect(body.success).toBe(false);
+  });
+
+  it('POST /initiate returns dev_mode=true when PAYSTACK_SECRET is unset', async () => {
+    // Seed a pending booking
+    db._tables.bookings.push({
+      id: 'bkg_dev1', customer_id: 'cus_1', trip_id: 'trp_1',
+      seat_ids: '["seat_1"]', passenger_names: '["Ada"]',
+      total_amount: 500000, status: 'pending', payment_status: 'pending',
+      payment_method: 'paystack', payment_reference: '', payment_provider: null,
+      created_at: Date.now(), updated_at: Date.now(), confirmed_at: null,
+      cancelled_at: null, deleted_at: null, paid_at: null,
+    });
+
+    const res = await paymentsRouter.request('/initiate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ booking_id: 'bkg_dev1', email: 'ada@pay.webwaka.ng' }),
+    }, makeEnv(db)); // no PAYSTACK_SECRET → dev mode
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.dev_mode).toBe(true);
+    expect(body.data.authorization_url).toBeNull();
+    expect(body.data.reference).toBe('bkg_dev1');
+  });
+
+  it('POST /initiate returns 409 for already confirmed booking', async () => {
+    db._tables.bookings.push({
+      id: 'bkg_conf1', customer_id: 'cus_1', trip_id: 'trp_1',
+      seat_ids: '["seat_1"]', total_amount: 250000, status: 'confirmed',
+      payment_method: 'paystack', payment_reference: 'waka_ref', payment_provider: 'paystack',
+      created_at: Date.now(), deleted_at: null, paid_at: Date.now(),
+    });
+    const res = await paymentsRouter.request('/initiate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ booking_id: 'bkg_conf1' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(409);
+    const body = await res.json() as any;
+    expect(body.success).toBe(false);
+    expect(body.error).toMatch(/already confirmed/i);
+  });
+
+  it('POST /verify returns 400 when neither reference nor booking_id provided', async () => {
+    const res = await paymentsRouter.request('/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }, makeEnv(db));
+    expect(res.status).toBe(400);
+    const body = await res.json() as any;
+    expect(body.success).toBe(false);
+  });
+
+  it('POST /verify returns 404 for unknown booking', async () => {
+    const res = await paymentsRouter.request('/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ booking_id: 'bkg_ghost' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(404);
+  });
+
+  it('POST /verify auto-confirms booking in dev mode', async () => {
+    db._tables.bookings.push({
+      id: 'bkg_dev2', customer_id: 'cus_1', trip_id: 'trp_1',
+      seat_ids: '["seat_2"]', total_amount: 300000, status: 'pending',
+      payment_status: 'pending', payment_method: 'paystack', payment_reference: 'bkg_dev2',
+      payment_provider: null, created_at: Date.now(), deleted_at: null, paid_at: null,
+    });
+    db._tables.seats.push({
+      id: 'seat_2', trip_id: 'trp_1', status: 'reserved',
+      created_at: Date.now(), updated_at: Date.now(),
+    });
+
+    const res = await paymentsRouter.request('/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ booking_id: 'bkg_dev2' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.status).toBe('dev_confirmed');
+    expect(body.data.booking_status).toBe('confirmed');
+
+    // Verify DB was updated
+    const booking = db._tables.bookings.find((b: any) => b.id === 'bkg_dev2');
+    expect(booking?.status).toBe('confirmed');
+    const seat = db._tables.seats.find((s: any) => s.id === 'seat_2');
+    expect(seat?.status).toBe('confirmed');
+  });
+
+  it('POST /verify returns already_confirmed for confirmed booking', async () => {
+    db._tables.bookings.push({
+      id: 'bkg_alr1', customer_id: 'cus_1', trip_id: 'trp_1',
+      seat_ids: '["seat_3"]', total_amount: 250000, status: 'confirmed',
+      payment_method: 'paystack', payment_reference: 'ref_alr1', payment_provider: 'paystack',
+      created_at: Date.now(), deleted_at: null, paid_at: Date.now(),
+    });
+    const res = await paymentsRouter.request('/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ booking_id: 'bkg_alr1' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.data.status).toBe('already_confirmed');
+  });
+
+  it('POST /verify returns 409 for cancelled booking', async () => {
+    db._tables.bookings.push({
+      id: 'bkg_can1', customer_id: 'cus_1', trip_id: 'trp_1',
+      seat_ids: '["seat_4"]', total_amount: 200000, status: 'cancelled',
+      payment_method: 'paystack', payment_reference: '', payment_provider: null,
+      created_at: Date.now(), deleted_at: null, paid_at: null,
+    });
+    const res = await paymentsRouter.request('/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ booking_id: 'bkg_can1' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(409);
+    const body = await res.json() as any;
+    expect(body.success).toBe(false);
+    expect(body.error).toMatch(/cancelled/i);
   });
 });

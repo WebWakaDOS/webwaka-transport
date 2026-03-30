@@ -33,6 +33,7 @@ import { bookingPortalRouter } from './api/booking-portal.js';
 import { operatorManagementRouter } from './api/operator-management.js';
 import { adminRouter } from './api/admin.js';
 import { authRouter } from './api/auth.js';
+import { paymentsRouter, hmacSha512 } from './api/payments.js';
 import { jwtAuthMiddleware, requireTenantMiddleware } from './middleware/auth.js';
 
 export interface Env {
@@ -87,6 +88,13 @@ app.route('/api/auth', authRouter);
 app.use('/api/*', jwtAuthMiddleware);
 
 // ============================================================
+// Payments router — mounted BEFORE requireTenantMiddleware.
+// CUSTOMER users (role='CUSTOMER', no operatorId) need access to
+// initiate and verify their own payments.
+// ============================================================
+app.route('/api/payments', paymentsRouter);
+
+// ============================================================
 // Multi-Tenant enforcement — operator_id scoping
 // ============================================================
 app.use('/api/*', requireTenantMiddleware);
@@ -98,6 +106,63 @@ app.route('/api/seat-inventory', seatInventoryRouter);
 app.route('/api/agent-sales', agentSalesRouter);
 app.route('/api/booking', bookingPortalRouter);
 app.route('/api/operator', operatorManagementRouter);
+
+// ============================================================
+// Paystack webhook — PUBLIC (HMAC-SHA512 verified internally)
+// POST /webhooks/paystack — handles charge.success → confirm booking
+// ============================================================
+app.post('/webhooks/paystack', async (c) => {
+  const signature = c.req.header('x-paystack-signature');
+  let rawBody: string;
+  try { rawBody = await c.req.text(); }
+  catch { return c.json({ success: false, error: 'Failed to read body' }, 400); }
+
+  if (!c.env.PAYSTACK_SECRET) {
+    return c.json({ success: false, error: 'Paystack not configured' }, 503);
+  }
+
+  const computed = await hmacSha512(rawBody, c.env.PAYSTACK_SECRET);
+  if (!signature || computed !== signature) {
+    return c.json({ success: false, error: 'Invalid signature' }, 401);
+  }
+
+  let event: { event: string; data: Record<string, unknown> };
+  try { event = JSON.parse(rawBody) as typeof event; }
+  catch { return c.json({ success: false, error: 'Invalid JSON' }, 400); }
+
+  if (event.event === 'charge.success') {
+    const reference = event.data['reference'] as string | undefined;
+    if (reference) {
+      const db = c.env.DB;
+      const now = Date.now();
+
+      const booking = await db.prepare(
+        `SELECT id, status, seat_ids FROM bookings
+         WHERE (payment_reference = ? OR id = ?) AND deleted_at IS NULL LIMIT 1`
+      ).bind(reference, reference).first<{ id: string; status: string; seat_ids: string }>();
+
+      if (booking && booking.status !== 'confirmed' && booking.status !== 'cancelled') {
+        await db.prepare(
+          `UPDATE bookings
+           SET status = 'confirmed', payment_status = 'completed',
+               payment_provider = 'paystack', paid_at = ?, confirmed_at = ?
+           WHERE id = ?`
+        ).bind(now, now, booking.id).run();
+
+        const seatIds = JSON.parse(booking.seat_ids) as string[];
+        for (const seatId of seatIds) {
+          await db.prepare(
+            `UPDATE seats SET status = 'confirmed', confirmed_at = ?, updated_at = ? WHERE id = ?`
+          ).bind(now, now, seatId).run();
+        }
+
+        console.log(`[webhook/paystack] charge.success — confirmed booking ${booking.id}`);
+      }
+    }
+  }
+
+  return c.json({ success: true });
+});
 
 // ============================================================
 // Internal admin — migration runner

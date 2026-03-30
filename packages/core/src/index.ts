@@ -358,6 +358,15 @@ export function requireTenant() {
       return;
     }
 
+    // CUSTOMER users have no operatorId — they access cross-tenant booking
+    // endpoints scoped by their own customer_id. Set tenant_id = null and
+    // let individual route handlers apply customer-level scoping.
+    if (user.role === 'CUSTOMER') {
+      c.set('tenant_id', null);
+      await next();
+      return;
+    }
+
     if (!user.operatorId) {
       return c.json(
         { success: false, error: 'No operator associated with this user', code: 'NO_TENANT' },

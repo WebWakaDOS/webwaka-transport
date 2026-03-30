@@ -258,6 +258,28 @@ export class ApiClient {
     await this.request('PATCH', `/api/booking/bookings/${bookingId}/cancel`, {});
   }
 
+  // ============================================================
+  // Paystack payment integration
+  // ============================================================
+
+  async initiatePayment(bookingId: string, email: string): Promise<{
+    dev_mode: boolean;
+    reference: string;
+    authorization_url: string | null;
+    access_code: string | null;
+    message?: string;
+  }> {
+    return this.request('POST', '/api/payments/initiate', { booking_id: bookingId, email });
+  }
+
+  async verifyPayment(opts: { reference?: string; booking_id?: string }): Promise<{
+    status: string;
+    booking_id: string;
+    booking_status: string;
+  }> {
+    return this.request('POST', '/api/payments/verify', opts);
+  }
+
   async getBookings(params?: { customer_id?: string; status?: string }): Promise<Booking[]> {
     const q = params ? new URLSearchParams(
       Object.fromEntries(Object.entries(params).filter(([, v]) => v))

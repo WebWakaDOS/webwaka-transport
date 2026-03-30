@@ -8,6 +8,7 @@ import { SeatMap } from './seat-map';
 import { api, ApiError } from '../api/client';
 import type { TripSummary, Booking } from '../api/client';
 import { formatKoboToNaira } from '../core/i18n/index';
+import { useAuth } from '../core/auth/context';
 
 type Step = 'seats' | 'customer' | 'confirm' | 'ticket';
 
@@ -195,7 +196,13 @@ function StepCustomer({ onNext, onBack }: {
 
 // ============================================================
 // Step 4: Payment method + booking confirmation
+// Phase 1: Choose method + click Pay → createBooking → initiatePayment
+//   • dev mode / non-paystack method: auto-verifies → ticket
+//   • prod + paystack: opens authorization_url, shows "I've paid" button
+// Phase 2: "I've completed payment" → verifyPayment → ticket
 // ============================================================
+type AwaitingPayment = { reference: string; bookingId: string; booking: Booking };
+
 function StepConfirm({ trip, selectedSeats, customerId, passengerNames, onSuccess, onBack }: {
   trip: TripSummary;
   selectedSeats: string[];
@@ -204,14 +211,22 @@ function StepConfirm({ trip, selectedSeats, customerId, passengerNames, onSucces
   onSuccess: (booking: Booking) => void;
   onBack: () => void;
 }) {
+  const { user } = useAuth();
   const [paymentMethod, setPaymentMethod] = useState('paystack');
-  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [awaiting, setAwaiting] = useState<AwaitingPayment | null>(null);
 
   const totalKobo = trip.base_fare * selectedSeats.length;
 
-  const handleConfirm = async () => {
-    setConfirming(true);
+  // Derive a payment email from the user's phone (Paystack requires email)
+  const payEmail = user?.phone
+    ? `${user.phone.replace(/\D/g, '')}@pay.webwaka.ng`
+    : `booking@pay.webwaka.ng`;
+
+  /** Phase 1: create booking → initiate payment */
+  const handlePay = async () => {
+    setBusy(true);
     setError('');
     try {
       const booking = await api.createBooking({
@@ -223,26 +238,113 @@ function StepConfirm({ trip, selectedSeats, customerId, passengerNames, onSucces
         ndpr_consent: true,
       });
 
-      const confirmed = await api.confirmBooking(booking.id);
+      const init = await api.initiatePayment(booking.id, payEmail);
 
+      // Dev mode or non-Paystack method: skip redirect, auto-verify immediately
+      if (init.dev_mode || paymentMethod !== 'paystack') {
+        const verify = await api.verifyPayment({ booking_id: booking.id });
+        if (verify.booking_status !== 'confirmed') {
+          throw new Error('Payment verification failed — please try again.');
+        }
+        onSuccess({
+          ...booking,
+          status: 'confirmed',
+          payment_status: 'completed',
+          origin: trip.origin,
+          destination: trip.destination,
+          departure_time: trip.departure_time,
+          operator_name: trip.operator_name,
+        });
+        return;
+      }
+
+      // Prod mode: open Paystack checkout in a new tab, show "I've paid" button
+      if (init.authorization_url) {
+        window.open(init.authorization_url, '_blank', 'noopener,noreferrer');
+      }
+      setAwaiting({ reference: init.reference, bookingId: booking.id, booking });
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Booking failed. Please try again.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Phase 2: user returns from Paystack → verify + confirm */
+  const handleVerify = async () => {
+    if (!awaiting) return;
+    setBusy(true);
+    setError('');
+    try {
+      const verify = await api.verifyPayment({ reference: awaiting.reference });
+      if (verify.booking_status !== 'confirmed') {
+        throw new Error('Payment not yet confirmed. Please complete the payment and try again.');
+      }
       onSuccess({
-        ...booking,
-        status: confirmed.status as 'confirmed',
-        payment_status: confirmed.payment_status,
-        confirmed_at: confirmed.confirmed_at,
+        ...awaiting.booking,
+        status: 'confirmed',
+        payment_status: 'completed',
         origin: trip.origin,
         destination: trip.destination,
         departure_time: trip.departure_time,
         operator_name: trip.operator_name,
-        seat_ids: booking.seat_ids,
       });
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : 'Booking failed. Please try again.');
+      setError(e instanceof ApiError ? e.message : 'Verification failed. Please try again.');
     } finally {
-      setConfirming(false);
+      setBusy(false);
     }
   };
 
+  // ── Awaiting payment phase ───────────────────────────────────
+  if (awaiting) {
+    return (
+      <div style={{ padding: 16 }}>
+        <div style={{
+          textAlign: 'center', padding: '28px 16px 20px',
+          background: '#fffbeb', borderRadius: 16, border: '2px solid #f59e0b', marginBottom: 20,
+        }}>
+          <div style={{ fontSize: 40, marginBottom: 8 }}>🔐</div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: '#92400e', marginBottom: 6 }}>
+            Complete payment on Paystack
+          </div>
+          <div style={{ fontSize: 13, color: '#78350f' }}>
+            A Paystack checkout tab was opened. Complete your payment there, then come back here.
+          </div>
+        </div>
+
+        <div style={{ background: '#f8fafc', borderRadius: 10, padding: '12px 14px', fontSize: 13, color: '#475569', marginBottom: 20 }}>
+          <div><strong>Amount:</strong> {formatKoboToNaira(totalKobo)}</div>
+          <div style={{ marginTop: 4, wordBreak: 'break-all' }}>
+            <strong>Reference:</strong> <code style={{ fontSize: 11 }}>{awaiting.reference}</code>
+          </div>
+        </div>
+
+        {error && (
+          <div style={{ padding: '10px 14px', background: '#fee2e2', borderRadius: 8, color: '#b91c1c', fontSize: 13, marginBottom: 12 }}>
+            {error}
+          </div>
+        )}
+
+        <button
+          onClick={() => void handleVerify()}
+          disabled={busy}
+          style={{ ...primaryBtnStyle, width: '100%', opacity: busy ? 0.6 : 1, marginBottom: 10 }}
+        >
+          {busy ? 'Verifying…' : "I've completed payment"}
+        </button>
+
+        <button
+          onClick={() => window.open(`https://checkout.paystack.com`, '_blank', 'noopener,noreferrer')}
+          style={{ ...primaryBtnStyle, width: '100%', background: '#fff', color: '#2563eb', border: '1.5px solid #2563eb' }}
+        >
+          Re-open Paystack
+        </button>
+      </div>
+    );
+  }
+
+  // ── Payment method selection phase ──────────────────────────
   return (
     <div style={{ padding: 16 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 20 }}>
@@ -301,11 +403,11 @@ function StepConfirm({ trip, selectedSeats, customerId, passengerNames, onSucces
       )}
 
       <button
-        onClick={() => void handleConfirm()}
-        disabled={confirming}
-        style={{ ...primaryBtnStyle, width: '100%', opacity: confirming ? 0.6 : 1 }}
+        onClick={() => void handlePay()}
+        disabled={busy}
+        style={{ ...primaryBtnStyle, width: '100%', opacity: busy ? 0.6 : 1 }}
       >
-        {confirming ? 'Processing…' : `Pay ${formatKoboToNaira(totalKobo)}`}
+        {busy ? 'Processing…' : `Pay ${formatKoboToNaira(totalKobo)}`}
       </button>
 
       <p style={{ fontSize: 11, color: '#94a3b8', textAlign: 'center', marginTop: 10 }}>

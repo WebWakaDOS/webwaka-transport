@@ -118,6 +118,8 @@ export interface DbBooking {
   confirmed_at: number | null;
   cancelled_at: number | null;
   deleted_at: number | null;
+  payment_provider: string | null;
+  paid_at: number | null;
 }
 
 export interface DbCustomer {

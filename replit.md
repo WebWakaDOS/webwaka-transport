@@ -66,6 +66,44 @@ npm run typecheck # TypeScript strict mode check (0 errors required)
 - **Cloudflare-First**: D1, KV, Workers Cron, no Vercel/AWS dependencies
 - **Zero Skipping**: No `|| true` in CI, strict TypeScript (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`)
 
+## Payment Integration Layer (Phase 5 — complete)
+
+### `migrations/005_payment_columns.sql`
+Adds `payment_provider TEXT DEFAULT 'manual'` and `paid_at INTEGER` to the `bookings` table. Adds `idx_bookings_payment_ref` index for fast webhook lookups.
+
+### `src/api/payments.ts` — Paystack payment router
+Mounted at `/api/payments` BEFORE `requireTenantMiddleware` so CUSTOMER users (no operatorId) can access it.
+
+`POST /api/payments/initiate`:
+- Looks up booking; validates status (not confirmed/cancelled)
+- **Dev mode** (no `PAYSTACK_SECRET`): returns `{ dev_mode: true, reference: booking_id, authorization_url: null }` for immediate local testing
+- **Prod mode**: calls `POST https://api.paystack.co/transaction/initialize`; stores reference on booking; returns `authorization_url` + `access_code`
+
+`POST /api/payments/verify`:
+- Lookup by `booking_id` first, then `payment_reference`
+- **Dev mode**: auto-confirms booking + seats atomically without calling Paystack
+- **Prod mode**: calls `GET https://api.paystack.co/transaction/verify/:ref`; validates status=success + amount; confirms booking + seats
+
+`POST /webhooks/paystack` (mounted directly in `worker.ts`, public route):
+- HMAC-SHA512 signature verification using `x-paystack-signature` header
+- Handles `charge.success`: looks up booking by `payment_reference`, confirms atomically
+- 401 on bad signature; 503 when Paystack not configured
+
+### `packages/core/src/index.ts` — CUSTOMER tenant fix
+`requireTenant()` middleware now allows CUSTOMER role to pass through with `tenant_id = null` (same as SUPER_ADMIN but without the X-Tenant-ID override). CUSTOMER endpoints scope by `customer_id` at the handler level. Previously CUSTOMER users got 403 on all `/api/booking/*` routes.
+
+### `src/api/client.ts` — Payment methods
+- `initiatePayment(bookingId, email)` — calls `POST /api/payments/initiate`
+- `verifyPayment({ reference?, booking_id? })` — calls `POST /api/payments/verify`
+
+### `src/components/booking-flow.tsx` — Two-phase payment UX
+`StepConfirm` now has two phases:
+1. **Phase 1** (Pay button): `createBooking` → `initiatePayment` → if dev_mode/non-Paystack: auto-`verifyPayment` → ticket. If prod + Paystack: open `authorization_url` in new tab, show "awaiting" screen with reference code.
+2. **Phase 2** (Awaiting screen): "I've completed payment" button → `verifyPayment({ reference })` → ticket. "Re-open Paystack" link for users who closed the tab. `user.phone` from auth context used to derive payment email (`phone@pay.webwaka.ng`).
+
+### Test coverage
+9 new tests in `describe('Paystack Payments API')` covering: missing params, unknown booking, 409 confirmed/cancelled, dev_mode initiate, dev_mode auto-confirm, already_confirmed idempotency.
+
 ## Authentication Layer (Phase 4 — complete)
 
 ### `src/api/auth.ts` — OTP auth router (backend)
