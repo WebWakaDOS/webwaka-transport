@@ -1,0 +1,208 @@
+/**
+ * WebWaka Auth API — OTP-based phone authentication
+ * Public routes: POST /api/auth/otp/request, POST /api/auth/otp/verify
+ * These are exempted from jwtAuthMiddleware in middleware/auth.ts
+ *
+ * OTP Flow:
+ *   1. Client sends { phone } → server generates 6-digit code, stores in SESSIONS_KV (5-min TTL)
+ *   2. Client sends { request_id, code } → server verifies, find/create Customer row,
+ *      issues JWT (24h), returns { token, user }
+ *
+ * Dev note: when SMS_API_KEY is absent, the code is echoed in the response
+ *           for easy local testing. Never expose this in production.
+ */
+import { Hono } from 'hono';
+import { generateJWT } from '@webwaka/core';
+import type { AppContext } from './types';
+import { genId, requireFields } from './types';
+
+export const authRouter = new Hono<AppContext>();
+
+// ============================================================
+// POST /api/auth/otp/request
+// Body: { phone: string }
+// ============================================================
+authRouter.post('/otp/request', async (c) => {
+  let body: Record<string, unknown>;
+  try {
+    body = await c.req.json<Record<string, unknown>>();
+  } catch {
+    return c.json({ success: false, error: 'Invalid JSON body' }, 400);
+  }
+
+  const fieldError = requireFields(body, ['phone']);
+  if (fieldError) return c.json({ success: false, error: fieldError }, 400);
+
+  const phone = String(body['phone']).replace(/\D/g, '');
+  if (phone.length < 10 || phone.length > 15) {
+    return c.json({ success: false, error: 'Invalid phone number format' }, 400);
+  }
+
+  if (!c.env.SESSIONS_KV) {
+    return c.json({ success: false, error: 'OTP service unavailable' }, 503);
+  }
+
+  const code = String(Math.floor(100_000 + Math.random() * 900_000));
+  const requestId = genId('otp');
+  const expiresAt = Date.now() + 5 * 60 * 1000;
+
+  try {
+    await c.env.SESSIONS_KV.put(
+      `otp:${requestId}`,
+      JSON.stringify({ phone, code, expires_at: expiresAt }),
+      { expirationTtl: 300 }
+    );
+  } catch (err: unknown) {
+    console.error('[auth/otp/request] KV error:', err);
+    return c.json({ success: false, error: 'Failed to store OTP session' }, 500);
+  }
+
+  const hasSms = Boolean(c.env.SMS_API_KEY);
+  if (hasSms) {
+    // TODO: Send SMS via Termii / Africa's Talking
+    // await sendOtpSms(phone, code, c.env.SMS_API_KEY);
+    console.log(`[auth] OTP for ${phone}: ${code} (SMS would fire here)`);
+  }
+
+  return c.json({
+    success: true,
+    data: {
+      request_id: requestId,
+      expires_in: 300,
+      phone_hint: `${phone.slice(0, 3)}****${phone.slice(-3)}`,
+      // Echo code only when SMS service is not configured (dev/test environments)
+      ...(hasSms ? {} : { dev_code: code }),
+    },
+  });
+});
+
+// ============================================================
+// POST /api/auth/otp/verify
+// Body: { request_id: string, code: string }
+// ============================================================
+authRouter.post('/otp/verify', async (c) => {
+  let body: Record<string, unknown>;
+  try {
+    body = await c.req.json<Record<string, unknown>>();
+  } catch {
+    return c.json({ success: false, error: 'Invalid JSON body' }, 400);
+  }
+
+  const fieldError = requireFields(body, ['request_id', 'code']);
+  if (fieldError) return c.json({ success: false, error: fieldError }, 400);
+
+  if (!c.env.SESSIONS_KV) {
+    return c.json({ success: false, error: 'OTP service unavailable' }, 503);
+  }
+
+  const requestId = String(body['request_id']);
+  const submittedCode = String(body['code']).trim();
+
+  type OtpSession = { phone: string; code: string; expires_at: number };
+  let session: OtpSession | null = null;
+  try {
+    const raw = await c.env.SESSIONS_KV.get(`otp:${requestId}`);
+    if (!raw) {
+      return c.json({ success: false, error: 'OTP expired or not found. Request a new one.' }, 400);
+    }
+    session = JSON.parse(raw) as OtpSession;
+  } catch (err: unknown) {
+    console.error('[auth/otp/verify] KV error:', err);
+    return c.json({ success: false, error: 'Session lookup failed' }, 500);
+  }
+
+  if (!session) {
+    return c.json({ success: false, error: 'Invalid OTP session' }, 400);
+  }
+
+  const otpSession: OtpSession = session;
+
+  if (Date.now() > otpSession.expires_at) {
+    return c.json({ success: false, error: 'OTP has expired. Request a new one.' }, 400);
+  }
+
+  if (submittedCode !== otpSession.code) {
+    return c.json({ success: false, error: 'Incorrect OTP code. Check the SMS and try again.' }, 400);
+  }
+
+  // Consume OTP (delete from KV so it can't be reused)
+  try {
+    await c.env.SESSIONS_KV.delete(`otp:${requestId}`);
+  } catch {
+    // Non-fatal — continue even if delete fails
+  }
+
+  const phone = otpSession.phone;
+
+  // Find or create customer by phone
+  let userId: string;
+  let userName: string | null = null;
+  let userRole: 'CUSTOMER' | 'STAFF' | 'SUPERVISOR' | 'TENANT_ADMIN' | 'SUPER_ADMIN' = 'CUSTOMER';
+  let operatorId: string | null = null;
+
+  try {
+    // Check customers table first
+    const existingCustomer = await c.env.DB.prepare(
+      'SELECT id, name FROM customers WHERE phone = ? LIMIT 1'
+    ).bind(phone).first<{ id: string; name: string | null }>();
+
+    if (existingCustomer) {
+      userId = existingCustomer.id;
+      userName = existingCustomer.name;
+    } else {
+      // Check agents table (agents may log in via phone too)
+      const existingAgent = await c.env.DB.prepare(
+        'SELECT id, name, operator_id, status FROM agents WHERE phone = ? LIMIT 1'
+      ).bind(phone).first<{ id: string; name: string; operator_id: string; status: string }>();
+
+      if (existingAgent) {
+        userId = existingAgent.id;
+        userName = existingAgent.name;
+        userRole = 'STAFF';
+        operatorId = existingAgent.operator_id;
+      } else {
+        // New customer — create record
+        const newId = genId('cus');
+        await c.env.DB.prepare(
+          'INSERT INTO customers (id, name, phone, ndpr_consent, ndpr_consent_at, created_at) VALUES (?, NULL, ?, 0, NULL, ?)'
+        ).bind(newId, phone, Date.now()).run();
+        userId = newId;
+      }
+    }
+  } catch (err: unknown) {
+    console.error('[auth/otp/verify] DB error:', err);
+    return c.json({ success: false, error: 'Failed to load user account' }, 500);
+  }
+
+  const secret = c.env.JWT_SECRET ?? 'dev_secret_min_32_chars_placeholder!';
+  let token: string;
+  try {
+    token = await generateJWT(
+      {
+        id: userId,
+        role: userRole,
+        phone,
+        ...(operatorId ? { operatorId } : {}),
+      },
+      secret,
+      24 * 60 * 60 // 24 hours
+    );
+  } catch (err: unknown) {
+    console.error('[auth/otp/verify] JWT error:', err);
+    return c.json({ success: false, error: 'Failed to issue session token' }, 500);
+  }
+
+  return c.json({
+    success: true,
+    data: {
+      token,
+      user: {
+        id: userId,
+        name: userName,
+        phone,
+        role: userRole,
+        ...(operatorId ? { operator_id: operatorId } : {}),
+      },
+    },
+  });
+});

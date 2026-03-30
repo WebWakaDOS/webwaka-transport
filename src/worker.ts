@@ -32,6 +32,7 @@ import { agentSalesRouter } from './api/agent-sales.js';
 import { bookingPortalRouter } from './api/booking-portal.js';
 import { operatorManagementRouter } from './api/operator-management.js';
 import { adminRouter } from './api/admin.js';
+import { authRouter } from './api/auth.js';
 import { jwtAuthMiddleware, requireTenantMiddleware } from './middleware/auth.js';
 
 export interface Env {
@@ -72,6 +73,13 @@ app.get('/health', (c) => {
     security: 'JWT-auth-enabled, tenant-scoped',
   });
 });
+
+// ============================================================
+// Auth endpoints — PUBLIC (must be mounted BEFORE jwtAuthMiddleware)
+// POST /api/auth/otp/request — send OTP code to phone
+// POST /api/auth/otp/verify  — verify code, issue JWT
+// ============================================================
+app.route('/api/auth', authRouter);
 
 // ============================================================
 // Authentication — JWT verification

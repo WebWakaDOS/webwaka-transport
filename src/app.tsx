@@ -6,6 +6,8 @@
 import React, { Component, useState, useEffect, useCallback } from 'react';
 import { t, setLanguage, getLanguage, getSupportedLanguages, formatKoboToNaira, type Language } from './core/i18n/index';
 import { useOnlineStatus, useSyncQueue } from './core/offline/hooks';
+import { AuthProvider, useAuth, type WakaRole } from './core/auth/context';
+import { LoginScreen } from './components/login-screen';
 import { BookingFlow } from './components/booking-flow';
 import { api, ApiError } from './api/client';
 import type { TripSummary, Route, Vehicle, Trip, OperatorStats, Booking } from './api/client';
@@ -658,48 +660,111 @@ function MyBookingsModule() {
 }
 
 // ============================================================
-// Main App
+// Role gating — which roles can see which tabs
+// ============================================================
+const STAFF_ROLES: WakaRole[] = ['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR', 'STAFF'];
+const ADMIN_ROLES: WakaRole[] = ['SUPER_ADMIN', 'TENANT_ADMIN'];
+
+// ============================================================
+// Main App — inner shell (requires AuthProvider above it)
 // ============================================================
 type Tab = 'search' | 'bookings' | 'agent' | 'operator';
 
-export function TransportApp() {
+function AppContent() {
+  const { user, isAuthenticated, isLoading, logout, hasRole } = useAuth();
   const [tab, setTab] = useState<Tab>('search');
   const [lang, setLang] = useState<Language>(getLanguage());
   const online = useOnlineStatus();
   const { pendingCount: pendingSync, isSyncing } = useSyncQueue();
+
+  // Auto-logout when JWT expires mid-session
+  useEffect(() => {
+    const handler = () => logout();
+    window.addEventListener('waka:unauthorized', handler);
+    return () => window.removeEventListener('waka:unauthorized', handler);
+  }, [logout]);
 
   const handleLangChange = (l: Language) => {
     setLanguage(l);
     setLang(l);
   };
 
+  if (isLoading) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'system-ui, sans-serif' }}>
+        <div style={{ textAlign: 'center', color: '#94a3b8' }}>
+          <div style={{ fontSize: 40, marginBottom: 12 }}>🚌</div>
+          <div>Loading…</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return <LoginScreen />;
+  }
+
+  // Build tabs based on role
   const tabs: Array<{ id: Tab; icon: string; label: string }> = [
     { id: 'search', icon: '🔍', label: t('search_trips') },
     { id: 'bookings', icon: '🎫', label: t('my_bookings') },
-    { id: 'agent', icon: '💰', label: t('agent_pos') },
-    { id: 'operator', icon: '🚌', label: t('operator') },
+    ...(hasRole(STAFF_ROLES) ? [{ id: 'agent' as Tab, icon: '💰', label: t('agent_pos') }] : []),
+    ...(hasRole(ADMIN_ROLES) ? [{ id: 'operator' as Tab, icon: '🚌', label: t('operator') }] : []),
   ];
+
+  // Reset tab if current tab is no longer visible (e.g. after role change)
+  const validTab = tabs.some(t => t.id === tab) ? tab : 'search';
+
+  const roleLabel: Record<string, string> = {
+    CUSTOMER: 'Customer', STAFF: 'Agent', SUPERVISOR: 'Supervisor',
+    TENANT_ADMIN: 'Operator Admin', SUPER_ADMIN: 'Super Admin', DRIVER: 'Driver',
+  };
 
   return (
     <div data-testid="transport-app" style={{ maxWidth: 430, margin: '0 auto', minHeight: '100vh', display: 'flex', flexDirection: 'column', fontFamily: 'system-ui, sans-serif', background: '#f8fafc' }}>
       <StatusBar online={online} pendingSync={pendingSync} syncing={isSyncing} lang={lang} onLangChange={handleLangChange} />
-      <div style={{ background: '#1e40af', color: '#fff', padding: '12px 16px', fontWeight: 800, fontSize: 18 }}>
-        🚌 {t('app_name')}
+
+      {/* App header with user strip */}
+      <div style={{ background: '#1e40af', color: '#fff', padding: '10px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ fontWeight: 800, fontSize: 18 }}>🚌 {t('app_name')}</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ textAlign: 'right' }}>
+            <div style={{ fontSize: 12, fontWeight: 700, opacity: 0.95 }}>
+              {user?.name ?? user?.phone}
+            </div>
+            <div style={{ fontSize: 10, opacity: 0.7 }}>
+              {roleLabel[user?.role ?? ''] ?? user?.role}
+            </div>
+          </div>
+          <button
+            onClick={logout}
+            title="Sign out"
+            style={{
+              background: 'rgba(255,255,255,0.15)', border: 'none', color: '#fff',
+              borderRadius: 8, padding: '5px 10px', fontSize: 12, cursor: 'pointer',
+              fontWeight: 600,
+            }}
+          >
+            Sign out
+          </button>
+        </div>
       </div>
+
       <div style={{ flex: 1, overflowY: 'auto', paddingBottom: 70 }}>
         <ErrorBoundary label="Trip Search">
-          {tab === 'search' && <TripSearchModule />}
+          {validTab === 'search' && <TripSearchModule />}
         </ErrorBoundary>
         <ErrorBoundary label="My Bookings">
-          {tab === 'bookings' && <MyBookingsModule />}
+          {validTab === 'bookings' && <MyBookingsModule />}
         </ErrorBoundary>
         <ErrorBoundary label="Agent POS">
-          {tab === 'agent' && <AgentPOSModule online={online} />}
+          {validTab === 'agent' && <AgentPOSModule online={online} />}
         </ErrorBoundary>
         <ErrorBoundary label="Operator Dashboard">
-          {tab === 'operator' && <OperatorDashboardModule />}
+          {validTab === 'operator' && <OperatorDashboardModule />}
         </ErrorBoundary>
       </div>
+
       {/* Mobile-First bottom navigation */}
       <nav style={{
         position: 'fixed', bottom: 0, left: '50%', transform: 'translateX(-50%)',
@@ -711,15 +776,26 @@ export function TransportApp() {
           <button key={id} onClick={() => setTab(id)} style={{
             flex: 1, padding: '10px 4px 8px', border: 'none', background: 'none', cursor: 'pointer',
             display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2,
-            color: tab === id ? '#1e40af' : '#94a3b8',
-            borderTop: tab === id ? '2px solid #1e40af' : '2px solid transparent',
+            color: validTab === id ? '#1e40af' : '#94a3b8',
+            borderTop: validTab === id ? '2px solid #1e40af' : '2px solid transparent',
           }}>
             <span style={{ fontSize: 20 }}>{icon}</span>
-            <span style={{ fontSize: 10, fontWeight: tab === id ? 700 : 400 }}>{label}</span>
+            <span style={{ fontSize: 10, fontWeight: validTab === id ? 700 : 400 }}>{label}</span>
           </button>
         ))}
       </nav>
     </div>
+  );
+}
+
+// ============================================================
+// Main export — AuthProvider wraps everything
+// ============================================================
+export function TransportApp() {
+  return (
+    <AuthProvider>
+      <AppContent />
+    </AuthProvider>
   );
 }
 

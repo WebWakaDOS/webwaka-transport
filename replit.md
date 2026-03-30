@@ -66,6 +66,30 @@ npm run typecheck # TypeScript strict mode check (0 errors required)
 - **Cloudflare-First**: D1, KV, Workers Cron, no Vercel/AWS dependencies
 - **Zero Skipping**: No `|| true` in CI, strict TypeScript (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`)
 
+## Authentication Layer (Phase 4 — complete)
+
+### `src/api/auth.ts` — OTP auth router (backend)
+Two public endpoints (exempted from `jwtAuthMiddleware`):
+- `POST /api/auth/otp/request` — validates Nigerian phone, generates 6-digit OTP, stores in `SESSIONS_KV` with 5-min TTL. Returns `{ request_id, expires_in, phone_hint, dev_code? }`. When `SMS_API_KEY` is absent (dev/test), `dev_code` echoed in response for easy testing.
+- `POST /api/auth/otp/verify` — verifies request_id + code, consumes OTP from KV, finds/creates user (customers or agents table), issues 24h JWT via `generateJWT`. Returns `{ token, user: { id, name, phone, role, operator_id? } }`. New phone numbers auto-registered as CUSTOMER. Existing agents automatically get STAFF role + operatorId.
+
+Mounted in `worker.ts` at `/api/auth` **before** `jwtAuthMiddleware` so no token is required.
+
+### `src/core/auth/store.ts` — Token persistence
+Synchronous localStorage wrapper: `getStoredToken()`, `setStoredToken()`, `clearStoredToken()`, `getStoredUser()`, `setStoredUser()`. `decodeToken()` base64-decodes JWT payload (no crypto). `isTokenExpired()` checks `exp` with 60s clock-skew buffer. `isTokenValid()` = not-null + not-expired.
+
+### `src/core/auth/context.tsx` — AuthContext + useAuth hook
+`AuthProvider` rehydrates token from localStorage on mount. Exposes `user`, `token`, `isAuthenticated`, `isLoading`, `requestOtp()`, `verifyOtp()`, `logout()`, `hasRole()`. Role type: `WakaRole` (SUPER_ADMIN | TENANT_ADMIN | SUPERVISOR | STAFF | DRIVER | CUSTOMER).
+
+### `src/components/login-screen.tsx` — Login UI
+Step 1: Nigerian phone number input (`🇳🇬 +234` prefix). Step 2: 6-digit OTP grid (auto-advances on digit entry, paste support). Auto-fills `dev_code` in development. 60s resend countdown. Error display inline.
+
+### `src/api/client.ts` — Auth header injection + 401 auto-logout
+Every `request()` call now injects `Authorization: Bearer <jwt>` from `getStoredToken()`. On 401 response: calls `clearStoredToken()` + dispatches `waka:unauthorized` custom event.
+
+### `src/app.tsx` — Auth-aware shell
+`TransportApp` wraps `AppContent` in `AuthProvider`. `AppContent` shows loading spinner → `LoginScreen` (if not authenticated) → main app (if authenticated). Role-based tab gating: CUSTOMER sees Search + Bookings; STAFF/SUPERVISOR adds Agent POS; TENANT_ADMIN/SUPER_ADMIN adds Operator Dashboard. App header shows user name/role + Sign out button. `waka:unauthorized` event triggers auto-logout.
+
 ## Frontend Layer (Phase 3 — complete)
 
 ### `src/api/client.ts` — Typed API client

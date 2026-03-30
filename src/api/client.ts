@@ -2,7 +2,9 @@
  * WebWaka Transport Suite — Typed API Client
  * Single abstraction layer over all Worker API endpoints.
  * Invariants: Nigeria-First (kobo), no raw fetch() in components.
+ * Auth: injects Authorization: Bearer <jwt> from localStorage on every request.
  */
+import { getStoredToken, clearStoredToken } from '../core/auth/store';
 
 // ============================================================
 // Domain types (client-side — slightly richer than D1 row types)
@@ -154,10 +156,14 @@ export class ApiClient {
     signal?: AbortSignal
   ): Promise<T> {
     const url = `${this.base}${path}`;
-    const init: RequestInit = { method };
+    const headers: Record<string, string> = {};
+    const token = getStoredToken();
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+
+    const init: RequestInit = { method, headers };
     if (signal) init.signal = signal;
     if (body !== undefined) {
-      init.headers = { 'Content-Type': 'application/json' };
       init.body = JSON.stringify(body);
     }
     const res = await fetch(url, init);
@@ -165,6 +171,10 @@ export class ApiClient {
     const json = await res.json() as ApiResponse<T>;
 
     if (!json.success || !res.ok) {
+      if (res.status === 401) {
+        clearStoredToken();
+        window.dispatchEvent(new CustomEvent('waka:unauthorized'));
+      }
       throw new ApiError(json.error ?? `HTTP ${res.status}`, res.status, path);
     }
 
