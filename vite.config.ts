@@ -15,8 +15,10 @@ export default defineConfig({
         },
       },
   },
-  // Proxy API calls to the Worker during local development
   server: {
+    host: '0.0.0.0',
+    port: 5000,
+    allowedHosts: true,
     proxy: {
       '/api': {
         target: process.env.VITE_API_BASE || 'http://localhost:8787',
