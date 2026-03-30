@@ -1,13 +1,17 @@
 /**
  * TRN-3: Customer Booking Portal API
- * Invariants: NDPR consent, Nigeria-First (Paystack), Offline-First
+ * Invariants: NDPR consent, Nigeria-First (Paystack), Offline-First, Event-Driven
+ * Security: JWT auth via global middleware in worker.ts; per-route RBAC via requireRole
+ * Events: booking.created published to platform Event Bus (D1 outbox) on booking confirmation
  */
 import { Hono } from 'hono';
+import { requireRole } from '@webwaka/core';
 import type { Env } from './seat-inventory';
+import { publishEvent } from '../core/events/index';
 
 export const bookingPortalRouter = new Hono<{ Bindings: Env }>();
 
-// GET /routes — search available routes
+// GET /routes — public: search available routes (whitelisted in jwtAuthMiddleware)
 bookingPortalRouter.get('/routes', async (c) => {
   const { origin, destination } = c.req.query();
   const db = c.env.DB;
@@ -24,7 +28,7 @@ bookingPortalRouter.get('/routes', async (c) => {
   return c.json({ success: true, data: result.results });
 });
 
-// GET /trips/search — search trips by route and date
+// GET /trips/search — public: search trips by route and date (whitelisted in jwtAuthMiddleware)
 bookingPortalRouter.get('/trips/search', async (c) => {
   const { origin, destination, date } = c.req.query();
   const db = c.env.DB;
@@ -52,8 +56,8 @@ bookingPortalRouter.get('/trips/search', async (c) => {
   return c.json({ success: true, data: result.results });
 });
 
-// POST /customers — register or update customer (NDPR)
-bookingPortalRouter.post('/customers', async (c) => {
+// POST /customers — register or update customer (authenticated users; NDPR enforced)
+bookingPortalRouter.post('/customers', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'CUSTOMER']), async (c) => {
   const body = await c.req.json() as any;
   const { name, phone, email, ndpr_consent } = body;
 
@@ -67,7 +71,6 @@ bookingPortalRouter.post('/customers', async (c) => {
   const db = c.env.DB;
   const now = Date.now();
 
-  // Upsert by phone
   const existing = await db.prepare(`SELECT * FROM customers WHERE phone = ? AND deleted_at IS NULL`).bind(phone).first() as any;
   if (existing) {
     await db.prepare(`UPDATE customers SET name = ?, email = ?, ndpr_consent = 1, updated_at = ? WHERE id = ?`)
@@ -84,8 +87,8 @@ bookingPortalRouter.post('/customers', async (c) => {
   return c.json({ success: true, data: { id, name, phone, ndpr_consent: true } }, 201);
 });
 
-// POST /bookings — create a booking with seat reservation
-bookingPortalRouter.post('/bookings', async (c) => {
+// POST /bookings — create a booking with seat reservation (authenticated users)
+bookingPortalRouter.post('/bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'CUSTOMER']), async (c) => {
   const body = await c.req.json() as any;
   const { customer_id, trip_id, seat_ids, passenger_names, payment_method, ndpr_consent } = body;
 
@@ -102,19 +105,17 @@ bookingPortalRouter.post('/bookings', async (c) => {
   const db = c.env.DB;
   const now = Date.now();
 
-  // Verify customer exists and has NDPR consent
   const customer = await db.prepare(`SELECT * FROM customers WHERE id = ? AND ndpr_consent = 1`).bind(customer_id).first() as any;
   if (!customer) {
     return c.json({ success: false, error: 'Customer not found or NDPR consent not given' }, 404);
   }
 
-  // Get fare from route
   const trip = await db.prepare(
     `SELECT t.*, r.base_fare FROM trips t JOIN routes r ON t.route_id = r.id WHERE t.id = ?`
   ).bind(trip_id).first() as any;
   if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
 
-  const total_amount = trip.base_fare * seat_ids.length; // kobo
+  const total_amount = trip.base_fare * seat_ids.length;
   const payment_reference = `pay_trn_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
   const id = `bkg_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
 
@@ -132,8 +133,8 @@ bookingPortalRouter.post('/bookings', async (c) => {
   }, 201);
 });
 
-// PATCH /bookings/:id/confirm — confirm payment and booking
-bookingPortalRouter.patch('/bookings/:id/confirm', async (c) => {
+// PATCH /bookings/:id/confirm — confirm payment; publishes booking.created event
+bookingPortalRouter.patch('/bookings/:id/confirm', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'CUSTOMER']), async (c) => {
   const id = c.req.param('id');
   const body = await c.req.json() as any;
   const { payment_reference } = body;
@@ -149,19 +150,37 @@ bookingPortalRouter.patch('/bookings/:id/confirm', async (c) => {
     `UPDATE bookings SET status = 'confirmed', payment_status = 'completed', confirmed_at = ? WHERE id = ?`
   ).bind(now, id).run();
 
-  // Confirm seats
-  const seatIds = JSON.parse(booking.seat_ids) as string[];
+  const seatIds = JSON.parse(booking.seat_ids as string) as string[];
   for (const seatId of seatIds) {
     await db.prepare(
       `UPDATE seats SET status = 'confirmed', confirmed_by = ?, confirmed_at = ?, updated_at = ? WHERE id = ?`
     ).bind(id, now, now, seatId).run();
   }
 
+  // Publish booking.created event to the platform Event Bus (D1 outbox)
+  await publishEvent(db, {
+    event_type: 'booking.created',
+    aggregate_id: id,
+    aggregate_type: 'booking',
+    payload: {
+      booking_id: id,
+      customer_id: booking.customer_id as string,
+      trip_id: booking.trip_id as string,
+      seat_ids: seatIds,
+      total_amount: booking.total_amount as number,
+      payment_method: booking.payment_method as string,
+      payment_reference: (payment_reference ?? booking.payment_reference) as string,
+      confirmed_at: now,
+    },
+    correlation_id: payment_reference ?? undefined,
+    timestamp: now,
+  });
+
   return c.json({ success: true, data: { id, status: 'confirmed', payment_status: 'completed', confirmed_at: now } });
 });
 
-// PATCH /bookings/:id/cancel — cancel a booking
-bookingPortalRouter.patch('/bookings/:id/cancel', async (c) => {
+// PATCH /bookings/:id/cancel — cancel a booking (authenticated users)
+bookingPortalRouter.patch('/bookings/:id/cancel', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'CUSTOMER']), async (c) => {
   const id = c.req.param('id');
   const db = c.env.DB;
   const now = Date.now();
@@ -174,8 +193,7 @@ bookingPortalRouter.patch('/bookings/:id/cancel', async (c) => {
     `UPDATE bookings SET status = 'cancelled', cancelled_at = ? WHERE id = ?`
   ).bind(now, id).run();
 
-  // Release seats
-  const seatIds = JSON.parse(booking.seat_ids) as string[];
+  const seatIds = JSON.parse(booking.seat_ids as string) as string[];
   for (const seatId of seatIds) {
     await db.prepare(
       `UPDATE seats SET status = 'available', reserved_by = NULL, reservation_token = NULL, confirmed_by = NULL, updated_at = ? WHERE id = ?`
@@ -185,7 +203,7 @@ bookingPortalRouter.patch('/bookings/:id/cancel', async (c) => {
   return c.json({ success: true, data: { id, status: 'cancelled', cancelled_at: now } });
 });
 
-// GET /bookings — list bookings for a customer
+// GET /bookings — list bookings (any authenticated user; client filters by customer_id)
 bookingPortalRouter.get('/bookings', async (c) => {
   const { customer_id, status } = c.req.query();
   const db = c.env.DB;
@@ -204,7 +222,7 @@ bookingPortalRouter.get('/bookings', async (c) => {
   return c.json({ success: true, data: result.results });
 });
 
-// GET /bookings/:id — booking detail
+// GET /bookings/:id — booking detail (any authenticated user)
 bookingPortalRouter.get('/bookings/:id', async (c) => {
   const id = c.req.param('id');
   const db = c.env.DB;

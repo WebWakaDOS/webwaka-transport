@@ -239,9 +239,11 @@ function AgentPOSModule({ online }: { online: boolean }) {
 }
 
 // ============================================================
-// Operator Dashboard Module (TRN-4)
+// Operator Dashboard Module (TRN-4) — Routes, Vehicles, Trips
 // ============================================================
-function OperatorDashboardModule() {
+type OperatorView = 'overview' | 'routes' | 'vehicles' | 'trips';
+
+function OperatorOverview({ onNav }: { onNav: (v: OperatorView) => void }) {
   const [stats, setStats] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
@@ -260,26 +262,343 @@ function OperatorDashboardModule() {
   };
 
   return (
-    <div style={{ padding: 16 }}>
-      <h2 style={{ margin: '0 0 16px', fontSize: 18 }}>{t('operator')}</h2>
+    <>
+      <h2 style={{ margin: '0 0 4px', fontSize: 18 }}>{t('operator')}</h2>
+      <p style={{ margin: '0 0 16px', fontSize: 12, color: '#64748b' }}>{t('dashboard')}</p>
       {loading ? (
         <p style={{ color: '#94a3b8', textAlign: 'center' }}>{t('loading')}</p>
       ) : (
         <>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 16 }}>
             {tripStates.map(state => (
-              <div key={state} style={{ ...cardStyle, borderLeft: `4px solid ${stateColors[state]}` }}>
-                <div style={{ fontSize: 22, fontWeight: 800 }}>{stats?.trips?.[state] ?? 0}</div>
-                <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>{t(state)}</div>
+              <div key={state} style={{ ...cardStyle, borderLeft: `4px solid ${stateColors[state]}`, cursor: 'default' }}>
+                <div style={{ fontSize: 22, fontWeight: 800, color: stateColors[state] }}>{stats?.trips?.[state] ?? 0}</div>
+                <div style={{ fontSize: 12, color: '#64748b', marginTop: 2, textTransform: 'capitalize' }}>{state.replace('_', ' ')}</div>
               </div>
             ))}
+            {stats?.today_revenue_kobo != null && (
+              <div style={{ ...cardStyle, borderLeft: '4px solid #16a34a', cursor: 'default', gridColumn: 'span 2' }}>
+                <div style={{ fontSize: 18, fontWeight: 800, color: '#16a34a' }}>
+                  {formatKoboToNaira(stats.today_revenue_kobo as number)}
+                </div>
+                <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>Today's Revenue</div>
+              </div>
+            )}
           </div>
-          <div style={{ display: 'flex', gap: 10 }}>
-            <button style={{ ...secondaryBtnStyle, flex: 1 }}>{t('manage_routes')}</button>
-            <button style={{ ...secondaryBtnStyle, flex: 1 }}>{t('manage_vehicles')}</button>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <button onClick={() => onNav('routes')} style={navCardStyle}>
+              <span style={{ fontSize: 24 }}>🗺️</span>
+              <span style={{ fontSize: 13, fontWeight: 600, marginTop: 4 }}>{t('manage_routes')}</span>
+            </button>
+            <button onClick={() => onNav('vehicles')} style={navCardStyle}>
+              <span style={{ fontSize: 24 }}>🚌</span>
+              <span style={{ fontSize: 13, fontWeight: 600, marginTop: 4 }}>{t('manage_vehicles')}</span>
+            </button>
+            <button onClick={() => onNav('trips')} style={{ ...navCardStyle, gridColumn: 'span 2' }}>
+              <span style={{ fontSize: 24 }}>📋</span>
+              <span style={{ fontSize: 13, fontWeight: 600, marginTop: 4 }}>Manage Trips</span>
+            </button>
           </div>
         </>
       )}
+    </>
+  );
+}
+
+function RoutesPanel({ onBack }: { onBack: () => void }) {
+  const [routes, setRoutes] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ origin: '', destination: '', base_fare: '', operator_id: '' });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await fetch('/api/operator/routes');
+      const d = await r.json() as any;
+      setRoutes(d.data ?? []);
+    } catch { setRoutes([]); } finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const handleCreate = async () => {
+    if (!form.origin || !form.destination || !form.base_fare || !form.operator_id) {
+      setError('All fields required');
+      return;
+    }
+    setSaving(true);
+    setError('');
+    try {
+      const r = await fetch('/api/operator/routes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...form, base_fare: Math.round(parseFloat(form.base_fare) * 100) }),
+      });
+      const d = await r.json() as any;
+      if (d.success) {
+        setShowForm(false);
+        setForm({ origin: '', destination: '', base_fare: '', operator_id: '' });
+        await load();
+      } else {
+        setError(d.error ?? 'Failed to create route');
+      }
+    } catch { setError('Network error'); } finally { setSaving(false); }
+  };
+
+  return (
+    <>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+        <button onClick={onBack} style={backBtnStyle}>←</button>
+        <h2 style={{ margin: 0, fontSize: 18, flex: 1 }}>{t('manage_routes')}</h2>
+        <button onClick={() => setShowForm(s => !s)} style={{ ...primaryBtnStyle, padding: '8px 14px', fontSize: 13 }}>
+          {showForm ? 'Cancel' : '+ Add'}
+        </button>
+      </div>
+      {showForm && (
+        <div style={{ ...cardStyle, marginBottom: 16, cursor: 'default' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <input placeholder="Origin (e.g. Lagos)" value={form.origin} onChange={e => setForm(f => ({ ...f, origin: e.target.value }))} style={inputStyle} />
+            <input placeholder="Destination (e.g. Abuja)" value={form.destination} onChange={e => setForm(f => ({ ...f, destination: e.target.value }))} style={inputStyle} />
+            <input placeholder="Base fare (₦)" type="number" value={form.base_fare} onChange={e => setForm(f => ({ ...f, base_fare: e.target.value }))} style={inputStyle} />
+            <input placeholder="Operator ID" value={form.operator_id} onChange={e => setForm(f => ({ ...f, operator_id: e.target.value }))} style={inputStyle} />
+            {error && <p style={{ color: '#dc2626', fontSize: 12, margin: 0 }}>{error}</p>}
+            <button onClick={handleCreate} disabled={saving} style={primaryBtnStyle}>{saving ? t('loading') : 'Create Route'}</button>
+          </div>
+        </div>
+      )}
+      {loading ? (
+        <p style={{ color: '#94a3b8', textAlign: 'center' }}>{t('loading')}</p>
+      ) : routes.length === 0 ? (
+        <p style={{ color: '#94a3b8', textAlign: 'center', fontSize: 14 }}>No routes found</p>
+      ) : (
+        routes.map(r => (
+          <div key={r.id} style={{ ...cardStyle, cursor: 'default' }}>
+            <div style={{ fontWeight: 700 }}>{r.origin} → {r.destination}</div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, alignItems: 'center' }}>
+              <span style={{ color: '#16a34a', fontWeight: 700 }}>{formatKoboToNaira(r.base_fare as number)}</span>
+              <span style={{
+                fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 12,
+                background: r.status === 'active' ? '#dcfce7' : '#f1f5f9',
+                color: r.status === 'active' ? '#16a34a' : '#64748b',
+              }}>{r.status as string}</span>
+            </div>
+            <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>ID: {r.id as string}</div>
+          </div>
+        ))
+      )}
+    </>
+  );
+}
+
+function VehiclesPanel({ onBack }: { onBack: () => void }) {
+  const [vehicles, setVehicles] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ operator_id: '', plate_number: '', model: '', capacity: '', vehicle_type: 'bus' });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await fetch('/api/operator/vehicles');
+      const d = await r.json() as any;
+      setVehicles(d.data ?? []);
+    } catch { setVehicles([]); } finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const handleCreate = async () => {
+    if (!form.operator_id || !form.plate_number || !form.model || !form.capacity) {
+      setError('All fields required');
+      return;
+    }
+    setSaving(true);
+    setError('');
+    try {
+      const r = await fetch('/api/operator/vehicles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...form, capacity: parseInt(form.capacity, 10) }),
+      });
+      const d = await r.json() as any;
+      if (d.success) {
+        setShowForm(false);
+        setForm({ operator_id: '', plate_number: '', model: '', capacity: '', vehicle_type: 'bus' });
+        await load();
+      } else {
+        setError(d.error ?? 'Failed to register vehicle');
+      }
+    } catch { setError('Network error'); } finally { setSaving(false); }
+  };
+
+  return (
+    <>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+        <button onClick={onBack} style={backBtnStyle}>←</button>
+        <h2 style={{ margin: 0, fontSize: 18, flex: 1 }}>{t('manage_vehicles')}</h2>
+        <button onClick={() => setShowForm(s => !s)} style={{ ...primaryBtnStyle, padding: '8px 14px', fontSize: 13 }}>
+          {showForm ? 'Cancel' : '+ Add'}
+        </button>
+      </div>
+      {showForm && (
+        <div style={{ ...cardStyle, marginBottom: 16, cursor: 'default' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <input placeholder="Operator ID" value={form.operator_id} onChange={e => setForm(f => ({ ...f, operator_id: e.target.value }))} style={inputStyle} />
+            <input placeholder="Plate number (e.g. LAG-123-XY)" value={form.plate_number} onChange={e => setForm(f => ({ ...f, plate_number: e.target.value }))} style={inputStyle} />
+            <input placeholder="Model (e.g. Toyota Coaster)" value={form.model} onChange={e => setForm(f => ({ ...f, model: e.target.value }))} style={inputStyle} />
+            <input placeholder="Capacity (seats)" type="number" value={form.capacity} onChange={e => setForm(f => ({ ...f, capacity: e.target.value }))} style={inputStyle} />
+            <select value={form.vehicle_type} onChange={e => setForm(f => ({ ...f, vehicle_type: e.target.value }))} style={inputStyle}>
+              <option value="bus">Bus</option>
+              <option value="minibus">Minibus</option>
+              <option value="car">Car</option>
+            </select>
+            {error && <p style={{ color: '#dc2626', fontSize: 12, margin: 0 }}>{error}</p>}
+            <button onClick={handleCreate} disabled={saving} style={primaryBtnStyle}>{saving ? t('loading') : 'Register Vehicle'}</button>
+          </div>
+        </div>
+      )}
+      {loading ? (
+        <p style={{ color: '#94a3b8', textAlign: 'center' }}>{t('loading')}</p>
+      ) : vehicles.length === 0 ? (
+        <p style={{ color: '#94a3b8', textAlign: 'center', fontSize: 14 }}>No vehicles found</p>
+      ) : (
+        vehicles.map(v => (
+          <div key={v.id} style={{ ...cardStyle, cursor: 'default' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <div style={{ fontWeight: 700 }}>{v.plate_number as string}</div>
+                <div style={{ fontSize: 13, color: '#64748b', marginTop: 2 }}>{v.model as string} · {v.capacity as number} seats</div>
+              </div>
+              <span style={{
+                fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 12,
+                background: v.status === 'active' ? '#dcfce7' : '#f1f5f9',
+                color: v.status === 'active' ? '#16a34a' : '#64748b',
+              }}>{v.status as string}</span>
+            </div>
+            <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4, textTransform: 'capitalize' }}>{v.vehicle_type as string}</div>
+          </div>
+        ))
+      )}
+    </>
+  );
+}
+
+function TripsPanel({ onBack }: { onBack: () => void }) {
+  const [trips, setTrips] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [updatingId, setUpdatingId] = useState<string | null>(null);
+
+  const stateColors: Record<string, string> = {
+    scheduled: '#2563eb', boarding: '#d97706', in_transit: '#16a34a',
+    completed: '#64748b', cancelled: '#dc2626',
+  };
+
+  const nextStates: Record<string, string[]> = {
+    scheduled: ['boarding', 'cancelled'],
+    boarding: ['in_transit', 'cancelled'],
+    in_transit: ['completed'],
+    completed: [],
+    cancelled: [],
+  };
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await fetch('/api/operator/trips');
+      const d = await r.json() as any;
+      setTrips(d.data ?? []);
+    } catch { setTrips([]); } finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const transition = async (tripId: string, newState: string) => {
+    setUpdatingId(tripId);
+    try {
+      await fetch(`/api/operator/trips/${tripId}/state`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ state: newState }),
+      });
+      await load();
+    } catch { /* ignore */ } finally { setUpdatingId(null); }
+  };
+
+  return (
+    <>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+        <button onClick={onBack} style={backBtnStyle}>←</button>
+        <h2 style={{ margin: 0, fontSize: 18, flex: 1 }}>Manage Trips</h2>
+        <button onClick={() => void load()} style={{ ...secondaryBtnStyle, padding: '8px 14px', fontSize: 13 }}>↻</button>
+      </div>
+      {loading ? (
+        <p style={{ color: '#94a3b8', textAlign: 'center' }}>{t('loading')}</p>
+      ) : trips.length === 0 ? (
+        <p style={{ color: '#94a3b8', textAlign: 'center', fontSize: 14 }}>No trips found</p>
+      ) : (
+        trips.map(trip => {
+          const possibleNext = nextStates[trip.state as string] ?? [];
+          return (
+            <div key={trip.id} style={{ ...cardStyle, cursor: 'default' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                <div>
+                  <div style={{ fontWeight: 700 }}>{trip.origin as string} → {trip.destination as string}</div>
+                  <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>
+                    {new Date(trip.departure_time as number).toLocaleString('en-NG')}
+                  </div>
+                </div>
+                <span style={{
+                  fontSize: 11, fontWeight: 700, padding: '3px 9px', borderRadius: 12,
+                  background: `${stateColors[trip.state as string]}20`,
+                  color: stateColors[trip.state as string],
+                  whiteSpace: 'nowrap',
+                }}>{(trip.state as string).replace('_', ' ')}</span>
+              </div>
+              <div style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>
+                {trip.available_seats as number} available · {formatKoboToNaira(trip.base_fare as number)}
+              </div>
+              {possibleNext.length > 0 && (
+                <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+                  {possibleNext.map(ns => (
+                    <button
+                      key={ns}
+                      disabled={updatingId === trip.id}
+                      onClick={() => void transition(trip.id as string, ns)}
+                      style={{
+                        flex: 1, padding: '7px 4px', borderRadius: 8, border: '1.5px solid',
+                        borderColor: stateColors[ns] ?? '#e2e8f0',
+                        background: `${stateColors[ns] ?? '#64748b'}10`,
+                        color: stateColors[ns] ?? '#64748b',
+                        fontWeight: 600, fontSize: 11, cursor: 'pointer',
+                      }}
+                    >
+                      → {ns.replace('_', ' ')}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })
+      )}
+    </>
+  );
+}
+
+function OperatorDashboardModule() {
+  const [view, setView] = useState<OperatorView>('overview');
+
+  return (
+    <div style={{ padding: 16 }}>
+      {view === 'overview' && <OperatorOverview onNav={setView} />}
+      {view === 'routes' && <RoutesPanel onBack={() => setView('overview')} />}
+      {view === 'vehicles' && <VehiclesPanel onBack={() => setView('overview')} />}
+      {view === 'trips' && <TripsPanel onBack={() => setView('overview')} />}
     </div>
   );
 }
@@ -421,4 +740,11 @@ const backBtnStyle: React.CSSProperties = {
 const cardStyle: React.CSSProperties = {
   background: '#fff', borderRadius: 12, padding: 14, marginBottom: 10,
   border: '1.5px solid #e2e8f0', cursor: 'pointer',
+};
+
+const navCardStyle: React.CSSProperties = {
+  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+  padding: '20px 12px', borderRadius: 12, border: '1.5px solid #e2e8f0',
+  background: '#fff', cursor: 'pointer', fontFamily: 'system-ui, sans-serif',
+  marginBottom: 0,
 };

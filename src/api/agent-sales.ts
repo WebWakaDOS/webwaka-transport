@@ -1,13 +1,15 @@
 /**
  * TRN-2: Agent Sales API (Offline-First Bus Park POS)
  * Invariants: Offline-First (sync queue), Nigeria-First (kobo/cash), Multi-tenancy
+ * Security: JWT auth via global middleware in worker.ts; per-route RBAC via requireRole
  */
 import { Hono } from 'hono';
+import { requireRole } from '@webwaka/core';
 import type { Env } from './seat-inventory';
 
 export const agentSalesRouter = new Hono<{ Bindings: Env }>();
 
-// GET /agents — list agents
+// GET /agents — list agents (any authenticated user)
 agentSalesRouter.get('/agents', async (c) => {
   const { operator_id, status } = c.req.query();
   const db = c.env.DB;
@@ -22,8 +24,8 @@ agentSalesRouter.get('/agents', async (c) => {
   return c.json({ success: true, data: result.results });
 });
 
-// POST /agents — register an agent
-agentSalesRouter.post('/agents', async (c) => {
+// POST /agents — register an agent (SUPER_ADMIN or TENANT_ADMIN only)
+agentSalesRouter.post('/agents', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
   const body = await c.req.json() as any;
   const { operator_id, name, phone, email, role, bus_parks } = body;
 
@@ -43,8 +45,8 @@ agentSalesRouter.post('/agents', async (c) => {
   return c.json({ success: true, data: { id, operator_id, name, phone, role: role ?? 'agent', status: 'active' } }, 201);
 });
 
-// POST /transactions — record a sale (online or offline sync)
-agentSalesRouter.post('/transactions', async (c) => {
+// POST /transactions — record a sale (SUPER_ADMIN, TENANT_ADMIN, or STAFF)
+agentSalesRouter.post('/transactions', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
   const body = await c.req.json() as any;
   const { agent_id, trip_id, seat_ids, passenger_names, total_amount, payment_method } = body;
 
@@ -66,7 +68,6 @@ agentSalesRouter.post('/transactions', async (c) => {
      VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', 'synced', ?, ?)`
   ).bind(id, agent_id, trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, payment_method, receiptId, now).run();
 
-  // Generate receipt
   await db.prepare(
     `INSERT INTO receipts (id, transaction_id, agent_id, trip_id, passenger_names, seat_numbers, total_amount, payment_method, issued_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -81,7 +82,7 @@ agentSalesRouter.post('/transactions', async (c) => {
   }, 201);
 });
 
-// GET /transactions — list transactions for an agent
+// GET /transactions — list transactions (any authenticated user; client should filter by agent_id)
 agentSalesRouter.get('/transactions', async (c) => {
   const { agent_id, trip_id, sync_status } = c.req.query();
   const db = c.env.DB;
@@ -97,7 +98,7 @@ agentSalesRouter.get('/transactions', async (c) => {
   return c.json({ success: true, data: result.results });
 });
 
-// GET /receipts/:id — get a receipt
+// GET /receipts/:id — get a receipt (any authenticated user)
 agentSalesRouter.get('/receipts/:id', async (c) => {
   const id = c.req.param('id');
   const db = c.env.DB;
@@ -106,8 +107,8 @@ agentSalesRouter.get('/receipts/:id', async (c) => {
   return c.json({ success: true, data: receipt });
 });
 
-// POST /sync — offline-first batch sync for agent transactions
-agentSalesRouter.post('/sync', async (c) => {
+// POST /sync — offline-first batch sync (SUPER_ADMIN, TENANT_ADMIN, or STAFF)
+agentSalesRouter.post('/sync', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
   const body = await c.req.json() as any;
   const { agent_id, transactions } = body;
 
@@ -143,8 +144,8 @@ agentSalesRouter.post('/sync', async (c) => {
   return c.json({ success: true, data: { applied, failed, synced_at: now } });
 });
 
-// GET /dashboard — agent sales summary
-agentSalesRouter.get('/dashboard', async (c) => {
+// GET /dashboard — agent sales summary (SUPER_ADMIN, TENANT_ADMIN, or STAFF)
+agentSalesRouter.get('/dashboard', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
   const { agent_id } = c.req.query();
   const db = c.env.DB;
   const todayStart = new Date().setHours(0, 0, 0, 0);
