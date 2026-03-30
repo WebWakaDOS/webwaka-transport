@@ -281,8 +281,8 @@ export class SalesTransactionManager {
    */
   private generateReceipt(transaction: SalesTransaction): Receipt {
     const passengers = transaction.seatIds.map((seatId, index) => ({
-      name: transaction.passengerNames[index],
-      seatNumber: seatId.split('_').pop() || seatId
+      name: transaction.passengerNames[index] ?? 'Unknown',
+      seatNumber: seatId.split('_').pop() ?? seatId
     }));
 
     return {

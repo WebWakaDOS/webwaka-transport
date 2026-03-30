@@ -39,7 +39,7 @@ describe('TRN-1: Seat Inventory Synchronization & Atomic Validation', () => {
       manager.createTrip(tripId, operatorId, routeId, departureTime, 50);
 
       expect(callback).toHaveBeenCalled();
-      expect(callback.mock.calls[0][0].id).toBe(tripId);
+      expect(callback.mock.calls[0]![0].id).toBe(tripId);
     });
   });
 
@@ -93,8 +93,8 @@ describe('TRN-1: Seat Inventory Synchronization & Atomic Validation', () => {
       manager.reserveSeat(tripId, '1', 'user_001');
 
       expect(callback).toHaveBeenCalled();
-      expect(callback.mock.calls[0][0].seat.seatNumber).toBe('1');
-      expect(callback.mock.calls[0][0].token).toBeDefined();
+      expect(callback.mock.calls[0]![0].seat.seatNumber).toBe('1');
+      expect(callback.mock.calls[0]![0].token).toBeDefined();
     });
 
     it('should not reserve a seat from non-existent trip', () => {
@@ -149,7 +149,7 @@ describe('TRN-1: Seat Inventory Synchronization & Atomic Validation', () => {
       manager.confirmSeat(tripId, reservation.seatId!, reservation.token!, 'user_001');
 
       expect(callback).toHaveBeenCalled();
-      expect(callback.mock.calls[0][0].seat.status).toBe('confirmed');
+      expect(callback.mock.calls[0]![0].seat.status).toBe('confirmed');
     });
 
     it('should update seat status to confirmed', () => {
@@ -188,7 +188,7 @@ describe('TRN-1: Seat Inventory Synchronization & Atomic Validation', () => {
 
     it('should not release an already available seat', () => {
       const trip = manager.getTrip(tripId);
-      const seatId = trip!.seats[0].id;
+      const seatId = trip!.seats[0]!.id;
 
       const result = manager.releaseSeat(tripId, seatId);
 
@@ -216,7 +216,7 @@ describe('TRN-1: Seat Inventory Synchronization & Atomic Validation', () => {
       manager.releaseSeat(tripId, reservation.seatId!);
 
       expect(callback).toHaveBeenCalled();
-      expect(callback.mock.calls[0][0].previousStatus).toBe('reserved');
+      expect(callback.mock.calls[0]![0].previousStatus).toBe('reserved');
     });
   });
 

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { SalesTransactionManager, Agent } from './index';
+import { SalesTransactionManager } from './index';
+import type { Agent } from './index';
 
 describe('TRN-2: Agent Sales Application (Offline-first POS)', () => {
   let manager: SalesTransactionManager;
@@ -58,7 +59,7 @@ describe('TRN-2: Agent Sales Application (Offline-first POS)', () => {
       manager.registerAgent(newAgent);
 
       expect(callback).toHaveBeenCalled();
-      expect(callback.mock.calls[0][0].id).toBe('agent_003');
+      expect(callback.mock.calls[0]![0].id).toBe('agent_003');
     });
   });
 
@@ -155,7 +156,7 @@ describe('TRN-2: Agent Sales Application (Offline-first POS)', () => {
       );
 
       expect(callback).toHaveBeenCalled();
-      expect(callback.mock.calls[0][0].agentId).toBe(agent.id);
+      expect(callback.mock.calls[0]![0].agentId).toBe(agent.id);
     });
 
     it('should set transaction sync status to pending', () => {
@@ -315,7 +316,7 @@ describe('TRN-2: Agent Sales Application (Offline-first POS)', () => {
       const pending = manager.getPendingTransactions();
 
       expect(pending.length).toBe(1);
-      expect(pending[0].syncStatus).toBe('pending');
+      expect(pending[0]!.syncStatus).toBe('pending');
     });
 
     it('should emit sync events', () => {
@@ -398,8 +399,8 @@ describe('TRN-2: Agent Sales Application (Offline-first POS)', () => {
 
       // Verify transactions are sorted by creation time (most recent first)
       expect(transactions.length).toBe(2);
-      expect(transactions[0].createdAt.getTime()).toBeGreaterThanOrEqual(
-        transactions[1].createdAt.getTime()
+      expect(transactions[0]!.createdAt.getTime()).toBeGreaterThanOrEqual(
+        transactions[1]!.createdAt.getTime()
       );
     });
 
@@ -456,8 +457,8 @@ describe('TRN-2: Agent Sales Application (Offline-first POS)', () => {
 
       const receipt = manager.getReceipt(result.receiptId!);
 
-      expect(receipt!.passengers[0].name).toBe('John Adekunle');
-      expect(receipt!.passengers[1].name).toBe('Mary Okafor');
+      expect(receipt!.passengers[0]!.name).toBe('John Adekunle');
+      expect(receipt!.passengers[1]!.name).toBe('Mary Okafor');
     });
   });
 

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { BookingManager, Customer } from './index';
+import { BookingManager } from './index';
+import type { Customer } from './index';
 import { SeatInventoryManager } from '../seat-inventory/index';
 
 describe('TRN-3: Customer Booking Portal', () => {
@@ -58,7 +59,7 @@ describe('TRN-3: Customer Booking Portal', () => {
       bookingManager.registerCustomer(newCustomer);
 
       expect(callback).toHaveBeenCalled();
-      expect(callback.mock.calls[0][0].id).toBe('cust_003');
+      expect(callback.mock.calls[0]![0].id).toBe('cust_003');
     });
   });
 
@@ -155,7 +156,7 @@ describe('TRN-3: Customer Booking Portal', () => {
       );
 
       expect(callback).toHaveBeenCalled();
-      expect(callback.mock.calls[0][0].customerId).toBe(customer.id);
+      expect(callback.mock.calls[0]![0].customerId).toBe(customer.id);
     });
 
     it('should set booking status to pending', () => {
@@ -221,7 +222,7 @@ describe('TRN-3: Customer Booking Portal', () => {
       bookingManager.confirmBooking(bookingResult.bookingId!, 'PAY_REF_001');
 
       expect(callback).toHaveBeenCalled();
-      expect(callback.mock.calls[0][0].status).toBe('confirmed');
+      expect(callback.mock.calls[0]![0].status).toBe('confirmed');
     });
   });
 
@@ -283,7 +284,7 @@ describe('TRN-3: Customer Booking Portal', () => {
       bookingManager.cancelBooking(bookingResult.bookingId!, 'Test cancellation');
 
       expect(callback).toHaveBeenCalled();
-      expect(callback.mock.calls[0][0].status).toBe('cancelled');
+      expect(callback.mock.calls[0]![0].status).toBe('cancelled');
     });
   });
 
@@ -416,7 +417,7 @@ describe('TRN-3: Customer Booking Portal', () => {
 
       // Only confirmed bookings are returned
       expect(tripBookings.length).toBe(1);
-      expect(tripBookings[0].id).toBe(result1.bookingId);
+      expect(tripBookings[0]!.id).toBe(result1.bookingId);
     });
 
     it('should return null for non-existent booking', () => {

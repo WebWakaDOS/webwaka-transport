@@ -66,7 +66,7 @@ function StatusBar({ online, pendingSync, lang, onLangChange }: {
 function TripSearchModule() {
   const [origin, setOrigin] = useState('');
   const [destination, setDestination] = useState('');
-  const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
+  const [date, setDate] = useState(new Date().toISOString().split('T')[0]!);
   const [trips, setTrips] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedTrip, setSelectedTrip] = useState<any>(null);

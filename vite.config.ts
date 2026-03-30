@@ -1,33 +1,28 @@
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react() as any],
   resolve: {
     alias: {
-      '@webwaka/core': path.resolve('node_modules/@webwaka/core/index.js'),
+      '@webwaka/core': path.resolve('packages/core/src/index.ts'),
     },
   },
   test: {
     environment: 'node',
-    resolve: {
-      alias: {
-        '@webwaka/core': path.resolve('node_modules/@webwaka/core/index.js'),
-      },
-    },
   },
   build: {
     outDir: 'dist',
     sourcemap: false,
-      rollupOptions: {
-        output: {
-          manualChunks(id) {
-            if (id.includes('node_modules/react') || id.includes('node_modules/react-dom')) return 'react';
-            if (id.includes('node_modules/dexie')) return 'dexie';
-          },
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules/react') || id.includes('node_modules/react-dom')) return 'react';
+          if (id.includes('node_modules/dexie')) return 'dexie';
         },
       },
+    },
   },
   server: {
     host: '0.0.0.0',

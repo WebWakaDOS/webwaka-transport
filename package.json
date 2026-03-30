@@ -30,7 +30,7 @@
   "homepage": "https://github.com/WebWakaDOS/webwaka-transport#readme",
   "description": "WebWaka Transport Suite — TRN-1 Seat Inventory, TRN-2 Agent Sales, TRN-3 Booking Portal, TRN-4 Operator Management",
   "dependencies": {
-    "@webwaka/core": "file:../webwaka-core",
+    "@webwaka/core": "file:packages/core",
     "dexie": "^4.3.0",
     "hono": "^4.12.8",
     "react": "^19.2.4",

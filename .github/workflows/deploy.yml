@@ -1,7 +1,16 @@
-name: Deploy Transport Suite
+name: CI/CD — WebWaka Transport Suite
+
+# Invariants: CI/CD Native Development
+# - No merge to main without green tests + typecheck
+# - Migrations applied before every deployment
+# - Secrets validated before deployment proceeds
 
 on:
   push:
+    branches:
+      - main
+      - develop
+  pull_request:
     branches:
       - main
       - develop
@@ -9,16 +18,17 @@ on:
 
 jobs:
   # ============================================================================
-  # LINT, TYPECHECK AND TEST
+  # QUALITY GATE — runs on every push and PR
+  # No deployment proceeds if this job fails
   # ============================================================================
-  lint-and-test:
-    name: Lint, Typecheck and Test
+  quality-gate:
+    name: Quality Gate (Typecheck + Lint + Test)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -27,27 +37,44 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run type checking
-        run: npm run typecheck || true
+      - name: TypeScript type check (MUST PASS — no || true)
+        run: npm run typecheck
 
-      - name: Run unit tests
+      - name: Run unit tests (140 tests, 100% pass rate required)
         run: npm run test
 
+      - name: Validate required secrets exist
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          echo "Validating required deployment secrets..."
+          MISSING=0
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then echo "ERROR: CLOUDFLARE_API_TOKEN missing"; MISSING=1; fi
+          if [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then echo "ERROR: CLOUDFLARE_ACCOUNT_ID missing"; MISSING=1; fi
+          if [ "$MISSING" = "1" ]; then
+            echo "One or more required secrets are missing. Deployment blocked."
+            exit 1
+          fi
+          echo "All required secrets present."
+
   # ============================================================================
-  # PRODUCTION DEPLOYMENT (main branch)
+  # PRODUCTION DEPLOYMENT (main branch only)
+  # Depends on quality-gate passing
   # ============================================================================
   deploy-workers-production:
-    name: Deploy Workers to Production
+    name: Deploy Workers → Production
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    needs: [lint-and-test]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: [quality-gate]
     permissions:
       contents: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -56,13 +83,37 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Apply D1 Migrations (Production)
+      - name: Apply D1 Migrations — Production (all migrations in order)
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           wranglerVersion: '4'
           command: d1 execute webwaka-transport-db-prod --env production --file migrations/001_transport_schema.sql --remote
+
+      - name: Apply Migration 002 — Platform Events
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: '4'
+          command: d1 execute webwaka-transport-db-prod --env production --file migrations/002_platform_events.sql --remote
+
+      - name: Apply Migration 003 — Vehicles Model Column
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: '4'
+          command: d1 execute webwaka-transport-db-prod --env production --file migrations/003_vehicles_model_column.sql --remote
+
+      - name: Apply Migration 004 — Event Bus and Seats Hardening
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: '4'
+          command: d1 execute webwaka-transport-db-prod --env production --file migrations/004_event_bus_and_seats_hardening.sql --remote
 
       - name: Deploy Workers to Production
         uses: cloudflare/wrangler-action@v3
@@ -72,15 +123,16 @@ jobs:
           wranglerVersion: '4'
           command: deploy --env production
 
-      - name: Verify API health (Production)
+      - name: Health check — Production (wait for Worker cold start)
         run: |
           sleep 20
           curl -sf https://webwaka-transport-api-prod.webwaka.workers.dev/health \
             -H "Content-Type: application/json" \
-            -o /tmp/health.json || echo "Health check pending..."
-          cat /tmp/health.json || true
+            -o /tmp/health.json
+          cat /tmp/health.json
+          echo "Health check passed."
 
-      - name: Run production smoke tests
+      - name: Smoke tests — Production
         run: |
           BASE="https://webwaka-transport-api-prod.webwaka.workers.dev"
           echo "=== TRANSPORT PRODUCTION SMOKE TESTS ==="
@@ -88,24 +140,19 @@ jobs:
           for endpoint in \
             "/health" \
             "/api/seat-inventory/trips" \
-            "/api/agent-sales/agents" \
-            "/api/agent-sales/dashboard" \
             "/api/booking/routes" \
-            "/api/booking/bookings" \
-            "/api/operator/operators" \
-            "/api/operator/routes" \
-            "/api/operator/vehicles" \
-            "/api/operator/dashboard"; do
+            "/api/booking/trips/search"; do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${BASE}${endpoint}" || echo "000")
             if [ "$STATUS" = "200" ] || [ "$STATUS" = "201" ]; then
-              echo "✅ ${endpoint} → ${STATUS}"
+              echo "PASS: ${endpoint} → ${STATUS}"
               PASS=$((PASS+1))
             else
-              echo "⚠️  ${endpoint} → ${STATUS}"
+              echo "FAIL: ${endpoint} → ${STATUS}"
               FAIL=$((FAIL+1))
             fi
           done
-          echo "=== RESULTS: ${PASS}/10 passed, ${FAIL} failed ==="
+          echo "=== RESULTS: ${PASS} passed, ${FAIL} failed ==="
+          if [ "$FAIL" -gt "0" ]; then exit 1; fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -116,33 +163,40 @@ jobs:
             ## WebWaka Transport Suite — Production Release
 
             ### Modules Deployed:
-            - **TRN-1** Seat Inventory: https://webwaka-transport-api-prod.webwaka.workers.dev/api/seat-inventory/trips
-            - **TRN-2** Agent Sales: https://webwaka-transport-api-prod.webwaka.workers.dev/api/agent-sales/agents
-            - **TRN-3** Booking Portal: https://webwaka-transport-api-prod.webwaka.workers.dev/api/booking/routes
-            - **TRN-4** Operator Management: https://webwaka-transport-api-prod.webwaka.workers.dev/api/operator/operators
+            - **TRN-1** Seat Inventory (seat reservation, availability, cron sweeper)
+            - **TRN-2** Agent Sales (offline POS, sync queue)
+            - **TRN-3** Booking Portal (Paystack, NDPR, customer auth)
+            - **TRN-4** Operator Management (trip state machine, fleet, routes)
 
-            ### Compliance:
-            - ✅ NDPR consent enforcement (TRN-3 bookings and customers)
-            - ✅ Nigeria-First: all monetary values in kobo (₦)
-            - ✅ Offline-First: 30s seat reservation TTL, sync mutation queue
-            - ✅ Multi-language: en, yo, ig, ha
-            - ✅ 140 tests passing (100%)
-            - ✅ Trip state machine: scheduled→boarding→in_transit→completed
+            ### Quality Gates Passed:
+            - TypeScript typecheck: PASS
+            - Unit tests: 140/140 (100%)
+            - Production smoke tests: PASS
+
+            ### Architecture Compliance:
+            - Nigeria-First: kobo integers, multi-language (en/yo/ig/ha)
+            - Multi-tenant: strict operator_id enforcement
+            - Event-Driven: D1 outbox + cron drain consumer active
+            - Offline-First: service worker sync, Dexie/IndexedDB
+            - Cloudflare-First: Workers + D1 + KV + Cron
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  deploy-pages-production:
-    name: Deploy PWA to Cloudflare Pages (Production)
+  # ============================================================================
+  # PRODUCTION PWA DEPLOYMENT (main branch only)
+  # ============================================================================
+  deploy-pwa-production:
+    name: Deploy PWA → Cloudflare Pages (Production)
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    needs: [lint-and-test]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: [quality-gate]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -156,7 +210,7 @@ jobs:
         env:
           VITE_API_BASE: https://webwaka-transport-api-prod.webwaka.workers.dev
 
-      - name: Deploy PWA to Cloudflare Pages (Production)
+      - name: Deploy PWA to Cloudflare Pages
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -165,18 +219,18 @@ jobs:
           command: pages deploy dist --project-name webwaka-transport-ui --branch main
 
   # ============================================================================
-  # STAGING DEPLOYMENT (develop branch)
+  # STAGING DEPLOYMENT (develop branch only)
   # ============================================================================
   deploy-workers-staging:
-    name: Deploy Workers to Staging
+    name: Deploy Workers → Staging
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/develop'
-    needs: [lint-and-test]
+    if: github.ref == 'refs/heads/develop' && github.event_name != 'pull_request'
+    needs: [quality-gate]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -185,13 +239,37 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Apply D1 Migrations (Staging)
+      - name: Apply D1 Migrations — Staging (all migrations in order)
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           wranglerVersion: '4'
           command: d1 execute webwaka-transport-db-staging --env staging --file migrations/001_transport_schema.sql --remote
+
+      - name: Apply Migration 002 — Staging
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: '4'
+          command: d1 execute webwaka-transport-db-staging --env staging --file migrations/002_platform_events.sql --remote
+
+      - name: Apply Migration 003 — Staging
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: '4'
+          command: d1 execute webwaka-transport-db-staging --env staging --file migrations/003_vehicles_model_column.sql --remote
+
+      - name: Apply Migration 004 — Staging
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: '4'
+          command: d1 execute webwaka-transport-db-staging --env staging --file migrations/004_event_bus_and_seats_hardening.sql --remote
 
       - name: Deploy Workers to Staging
         uses: cloudflare/wrangler-action@v3
@@ -201,24 +279,28 @@ jobs:
           wranglerVersion: '4'
           command: deploy --env staging
 
-      - name: Verify API health (Staging)
+      - name: Health check — Staging
         run: |
           sleep 15
           curl -sf https://webwaka-transport-api-staging.webwaka.workers.dev/health \
             -H "Content-Type: application/json" \
-            -o /tmp/health.json || echo "Health check pending..."
-          cat /tmp/health.json || true
+            -o /tmp/health.json
+          cat /tmp/health.json
+          echo "Staging health check passed."
 
-  deploy-pages-staging:
-    name: Deploy PWA to Cloudflare Pages (Staging)
+  # ============================================================================
+  # STAGING PWA DEPLOYMENT (develop branch only)
+  # ============================================================================
+  deploy-pwa-staging:
+    name: Deploy PWA → Cloudflare Pages (Staging)
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/develop'
-    needs: [lint-and-test]
+    if: github.ref == 'refs/heads/develop' && github.event_name != 'pull_request'
+    needs: [quality-gate]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: '22'

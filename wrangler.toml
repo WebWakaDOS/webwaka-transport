@@ -3,8 +3,26 @@ main = "src/worker.ts"
 compatibility_date = "2024-12-01"
 compatibility_flags = ["nodejs_compat"]
 
+# ============================================================
+# Cron Triggers — Scheduled Worker
+# Runs drainEventBus() + sweepExpiredReservations() every minute
+# ============================================================
+[triggers]
+crons = ["* * * * *"]
+
+# ============================================================
+# Local development (wrangler dev)
+# Uses .dev.vars for secrets; no real D1/KV needed for unit tests
+# ============================================================
+
+# ============================================================
+# Staging environment
+# ============================================================
 [env.staging]
 name = "webwaka-transport-api-staging"
+
+[env.staging.triggers]
+crons = ["* * * * *"]
 
 [[env.staging.d1_databases]]
 binding = "DB"
@@ -15,8 +33,22 @@ database_id = "b687d819-f83b-4d54-95ac-f123500aaae4"
 binding = "SESSIONS_KV"
 id = "bde8befc71da40c5a5979ee35830022a"
 
+[[env.staging.kv_namespaces]]
+binding = "TENANT_CONFIG_KV"
+id = "placeholder-tenant-config-staging"
+
+[[env.staging.kv_namespaces]]
+binding = "SEAT_CACHE_KV"
+id = "placeholder-seat-cache-staging"
+
+# ============================================================
+# Production environment
+# ============================================================
 [env.production]
 name = "webwaka-transport-api-prod"
+
+[env.production.triggers]
+crons = ["* * * * *"]
 
 [[env.production.d1_databases]]
 binding = "DB"
@@ -26,3 +58,11 @@ database_id = "1faa6600-d4ce-4c1c-9868-ec23566da100"
 [[env.production.kv_namespaces]]
 binding = "SESSIONS_KV"
 id = "f176cebbdf8445838c72d9fde0173628"
+
+[[env.production.kv_namespaces]]
+binding = "TENANT_CONFIG_KV"
+id = "placeholder-tenant-config-prod"
+
+[[env.production.kv_namespaces]]
+binding = "SEAT_CACHE_KV"
+id = "placeholder-seat-cache-prod"

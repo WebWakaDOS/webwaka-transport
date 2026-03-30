@@ -1,0 +1,54 @@
+# WebWaka Transport Suite — Cloudflare Workers secrets
+# Copy this file to .dev.vars for local development (never commit .dev.vars)
+# Production secrets must be set via: wrangler secret put <KEY> --env production
+
+# ============================================================
+# REQUIRED — Worker will refuse to start without these
+# ============================================================
+
+# JWT signing secret — min 32 chars, HS256
+JWT_SECRET=change-me-use-a-long-random-string-at-least-32-chars
+
+# Admin migration endpoint secret — protects POST /api/admin/migrations/run
+# Generate: openssl rand -hex 32
+MIGRATION_SECRET=change-me-use-a-long-random-string-at-least-32-chars
+
+# ============================================================
+# PAYMENT PROVIDERS (set the one(s) you use)
+# ============================================================
+
+# Paystack — primary provider for Nigeria
+# Get from: https://dashboard.paystack.com/#/settings/developer
+PAYSTACK_SECRET=sk_test_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# Flutterwave — secondary / Africa-wide fallback
+# Get from: https://app.flutterwave.com/dashboard/settings/apis
+FLUTTERWAVE_SECRET=FLWSECK_TEST-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# ============================================================
+# MESSAGING
+# ============================================================
+
+# Africa's Talking / Termii / Twilio — SMS OTP
+# SMS_PROVIDER = termii | africastalking | twilio
+SMS_PROVIDER=termii
+SMS_API_KEY=your-sms-api-key-here
+
+# ============================================================
+# PUSH NOTIFICATIONS
+# ============================================================
+
+# Web Push VAPID keys — generate with:
+#   npx web-push generate-vapid-keys
+# Public key goes into the frontend env (VITE_VAPID_PUBLIC_KEY)
+VAPID_PRIVATE_KEY=your-vapid-private-key-here
+
+# ============================================================
+# FRONTEND (Vite — only used in dev, not in Cloudflare Workers)
+# ============================================================
+
+# API base URL for local dev (workers dev server)
+VITE_API_BASE=http://localhost:8787
+
+# VAPID public key for service worker
+VITE_VAPID_PUBLIC_KEY=your-vapid-public-key-here

@@ -50,7 +50,7 @@ describe('TRN-4: Operator Management - Trip State Machine', () => {
       );
 
       expect(callback).toHaveBeenCalled();
-      expect(callback.mock.calls[0][0].state).toBe('scheduled');
+      expect(callback.mock.calls[0]![0].state).toBe('scheduled');
     });
   });
 
@@ -234,7 +234,7 @@ describe('TRN-4: Operator Management - Trip State Machine', () => {
       stateMachine.updateLocation(tripData.tripId, 6.5244, 3.3792);
 
       expect(callback).toHaveBeenCalled();
-      expect(callback.mock.calls[0][0].currentLocation).toEqual({
+      expect(callback.mock.calls[0]![0].currentLocation).toEqual({
         latitude: 6.5244,
         longitude: 3.3792
       });
@@ -390,10 +390,10 @@ describe('TRN-4: Operator Management - Trip State Machine', () => {
       const history = stateMachine.getTripHistory(tripData.tripId);
 
       expect(history.length).toBe(4); // initial + 3 transitions
-      expect(history[0].to).toBe('scheduled');
-      expect(history[1].to).toBe('boarding');
-      expect(history[2].to).toBe('in_transit');
-      expect(history[3].to).toBe('completed');
+      expect(history[0]!.to).toBe('scheduled');
+      expect(history[1]!.to).toBe('boarding');
+      expect(history[2]!.to).toBe('in_transit');
+      expect(history[3]!.to).toBe('completed');
     });
 
     it('should include cancellation reason in history', () => {
@@ -475,8 +475,8 @@ describe('TRN-4: Operator Management - Trip State Machine', () => {
       stateMachine.startBoarding(tripData.tripId);
 
       expect(callback).toHaveBeenCalled();
-      expect(callback.mock.calls[0][0].from).toBe('scheduled');
-      expect(callback.mock.calls[0][0].to).toBe('boarding');
+      expect(callback.mock.calls[0]![0].from).toBe('scheduled');
+      expect(callback.mock.calls[0]![0].to).toBe('boarding');
     });
   });
 });

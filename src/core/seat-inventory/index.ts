@@ -11,11 +11,11 @@ export interface Seat {
   tripId: string;
   seatNumber: string;
   status: 'available' | 'reserved' | 'confirmed' | 'blocked';
-  reservedBy?: string;
-  reservationToken?: string;
-  reservationExpiresAt?: Date;
-  confirmedBy?: string;
-  confirmedAt?: Date;
+  reservedBy: string | undefined;
+  reservationToken: string | undefined;
+  reservationExpiresAt: Date | undefined;
+  confirmedBy: string | undefined;
+  confirmedAt: Date | undefined;
 }
 
 export interface Trip {
@@ -79,7 +79,12 @@ export class SeatInventoryManager {
         id: `seat_${tripId}_${i}`,
         tripId,
         seatNumber: `${i}`,
-        status: 'available'
+        status: 'available',
+        reservedBy: undefined,
+        reservationToken: undefined,
+        reservationExpiresAt: undefined,
+        confirmedBy: undefined,
+        confirmedAt: undefined
       });
     }
 

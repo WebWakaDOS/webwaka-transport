@@ -105,7 +105,9 @@ export class TripStateMachine {
       return { success: false, error: `Cannot start trip from ${trip.state} state` };
     }
 
-    trip.currentLocation = currentLocation;
+    if (currentLocation !== undefined) {
+      trip.currentLocation = currentLocation;
+    }
     return this.transitionState(tripId, 'in_transit', 'Trip started');
   }
 
@@ -252,12 +254,9 @@ export class TripStateMachine {
     const oldState = trip.state;
     trip.state = newState;
 
-    trip.transitions.push({
-      from: oldState,
-      to: newState,
-      timestamp: new Date(),
-      reason
-    });
+    const transition: TripStateTransition = { from: oldState, to: newState, timestamp: new Date() };
+    if (reason !== undefined) transition.reason = reason;
+    trip.transitions.push(transition);
 
     this.emit(`trip.${newState}`, trip);
     this.emit('trip.state_changed', {

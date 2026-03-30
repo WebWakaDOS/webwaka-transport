@@ -1,0 +1,19 @@
+{
+  "name": "@webwaka/core",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "WebWaka Platform Core — Build Once Use Infinitely. Auth, RBAC, Event Bus, ID generation, Nigeria-First formatters.",
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./src/index.js",
+      "types": "./src/index.d.ts"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "keywords": ["webwaka", "nigeria", "transport", "core"],
+  "license": "UNLICENSED"
+}

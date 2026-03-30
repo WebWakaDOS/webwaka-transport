@@ -20,7 +20,7 @@ export interface PlatformEvent {
  * A background Cloudflare Worker Cron (or Queues consumer) drains this outbox.
  */
 export async function publishEvent(
-  db: { prepare: (q: string) => { bind: (...args: unknown[]) => { run: () => Promise<void> } } },
+  db: { prepare: (q: string) => { bind: (...args: unknown[]) => { run: () => Promise<unknown> } } },
   event: PlatformEvent
 ): Promise<void> {
   const id = `evt_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;

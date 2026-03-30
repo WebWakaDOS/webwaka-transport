@@ -28,14 +28,14 @@ function createMockDB() {
       if (cond.includes('deleted_at IS NULL')) return row.deleted_at == null;
       if (cond.includes('IS NULL')) return true; // simplified
       if (cond.includes('!=') || cond.includes('<>')) {
-        const [col, _] = cond.split(/!=|<>/);
+        const [col] = cond.split(/!=|<>/);
         const val = params[paramIdx++];
-        return row[col.trim().split('.').pop()!] !== val;
+        return row[col!.trim().split('.').pop()!] !== val;
       }
       if (cond.includes('=')) {
-        const [col, _] = cond.split('=');
+        const [col] = cond.split('=');
         const val = params[paramIdx++];
-        const colName = col.trim().split('.').pop()!;
+        const colName = col!.trim().split('.').pop()!;
         return row[colName] === val;
       }
       return true;
@@ -55,13 +55,13 @@ function createMockDB() {
             // Extract table name
             const m = this._sql.match(/INTO\s+(\w+)/i);
             if (m) {
-              const tbl = m[1].toLowerCase();
+              const tbl = m[1]!.toLowerCase();
               if (!tables[tbl]) tables[tbl] = [];
               // Only insert if id doesn't exist
-              const idIdx = this._sql.match(/\(([^)]+)\)/)?.[1].split(',').findIndex((c: string) => c.trim() === 'id') ?? 0;
+              const idIdx = this._sql.match(/\(([^)]+)\)/)?.[1]!.split(',').findIndex((c: string) => c.trim() === 'id') ?? 0;
               const id = this._params[idIdx];
-              if (!tables[tbl].find((r: any) => r.id === id)) {
-                const cols = this._sql.match(/\(([^)]+)\)/)?.[1].split(',').map((c: string) => c.trim()) ?? [];
+              if (!tables[tbl]!.find((r: any) => r.id === id)) {
+                const cols = this._sql.match(/\(([^)]+)\)/)?.[1]!.split(',').map((c: string) => c.trim()) ?? [];
                 const row: any = {};
                 cols.forEach((col: string, i: number) => { row[col] = this._params[i]; });
                 tables[tbl].push(row);
@@ -72,9 +72,9 @@ function createMockDB() {
           if (sql.startsWith('INSERT OR REPLACE')) {
             const m = this._sql.match(/INTO\s+(\w+)/i);
             if (m) {
-              const tbl = m[1].toLowerCase();
+              const tbl = m[1]!.toLowerCase();
               if (!tables[tbl]) tables[tbl] = [];
-              const cols = this._sql.match(/\(([^)]+)\)/)?.[1].split(',').map((c: string) => c.trim()) ?? [];
+              const cols = this._sql.match(/\(([^)]+)\)/)?.[1]!.split(',').map((c: string) => c.trim()) ?? [];
               const row: any = {};
               cols.forEach((col: string, i: number) => { row[col] = this._params[i]; });
               const existing = tables[tbl].findIndex((r: any) => r.id === row.id);
@@ -86,9 +86,9 @@ function createMockDB() {
           if (sql.startsWith('INSERT')) {
             const m = this._sql.match(/INTO\s+(\w+)/i);
             if (m) {
-              const tbl = m[1].toLowerCase();
+              const tbl = m[1]!.toLowerCase();
               if (!tables[tbl]) tables[tbl] = [];
-              const cols = this._sql.match(/\(([^)]+)\)/)?.[1].split(',').map((c: string) => c.trim()) ?? [];
+              const cols = this._sql.match(/\(([^)]+)\)/)?.[1]!.split(',').map((c: string) => c.trim()) ?? [];
               const row: any = {};
               cols.forEach((col: string, i: number) => { row[col] = this._params[i]; });
               tables[tbl].push(row);
@@ -98,17 +98,17 @@ function createMockDB() {
           if (sql.startsWith('UPDATE')) {
             const m = this._sql.match(/UPDATE\s+(\w+)/i);
             if (m) {
-              const tbl = m[1].toLowerCase();
+              const tbl = m[1]!.toLowerCase();
               if (tables[tbl]) {
                 const idParam = this._params[this._params.length - 1];
-                tables[tbl] = tables[tbl].map((r: any) => {
+                tables[tbl] = tables[tbl]!.map((r: any) => {
                   if (r.id === idParam) {
                     const setClause = this._sql.match(/SET\s+(.+?)\s+WHERE/is)?.[1] ?? '';
                     const setParts = setClause.split(',');
                     let paramIdx = 0;
                     setParts.forEach((part: string) => {
-                      const [col, _] = part.split('=');
-                      const colName = col.trim().split('.').pop()!;
+                      const [col] = part.split('=');
+                      const colName = col!.trim().split('.').pop()!;
                       if (colName !== 'id') r[colName] = this._params[paramIdx++];
                     });
                   }
@@ -123,7 +123,7 @@ function createMockDB() {
         async first() {
           const m = this._sql.match(/FROM\s+(\w+)/i);
           if (!m) return null;
-          const tbl = m[1].toLowerCase();
+          const tbl = m[1]!.toLowerCase();
           if (!tables[tbl]) return null;
           const idParam = this._params[this._params.length - 1];
           return tables[tbl].find((r: any) => r.id === idParam) ?? null;
@@ -131,7 +131,7 @@ function createMockDB() {
         async all() {
           const m = this._sql.match(/FROM\s+(\w+)(?:\s+\w+)?/i);
           if (!m) return { results: [] };
-          const tbl = m[1].toLowerCase();
+          const tbl = m[1]!.toLowerCase();
           if (!tables[tbl]) return { results: [] };
           let results = [...tables[tbl]];
           // Apply simple filters from params
