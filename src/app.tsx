@@ -10,7 +10,7 @@ import { AuthProvider, useAuth, type WakaRole } from './core/auth/context';
 import { LoginScreen } from './components/login-screen';
 import { BookingFlow } from './components/booking-flow';
 import { api, ApiError } from './api/client';
-import type { TripSummary, Route, Vehicle, Trip, OperatorStats, Booking, SeatAvailability, TripManifest, ManifestEntry, Driver } from './api/client';
+import type { TripSummary, Route, Vehicle, Trip, OperatorStats, Booking, SeatAvailability, TripManifest, ManifestEntry, Driver, Agent, RevenueReport, RouteRevenue } from './api/client';
 
 // ============================================================
 // Error Boundary
@@ -363,7 +363,7 @@ function AgentPOSModule({ online }: { online: boolean }) {
 // ============================================================
 // Operator Dashboard Module (TRN-4) — Routes, Vehicles, Trips
 // ============================================================
-type OperatorView = 'overview' | 'routes' | 'vehicles' | 'trips' | 'drivers';
+type OperatorView = 'overview' | 'routes' | 'vehicles' | 'trips' | 'drivers' | 'agents' | 'reports';
 
 function OperatorOverview({ onNav }: { onNav: (v: OperatorView) => void }) {
   const [stats, setStats] = useState<OperatorStats | null>(null);
@@ -422,6 +422,14 @@ function OperatorOverview({ onNav }: { onNav: (v: OperatorView) => void }) {
             <button onClick={() => onNav('drivers')} style={navCardStyle}>
               <span style={{ fontSize: 24 }}>🧑‍✈️</span>
               <span style={{ fontSize: 13, fontWeight: 600, marginTop: 4 }}>Manage Drivers</span>
+            </button>
+            <button onClick={() => onNav('agents')} style={navCardStyle}>
+              <span style={{ fontSize: 24 }}>👤</span>
+              <span style={{ fontSize: 13, fontWeight: 600, marginTop: 4 }}>Manage Agents</span>
+            </button>
+            <button onClick={() => onNav('reports')} style={{ ...navCardStyle, gridColumn: 'span 2' }}>
+              <span style={{ fontSize: 24 }}>📊</span>
+              <span style={{ fontSize: 13, fontWeight: 600, marginTop: 4 }}>Revenue Reports</span>
             </button>
           </div>
         </>
@@ -1072,6 +1080,253 @@ function DriversPanel({ onBack }: { onBack: () => void }) {
   );
 }
 
+// ============================================================
+// Agents Panel (TRN-4)
+// ============================================================
+function AgentsPanel({ onBack }: { onBack: () => void }) {
+  const { user } = useAuth();
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({
+    name: '', phone: '', email: '', role: 'agent',
+    bus_parks: '', operator_id: user?.operator_id ?? '',
+  });
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState('');
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await api.getAgents(user?.operator_id ? { operator_id: user.operator_id } : {});
+      setAgents(data);
+    } catch { setAgents([]); } finally { setLoading(false); }
+  }, [user?.operator_id]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const handleCreate = async () => {
+    if (!form.name || !form.phone) { setFormError('Name and phone are required'); return; }
+    const operatorId = (form.operator_id || user?.operator_id) ?? '';
+    if (!operatorId) { setFormError('Operator ID required'); return; }
+    setSaving(true); setFormError('');
+    try {
+      const parsedParks = form.bus_parks ? form.bus_parks.split(',').map(s => s.trim()).filter(Boolean) : [];
+      await api.createAgent({
+        operator_id: operatorId,
+        name: form.name,
+        phone: form.phone,
+        ...(form.email ? { email: form.email } : {}),
+        role: form.role || 'agent',
+        ...(parsedParks.length > 0 ? { bus_parks: parsedParks } : {}),
+      });
+      setShowForm(false);
+      setForm({ name: '', phone: '', email: '', role: 'agent', bus_parks: '', operator_id: user?.operator_id ?? '' });
+      await load();
+    } catch (e) {
+      setFormError(e instanceof ApiError ? e.message : 'Failed to create agent');
+    } finally { setSaving(false); }
+  };
+
+  const toggleStatus = async (agent: Agent) => {
+    const newStatus = agent.status === 'active' ? 'suspended' : 'active';
+    try { await api.updateAgent(agent.id, { status: newStatus }); await load(); } catch { /* ignore */ }
+  };
+
+  const roleColors: Record<string, string> = { agent: '#2563eb', supervisor: '#7c3aed' };
+  const statusColors: Record<string, string> = { active: '#16a34a', suspended: '#dc2626', inactive: '#64748b' };
+
+  const parseBusParks = (raw: string): string[] => {
+    try { return JSON.parse(raw) as string[]; } catch { return []; }
+  };
+
+  return (
+    <>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+        <button onClick={onBack} style={backBtnStyle}>←</button>
+        <h2 style={{ margin: 0, fontSize: 18, flex: 1 }}>Manage Agents</h2>
+        <button onClick={() => void load()} style={{ ...secondaryBtnStyle, padding: '8px 14px', fontSize: 13 }}>↻</button>
+        <button onClick={() => setShowForm(s => !s)} style={{ ...primaryBtnStyle, padding: '8px 14px', fontSize: 13 }}>
+          {showForm ? 'Cancel' : '+ Add'}
+        </button>
+      </div>
+
+      {showForm && (
+        <div style={{ ...cardStyle, marginBottom: 16, cursor: 'default' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <input placeholder="Full name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} style={inputStyle} />
+            <input placeholder="Phone number" value={form.phone} onChange={e => setForm(f => ({ ...f, phone: e.target.value }))} style={inputStyle} />
+            <input placeholder="Email (optional)" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))} style={inputStyle} />
+            <select value={form.role} onChange={e => setForm(f => ({ ...f, role: e.target.value }))} style={inputStyle}>
+              <option value="agent">Agent (POS)</option>
+              <option value="supervisor">Supervisor</option>
+            </select>
+            <input placeholder="Bus parks (comma-separated IDs, optional)" value={form.bus_parks} onChange={e => setForm(f => ({ ...f, bus_parks: e.target.value }))} style={inputStyle} />
+            {!user?.operator_id && (
+              <input placeholder="Operator ID" value={form.operator_id} onChange={e => setForm(f => ({ ...f, operator_id: e.target.value }))} style={inputStyle} />
+            )}
+            {formError && <p style={{ color: '#dc2626', fontSize: 12, margin: 0 }}>{formError}</p>}
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={handleCreate} disabled={saving} style={{ ...primaryBtnStyle, flex: 1 }}>{saving ? 'Saving…' : 'Create Agent'}</button>
+              <button onClick={() => { setShowForm(false); setFormError(''); }} style={{ ...secondaryBtnStyle, flex: 1 }}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <p style={{ color: '#94a3b8', textAlign: 'center' }}>{t('loading')}</p>
+      ) : agents.length === 0 ? (
+        <p style={{ color: '#94a3b8', textAlign: 'center', marginTop: 32 }}>No agents yet. Add one to get started.</p>
+      ) : (
+        agents.map(a => {
+          const parks = parseBusParks(a.bus_parks);
+          return (
+            <div key={a.id} style={{ ...cardStyle, cursor: 'default', marginBottom: 10 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                <div>
+                  <div style={{ fontWeight: 700 }}>{a.name}</div>
+                  <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>{a.phone}{a.email && ` · ${a.email}`}</div>
+                </div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <span style={{
+                    fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 10,
+                    background: `${roleColors[a.role] ?? '#64748b'}20`,
+                    color: roleColors[a.role] ?? '#64748b',
+                  }}>{a.role}</span>
+                  <span style={{
+                    fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 10,
+                    background: `${statusColors[a.status] ?? '#64748b'}20`,
+                    color: statusColors[a.status] ?? '#64748b',
+                  }}>{a.status}</span>
+                </div>
+              </div>
+              {parks.length > 0 && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 6 }}>
+                  {parks.map(p => (
+                    <span key={p} style={{ fontSize: 10, padding: '2px 6px', borderRadius: 6, background: '#f1f5f9', color: '#475569', border: '1px solid #e2e8f0' }}>{p}</span>
+                  ))}
+                </div>
+              )}
+              <button
+                onClick={() => void toggleStatus(a)}
+                style={{ ...secondaryBtnStyle, marginTop: 10, width: '100%', fontSize: 12 }}
+              >
+                {a.status === 'active' ? 'Suspend' : 'Reactivate'}
+              </button>
+            </div>
+          );
+        })
+      )}
+    </>
+  );
+}
+
+// ============================================================
+// Reports Panel (TRN-4)
+// ============================================================
+type ReportPreset = 'today' | 'week' | 'month' | 'all';
+
+function ReportsPanel({ onBack }: { onBack: () => void }) {
+  const { user } = useAuth();
+  const [report, setReport] = useState<RevenueReport | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [preset, setPreset] = useState<ReportPreset>('today');
+
+  const loadReport = useCallback(async (p: ReportPreset) => {
+    setLoading(true);
+    const now = Date.now();
+    let from: number;
+    switch (p) {
+      case 'today': from = new Date().setHours(0, 0, 0, 0); break;
+      case 'week': from = now - 7 * 24 * 3600_000; break;
+      case 'month': from = now - 30 * 24 * 3600_000; break;
+      default: from = 0;
+    }
+    try {
+      setReport(await api.getRevenueReport({
+        from,
+        to: now,
+        ...(user?.operator_id ? { operator_id: user.operator_id } : {}),
+      }));
+    } catch { setReport(null); } finally { setLoading(false); }
+  }, [user?.operator_id]);
+
+  useEffect(() => { void loadReport(preset); }, [loadReport, preset]);
+
+  const presetLabels: Record<ReportPreset, string> = { today: 'Today', week: 'Last 7 days', month: 'Last 30 days', all: 'All time' };
+
+  return (
+    <>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+        <button onClick={onBack} style={backBtnStyle}>←</button>
+        <h2 style={{ margin: 0, fontSize: 18, flex: 1 }}>Revenue Reports</h2>
+        <button onClick={() => void loadReport(preset)} style={{ ...secondaryBtnStyle, padding: '8px 14px', fontSize: 13 }}>↻</button>
+      </div>
+
+      <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap' }}>
+        {(['today', 'week', 'month', 'all'] as ReportPreset[]).map(p => (
+          <button
+            key={p}
+            onClick={() => setPreset(p)}
+            style={{
+              padding: '6px 12px', borderRadius: 8, border: '1.5px solid',
+              borderColor: preset === p ? '#2563eb' : '#e2e8f0',
+              background: preset === p ? '#eff6ff' : '#fff',
+              color: preset === p ? '#2563eb' : '#64748b',
+              fontWeight: preset === p ? 700 : 400, fontSize: 12, cursor: 'pointer',
+            }}
+          >{presetLabels[p]}</button>
+        ))}
+      </div>
+
+      {loading ? (
+        <p style={{ color: '#94a3b8', textAlign: 'center' }}>{t('loading')}</p>
+      ) : !report ? (
+        <p style={{ color: '#dc2626', fontSize: 12, textAlign: 'center' }}>Failed to load report</p>
+      ) : (
+        <>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 16 }}>
+            <div style={{ ...cardStyle, cursor: 'default', borderLeft: '4px solid #16a34a' }}>
+              <div style={{ fontSize: 18, fontWeight: 800, color: '#16a34a' }}>{formatKoboToNaira(report.total_revenue_kobo)}</div>
+              <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>Total Revenue</div>
+            </div>
+            <div style={{ ...cardStyle, cursor: 'default', borderLeft: '4px solid #2563eb' }}>
+              <div style={{ fontSize: 18, fontWeight: 800, color: '#2563eb' }}>{formatKoboToNaira(report.booking_revenue_kobo)}</div>
+              <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>Online Bookings</div>
+            </div>
+            <div style={{ ...cardStyle, cursor: 'default', borderLeft: '4px solid #d97706' }}>
+              <div style={{ fontSize: 18, fontWeight: 800, color: '#d97706' }}>{formatKoboToNaira(report.agent_sales_revenue_kobo)}</div>
+              <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>Agent Sales</div>
+            </div>
+            <div style={{ ...cardStyle, cursor: 'default', borderLeft: '4px solid #7c3aed' }}>
+              <div style={{ fontSize: 18, fontWeight: 800, color: '#7c3aed' }}>{report.total_bookings + report.total_agent_transactions}</div>
+              <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>Total Transactions</div>
+            </div>
+          </div>
+
+          {report.top_routes.length > 0 && (
+            <div style={{ ...cardStyle, cursor: 'default' }}>
+              <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8 }}>Top Routes</div>
+              {report.top_routes.map((r: RouteRevenue) => (
+                <div key={r.route_id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', borderBottom: '1px solid #f1f5f9' }}>
+                  <div>
+                    <span style={{ fontWeight: 600, fontSize: 12 }}>{r.origin} → {r.destination}</span>
+                  </div>
+                  <span style={{ fontSize: 12, color: '#64748b' }}>{r.trip_count} trip{r.trip_count !== 1 ? 's' : ''}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {report.top_routes.length === 0 && (
+            <p style={{ color: '#94a3b8', textAlign: 'center', fontSize: 12 }}>No route data for this period</p>
+          )}
+        </>
+      )}
+    </>
+  );
+}
+
 function OperatorDashboardModule() {
   const [view, setView] = useState<OperatorView>('overview');
 
@@ -1082,6 +1337,8 @@ function OperatorDashboardModule() {
       {view === 'vehicles' && <VehiclesPanel onBack={() => setView('overview')} />}
       {view === 'trips' && <TripsPanel onBack={() => setView('overview')} />}
       {view === 'drivers' && <DriversPanel onBack={() => setView('overview')} />}
+      {view === 'agents' && <AgentsPanel onBack={() => setView('overview')} />}
+      {view === 'reports' && <ReportsPanel onBack={() => setView('overview')} />}
     </div>
   );
 }

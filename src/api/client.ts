@@ -147,6 +147,36 @@ export interface OperatorStats {
   today_revenue_kobo: number;
 }
 
+export interface Agent {
+  id: string;
+  operator_id: string;
+  name: string;
+  phone: string;
+  email: string | null;
+  role: string;
+  bus_parks: string;
+  status: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface RouteRevenue {
+  route_id: string;
+  origin: string;
+  destination: string;
+  trip_count: number;
+}
+
+export interface RevenueReport {
+  period: { from: number; to: number };
+  total_revenue_kobo: number;
+  booking_revenue_kobo: number;
+  agent_sales_revenue_kobo: number;
+  total_bookings: number;
+  total_agent_transactions: number;
+  top_routes: RouteRevenue[];
+}
+
 export interface ReservationResult {
   seat_id: string;
   trip_id: string;
@@ -444,6 +474,31 @@ export class ApiClient {
 
   async updateDriver(driverId: string, data: { name?: string; phone?: string; license_number?: string; status?: string }): Promise<void> {
     await this.request('PATCH', `/api/operator/drivers/${driverId}`, data);
+  }
+
+  async getAgents(params?: { operator_id?: string; status?: string }): Promise<Agent[]> {
+    const q = new URLSearchParams();
+    if (params?.operator_id) q.set('operator_id', params.operator_id);
+    if (params?.status) q.set('status', params.status);
+    const qs = q.toString() ? `?${q.toString()}` : '';
+    return this.request<Agent[]>('GET', `/api/agent/agents${qs}`);
+  }
+
+  async createAgent(data: { operator_id: string; name: string; phone: string; email?: string; role?: string; bus_parks?: string[] }): Promise<Agent> {
+    return this.request<Agent>('POST', '/api/agent/agents', data);
+  }
+
+  async updateAgent(agentId: string, data: { name?: string; phone?: string; email?: string; role?: string; status?: string; bus_parks?: string[] }): Promise<void> {
+    await this.request('PATCH', `/api/agent/agents/${agentId}`, data);
+  }
+
+  async getRevenueReport(params?: { from?: number; to?: number; operator_id?: string }): Promise<RevenueReport> {
+    const q = new URLSearchParams();
+    if (params?.from != null) q.set('from', String(params.from));
+    if (params?.to != null) q.set('to', String(params.to));
+    if (params?.operator_id) q.set('operator_id', params.operator_id);
+    const qs = q.toString() ? `?${q.toString()}` : '';
+    return this.request<RevenueReport>('GET', `/api/operator/reports/revenue${qs}`);
   }
 }
 

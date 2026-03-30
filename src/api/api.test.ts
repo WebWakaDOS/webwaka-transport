@@ -1018,6 +1018,155 @@ describe('Phase 7: PATCH /bookings/:id/cancel — Booking Cancellation (TRN-3)',
 });
 
 // ============================================================
+// Phase 10 — Agent Management + Revenue Reports Tests
+// ============================================================
+
+describe('Phase 10: PATCH /agents/:id — Update Agent (TRN-2)', () => {
+  let db: any;
+  beforeEach(() => {
+    db = createMockDB();
+    db._tables.agents.push({
+      id: 'agt_upd1', operator_id: 'opr_1', name: 'Chidi Obi', phone: '08011112222',
+      email: null, role: 'agent', bus_parks: '[]', status: 'active',
+      created_at: Date.now(), updated_at: Date.now(), deleted_at: null,
+    });
+  });
+
+  it('suspends an active agent', async () => {
+    const res = await agentSalesRouter.request('/agents/agt_upd1', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'suspended' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.id).toBe('agt_upd1');
+  });
+
+  it('updates agent role to supervisor', async () => {
+    const res = await agentSalesRouter.request('/agents/agt_upd1', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'supervisor' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+  });
+
+  it('updates bus_parks array', async () => {
+    const res = await agentSalesRouter.request('/agents/agt_upd1', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bus_parks: ['park_a', 'park_b'] }),
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+  });
+
+  it('returns 404 for unknown agent', async () => {
+    const res = await agentSalesRouter.request('/agents/agt_ghost', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'suspended' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(404);
+    const body = await res.json() as any;
+    expect(body.error).toMatch(/agent not found/i);
+  });
+});
+
+describe('Phase 10: GET /reports/revenue — Revenue Report (TRN-4)', () => {
+  let db: any;
+  const now = Date.now();
+  beforeEach(() => {
+    db = createMockDB();
+    db._tables.bookings.push(
+      {
+        id: 'bkg_r1', customer_id: 'cust_1', trip_id: 'trp_r1',
+        seat_ids: '["s1"]', passenger_names: '["Ola"]',
+        total_amount: 1500000, status: 'confirmed', payment_status: 'paid',
+        payment_method: 'paystack', payment_reference: 'pay_r1',
+        created_at: now - 3600_000, confirmed_at: now - 3600_000, cancelled_at: null, deleted_at: null,
+      },
+      {
+        id: 'bkg_r2', customer_id: 'cust_1', trip_id: 'trp_r1',
+        seat_ids: '["s2"]', passenger_names: '["Kemi"]',
+        total_amount: 1500000, status: 'confirmed', payment_status: 'paid',
+        payment_method: 'paystack', payment_reference: 'pay_r2',
+        created_at: now - 1800_000, confirmed_at: now - 1800_000, cancelled_at: null, deleted_at: null,
+      },
+    );
+    db._tables.sales_transactions.push({
+      id: 'txn_r1', agent_id: 'agt_1', trip_id: 'trp_r1',
+      seat_ids: '["s3"]', passenger_names: '["Bisi"]',
+      total_amount: 750000, payment_method: 'cash', payment_status: 'completed',
+      sync_status: 'synced', receipt_id: 'rct_r1',
+      created_at: now - 900_000, synced_at: now, deleted_at: null,
+    });
+    db._tables.routes.push({
+      id: 'rte_r1', operator_id: 'opr_1', origin: 'Lagos', destination: 'Ibadan',
+      base_fare: 1500000, status: 'active', deleted_at: null,
+      created_at: now, updated_at: now,
+    });
+  });
+
+  it('returns booking revenue from paid bookings', async () => {
+    const from = now - 7200_000;
+    const to = now + 1000;
+    const res = await operatorManagementRouter.request(`/reports/revenue?from=${from}&to=${to}`, {}, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.booking_revenue_kobo).toBe(3000000);
+    expect(body.data.total_bookings).toBe(2);
+  });
+
+  it('returns agent sales revenue from completed transactions', async () => {
+    const from = now - 7200_000;
+    const to = now + 1000;
+    const res = await operatorManagementRouter.request(`/reports/revenue?from=${from}&to=${to}`, {}, makeEnv(db));
+    const body = await res.json() as any;
+    expect(body.data.agent_sales_revenue_kobo).toBe(750000);
+    expect(body.data.total_agent_transactions).toBe(1);
+  });
+
+  it('sums total_revenue_kobo correctly', async () => {
+    const from = now - 7200_000;
+    const to = now + 1000;
+    const res = await operatorManagementRouter.request(`/reports/revenue?from=${from}&to=${to}`, {}, makeEnv(db));
+    const body = await res.json() as any;
+    expect(body.data.total_revenue_kobo).toBe(3750000);
+  });
+
+  it('returns period reflecting the query params', async () => {
+    const from = now - 86400_000;
+    const to = now;
+    const res = await operatorManagementRouter.request(`/reports/revenue?from=${from}&to=${to}`, {}, makeEnv(db));
+    const body = await res.json() as any;
+    expect(body.data.period.from).toBe(from);
+    expect(body.data.period.to).toBe(to);
+  });
+
+  it('returns top_routes list', async () => {
+    const res = await operatorManagementRouter.request(`/reports/revenue?from=0&to=${now + 1000}`, {}, makeEnv(db));
+    const body = await res.json() as any;
+    expect(Array.isArray(body.data.top_routes)).toBe(true);
+  });
+
+  it('returns zero revenue when no data exists', async () => {
+    db._tables.bookings = [];
+    db._tables.sales_transactions = [];
+    const from = now - 7200_000;
+    const res = await operatorManagementRouter.request(`/reports/revenue?from=${from}&to=${now + 1000}`, {}, makeEnv(db));
+    const body = await res.json() as any;
+    expect(body.data.booking_revenue_kobo).toBe(0);
+    expect(body.data.agent_sales_revenue_kobo).toBe(0);
+    expect(body.data.total_revenue_kobo).toBe(0);
+  });
+});
+
+// ============================================================
 // Phase 9 — Driver Management & Assignment Tests
 // ============================================================
 

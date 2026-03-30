@@ -700,6 +700,75 @@ operatorManagementRouter.patch('/drivers/:id', requireRole(['SUPER_ADMIN', 'TENA
   }
 });
 
+// ============================================================
+// GET /reports/revenue — operator revenue analytics
+// ============================================================
+operatorManagementRouter.get('/reports/revenue', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
+  const q = c.req.query();
+  const db = c.env.DB;
+  const now = Date.now();
+  const todayStart = new Date().setHours(0, 0, 0, 0);
+
+  const fromMs = q['from'] ? parseInt(q['from'], 10) : todayStart;
+  const toMs = q['to'] ? parseInt(q['to'], 10) : now;
+  const operatorId = q['operator_id'] ?? null;
+
+  const agentFilter = operatorId
+    ? `AND agent_id IN (SELECT id FROM agents WHERE operator_id = '${operatorId}' AND deleted_at IS NULL)`
+    : '';
+  const tripFilter = operatorId
+    ? `AND operator_id = '${operatorId}'`
+    : '';
+
+  try {
+    const [bookingRows, agentRows, routeResult] = await Promise.all([
+      // Booking revenue — online payments (bind status so mock filter works)
+      db.prepare(
+        `SELECT total_amount FROM bookings
+         WHERE payment_status = ? AND created_at >= ? AND created_at <= ? AND deleted_at IS NULL`
+      ).bind('paid', fromMs, toMs).all<{ total_amount: number }>(),
+
+      // Agent sales revenue — cash/POS (bind status so mock filter works)
+      db.prepare(
+        `SELECT total_amount FROM sales_transactions
+         WHERE payment_status = ? AND created_at >= ? AND created_at <= ?
+         AND deleted_at IS NULL ${agentFilter}`
+      ).bind('completed', fromMs, toMs).all<{ total_amount: number }>(),
+
+      // Per-route breakdown
+      db.prepare(
+        `SELECT r.id as route_id, r.origin, r.destination,
+                COUNT(t.id) as trip_count
+         FROM routes r
+         LEFT JOIN trips t ON t.route_id = r.id AND t.deleted_at IS NULL
+           AND t.departure_time >= ? AND t.departure_time <= ?
+         WHERE r.deleted_at IS NULL ${tripFilter}
+         GROUP BY r.id, r.origin, r.destination
+         ORDER BY trip_count DESC
+         LIMIT 10`
+      ).bind(fromMs, toMs).all<{ route_id: string; origin: string; destination: string; trip_count: number }>(),
+    ]);
+
+    const bookingRevenue = bookingRows.results.reduce((sum, r) => sum + r.total_amount, 0);
+    const agentRevenue = agentRows.results.reduce((sum, r) => sum + r.total_amount, 0);
+
+    return c.json({
+      success: true,
+      data: {
+        period: { from: fromMs, to: toMs },
+        total_revenue_kobo: bookingRevenue + agentRevenue,
+        booking_revenue_kobo: bookingRevenue,
+        agent_sales_revenue_kobo: agentRevenue,
+        total_bookings: bookingRows.results.length,
+        total_agent_transactions: agentRows.results.length,
+        top_routes: routeResult.results,
+      },
+    });
+  } catch {
+    return c.json({ success: false, error: 'Failed to fetch revenue report' }, 500);
+  }
+});
+
 operatorManagementRouter.get('/dashboard', async (c) => {
   const { operator_id } = c.req.query();
   const db = c.env.DB;

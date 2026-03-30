@@ -162,6 +162,50 @@ agentSalesRouter.get('/receipts/:id', async (c) => {
 });
 
 // ============================================================
+// PATCH /agents/:id — update agent profile / status
+// ============================================================
+agentSalesRouter.patch('/agents/:id', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+  const id = c.req.param('id');
+  const body = await c.req.json<Record<string, unknown>>();
+  const db = c.env.DB;
+  const now = Date.now();
+
+  try {
+    const agent = await db.prepare(
+      `SELECT * FROM agents WHERE id = ? AND deleted_at IS NULL`
+    ).bind(id).first<DbAgent>();
+    if (!agent) return c.json({ success: false, error: 'Agent not found' }, 404);
+
+    const { name, phone, email, role, status, bus_parks } = body as {
+      name?: string; phone?: string; email?: string;
+      role?: string; status?: string; bus_parks?: string[];
+    };
+
+    await db.prepare(
+      `UPDATE agents
+       SET name = COALESCE(?, name),
+           phone = COALESCE(?, phone),
+           email = COALESCE(?, email),
+           role = COALESCE(?, role),
+           status = COALESCE(?, status),
+           bus_parks = COALESCE(?, bus_parks),
+           updated_at = ?
+       WHERE id = ?`
+    ).bind(
+      name ?? null, phone ?? null, email ?? null, role ?? null, status ?? null,
+      bus_parks != null ? JSON.stringify(bus_parks) : null,
+      now, id
+    ).run();
+
+    return c.json({ success: true, data: { id, updated_at: now } });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : '';
+    if (msg.includes('UNIQUE')) return c.json({ success: false, error: 'Phone already in use' }, 409);
+    return c.json({ success: false, error: 'Failed to update agent' }, 500);
+  }
+});
+
+// ============================================================
 // POST /sync — offline-first batch sync (STAFF+)
 // ============================================================
 agentSalesRouter.post('/sync', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
