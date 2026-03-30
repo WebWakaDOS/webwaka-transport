@@ -1,0 +1,157 @@
+You are the Replit agent responsible for **WebWaka Transport** within a **multi-repo platform**. This repository is **not a standalone app**; it is one modular component in the broader WebWaka ecosystem, and you must always account for how it integrates with shared platform services and other repositories.
+
+## Mission
+
+Perform **very comprehensive deep research** into:
+
+1. The entire Transport codebase in this repo.
+2. The broader WebWaka platform architecture and cross-repo integration points.
+3. The Nigerian transport ecosystem in depth, especially bus transport, agent sales, offline ticketing, dispatch operations, booking behavior, route operations, and passenger expectations.[1][2][3][4]
+4. The best enhancements for transport use cases, with special focus on:
+   - Seat inventory synchronization.
+   - Offline agent sales / bus-park POS.
+   - Customer booking portal.
+   - Dispatch and trip operations.
+   - Operator/fleet/route management.
+   - Logistics-related integrations where appropriate, without duplicating features that already exist in the dedicated logistics repo/module.
+
+## Core Requirements
+
+### 1) Deep codebase research
+Inspect the repo thoroughly and identify:
+- Current architecture.
+- Existing transport modules and workflows.
+- Shared abstractions and reusable components.
+- Gaps, duplication, and missing functionality.
+- Dependencies on other repos or shared services.
+- Places where the **build once, use everywhere** principle can be applied.
+- Features that should be integrated from other repos instead of rebuilt here.
+
+### 2) Nigeria transport market research
+Research the Nigerian transport ecosystem deeply, including:
+- Intercity bus travel behavior.
+- Bus park / terminal operations.
+- Agent-led ticket sales.
+- Offline-first workflows.
+- Seat reservation expectations.
+- Payment behavior and trust patterns.
+- Route and dispatch operations.
+- Passenger booking preferences.
+- Operator pain points.
+- Parcel/logistics adjacency where relevant.
+- Compliance and operational realities in Nigeria.[2][3][4][5][6][1]
+
+### 3) Transport enhancement generation
+From the codebase research and market research, produce the **top 20 enhancements** for each of the following transport use cases:
+
+- Seat Inventory Synchronization
+- Offline Agent Sales / Bus Park POS
+- Customer Booking Portal
+- Dispatch / Trip Operations
+- Operator / Fleet / Route Management
+
+For each enhancement, include:
+- Enhancement name.
+- Why it matters.
+- What problem it solves.
+- Whether it should be built in this repo, integrated from another repo, or exposed via shared platform services.
+- Dependency or integration notes.
+- Priority level.
+
+### 4) Multi-repo awareness
+You must explicitly account for the fact that:
+- This repo is **not the full transport system**.
+- The platform is **multi-repo**.
+- Shared functionality may already exist elsewhere and should be integrated, not duplicated.
+- Transport must follow **build once, use everywhere** through reusable packages and shared services.
+
+### 5) Logistics boundary
+Pay special attention to logistics-related features:
+- There is a separate logistics repo/module.
+- That logistics repo already contains delivery, warehouse, and related logistics capabilities.
+- Transport may need to integrate with logistics where relevant, especially for parcel movement, fulfillment handoff, or operator workflows.
+- Do **not** rebuild logistics features here if they already exist elsewhere.
+- Instead, identify where integration is sufficient.
+- If external delivery APIs are needed, include them as integration options rather than reinvention.
+
+### 6) Platform principles
+Your recommendations must respect all of the following:
+
+- **Thoroughness Over Speed**: depth, validation, and completeness are non-negotiable.
+- **Zero Skipping Policy**: no phase skipping, no task skipping, no batching shortcuts; every task must produce concrete deliverables.
+- **Governance-Driven Execution**: no assumptions; consult governance documents deeply each time for full clarity and compliance.
+- **CI/CD Native Development**: everything must be designed, built, and validated through GitHub-based pipelines.
+- **Cloudflare-First Deployment**: optimize architecture and services primarily for Cloudflare environments.
+- **Multi-Repo Platform Architecture**: treat this repo as one part of an integrated ecosystem, not a complete product.
+- **Nigeria-First, Africa-Ready**: optimize for Nigeria first, with readiness for broader African expansion.
+- **Build Once, Use Everywhere**: avoid duplicating logic; prefer shared abstractions, reusable packages, and platform services.
+- **Mobile/PWA/Offline First**: transport workflows must work well in poor connectivity environments, especially bus parks and terminals.
+- **Vendor Neutral AI**: if AI appears in any enhancement, use OpenRouter abstraction only.
+- **Event-Driven Architecture**: do not use direct inter-database access; use events and integrations.
+- **Transport is not isolated**: passenger, operator, agent, dispatch, and logistics flows may cross repo boundaries.
+
+## Transport use-case focus
+
+Your research and recommendations must clearly address these transport scenarios:
+
+- **Seat inventory sync**: real-time or near-real-time synchronization of seat availability across terminals, agents, and channels.
+- **Offline agent sales**: bus park sales workflows that continue even with poor network access and sync later safely.
+- **Customer booking portal**: self-service booking for passengers, seat selection, payments, confirmations, and itinerary visibility.
+- **Dispatch and trip operations**: departure control, manifests, trip status, exceptions, and operational oversight.
+- **Operator management**: routes, fleets, drivers, buses, schedules, terminal assignments, and performance tracking.
+
+## Deliverables
+
+Provide the following outputs:
+
+1. **Transport codebase architecture report**
+   - Major modules.
+   - Integration points.
+   - Shared components.
+   - Reuse opportunities.
+   - Duplication risks.
+
+2. **Nigeria transport market research summary**
+   - Key transport patterns.
+   - Passenger and agent behavior.
+   - Operational realities.
+   - Market and ecosystem insights.
+   - Product implications for transport software.
+
+3. **Top 20 Seat Inventory Sync enhancements**
+4. **Top 20 Offline Agent Sales / Bus Park POS enhancements**
+5. **Top 20 Customer Booking Portal enhancements**
+6. **Top 20 Dispatch / Trip Operations enhancements**
+7. **Top 20 Operator / Fleet / Route Management enhancements**
+
+For each enhancement, include:
+- Title.
+- Description.
+- Why it matters.
+- Implementation approach.
+- Reuse/integration notes.
+- Dependencies.
+- Priority.
+
+8. **Cross-repo integration map**
+   - What should be built here.
+   - What should be integrated from other repos.
+   - What should be exposed as shared platform capabilities.
+   - What should never be duplicated.
+
+9. **Recommended execution order**
+   - Sequence the most important enhancements by dependency and business value.
+
+## Rules
+
+- Do not assume anything.
+- Verify everything against the codebase and governance documents.
+- Treat logistics as a separate module/repo unless integration is explicitly required.
+- Favor reuse over rebuilding.
+- Think platform-wide, not repo-locally.
+- Be exhaustive, structured, and precise.
+- Remember this repo is part of a broader transport and commerce ecosystem, not the entire product.
+
+## Expected standard
+
+I expect a deeply researched, platform-aware, implementation-ready response that can guide real roadmap decisions for the WebWaka Transport vertical.
