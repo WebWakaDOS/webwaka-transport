@@ -66,12 +66,31 @@ npm run typecheck # TypeScript strict mode check (0 errors required)
 - **Cloudflare-First**: D1, KV, Workers Cron, no Vercel/AWS dependencies
 - **Zero Skipping**: No `|| true` in CI, strict TypeScript (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`)
 
+## Offline Data Layer (Phase 1 — complete)
+
+### `src/core/offline/db.ts` — Dexie v2 schema
+Tables: `mutations`, `transactions`, `trips`, `seats`, `bookings`, `agent_sessions`, `conflict_log`, `operator_config`, `ndpr_consent`.
+Key helpers: `queueMutation`, `getPendingMutations` (respects `next_retry_at` backoff), `markMutationFailed` (exp. backoff 1→2→4→8→32s), `cacheTrips`/`getCachedTrips` (5-min TTL), `cacheSeats`/`getCachedSeats` (30-sec TTL), `logConflict`, `cacheAgentSession`, `recordNdprConsent`.
+
+### `src/core/offline/sync.ts` — SyncEngine
+`SyncEngine.flush()` reads PENDING mutations → routes each to the right API endpoint → marks SYNCED on 200, re-queues with backoff on 4xx/5xx (max 5 retries), logs conflict + abandons on 409, abandons immediately on 401/403. Exported `syncEngine` singleton. `setupSyncMessageHandler()` wires the SW `TRIGGER_SYNC` message to `syncEngine.flush()`.
+
+### `src/core/offline/hooks.ts` — React hooks
+`useOnlineStatus()` — tracks browser online/offline. `useSyncQueue()` — pending count + isSyncing + auto-sync on reconnect + manual `triggerSync()`. `usePendingSync()` — backwards-compat alias.
+
+### `public/sw.js` — Service Worker v2
+Background Sync: fires `TRIGGER_SYNC` to all window clients via MessageChannel; awaits `SYNC_DONE` reply before resolving `event.waitUntil()`. Push notifications wired. Notification click navigates to payload URL.
+
+### `scripts/provision-kv.sh` + `docs/infra-setup.md`
+KV namespace provisioning script (SESSIONS_KV, TENANT_CONFIG_KV, SEAT_CACHE_KV). Full infra setup guide (D1, KV, secrets, cron, deploy flow).
+
 ## Dependencies
 - `@webwaka/core` — in-repo package at `packages/core/src/index.ts`. Provides RBAC (`requireRole`), JWT (`verifyJWT`, `generateJWT`, `jwtAuthMiddleware`), tenant enforcement (`requireTenant`, `getTenantId`), event bus (`publishEvent`), formatting (`formatKobo`, `nanoid`).
 - `dexie` — IndexedDB wrapper for offline-first storage
+- `fake-indexeddb` — dev dependency for Dexie unit testing in Node environment
 - `hono` — Web framework for Cloudflare Workers
 - `react` + `react-dom` — React 19 UI framework
-- `vitest` — Test runner (140 unit tests across 5 test files)
+- `vitest` — Test runner (182 unit tests across 7 test files)
 
 ## Roles (RBAC)
 Six roles defined in `WakaRole` type: `SUPER_ADMIN`, `TENANT_ADMIN`, `SUPERVISOR`, `STAFF`, `DRIVER`, `CUSTOMER`.

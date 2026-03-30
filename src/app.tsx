@@ -5,39 +5,13 @@
  */
 import React, { useState, useEffect, useCallback } from 'react';
 import { t, setLanguage, getLanguage, getSupportedLanguages, formatKoboToNaira, type Language } from './core/i18n/index';
-import { getPendingMutationCount } from './core/offline/db';
-
-// ============================================================
-// Hooks
-// ============================================================
-function useOnlineStatus(): boolean {
-  const [online, setOnline] = useState(navigator.onLine);
-  useEffect(() => {
-    const on = () => setOnline(true);
-    const off = () => setOnline(false);
-    window.addEventListener('online', on);
-    window.addEventListener('offline', off);
-    return () => { window.removeEventListener('online', on); window.removeEventListener('offline', off); };
-  }, []);
-  return online;
-}
-
-function usePendingSync(): number {
-  const [count, setCount] = useState(0);
-  useEffect(() => {
-    const poll = async () => setCount(await getPendingMutationCount());
-    poll();
-    const interval = setInterval(poll, 5000);
-    return () => clearInterval(interval);
-  }, []);
-  return count;
-}
+import { useOnlineStatus, useSyncQueue } from './core/offline/hooks';
 
 // ============================================================
 // Status Bar
 // ============================================================
-function StatusBar({ online, pendingSync, lang, onLangChange }: {
-  online: boolean; pendingSync: number; lang: Language; onLangChange: (l: Language) => void;
+function StatusBar({ online, pendingSync, syncing, lang, onLangChange }: {
+  online: boolean; pendingSync: number; syncing: boolean; lang: Language; onLangChange: (l: Language) => void;
 }) {
   return (
     <div style={{
@@ -46,7 +20,8 @@ function StatusBar({ online, pendingSync, lang, onLangChange }: {
       background: online ? '#16a34a' : '#dc2626', color: '#fff',
     }}>
       <span>{online ? `● ${t('online')}` : `○ ${t('offline')}`}</span>
-      {pendingSync > 0 && <span>⟳ {pendingSync} {t('pending_sync')}</span>}
+      {syncing && <span>↻ {t('syncing') ?? 'Syncing…'}</span>}
+      {!syncing && pendingSync > 0 && <span>⟳ {pendingSync} {t('pending_sync')}</span>}
       <select
         value={lang}
         onChange={e => onLangChange(e.target.value as Language)}
@@ -663,7 +638,7 @@ export function TransportApp() {
   const [tab, setTab] = useState<Tab>('search');
   const [lang, setLang] = useState<Language>(getLanguage());
   const online = useOnlineStatus();
-  const pendingSync = usePendingSync();
+  const { pendingCount: pendingSync, isSyncing } = useSyncQueue();
 
   const handleLangChange = (l: Language) => {
     setLanguage(l);
@@ -679,7 +654,7 @@ export function TransportApp() {
 
   return (
     <div data-testid="transport-app" style={{ maxWidth: 430, margin: '0 auto', minHeight: '100vh', display: 'flex', flexDirection: 'column', fontFamily: 'system-ui, sans-serif', background: '#f8fafc' }}>
-      <StatusBar online={online} pendingSync={pendingSync} lang={lang} onLangChange={handleLangChange} />
+      <StatusBar online={online} pendingSync={pendingSync} syncing={isSyncing} lang={lang} onLangChange={handleLangChange} />
       <div style={{ background: '#1e40af', color: '#fff', padding: '12px 16px', fontWeight: 800, fontSize: 18 }}>
         🚌 {t('app_name')}
       </div>

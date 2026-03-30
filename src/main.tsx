@@ -1,6 +1,7 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { TransportApp } from './app';
+import { setupSyncMessageHandler } from './core/offline/sync';
 
 // Mount React app
 const container = document.getElementById('root');
@@ -14,12 +15,9 @@ if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js')
       .then(reg => {
         console.log('[SW] Registered:', reg.scope);
-        // Listen for background sync messages
-        navigator.serviceWorker.addEventListener('message', event => {
-          if (event.data?.type === 'SYNC_COMPLETE') {
-            console.log('[SW] Background sync complete:', event.data.count, 'mutations synced');
-          }
-        });
+        // Wire the sync message handler so SW background-sync events
+        // trigger SyncEngine.flush() in this client context.
+        setupSyncMessageHandler();
       })
       .catch(err => console.error('[SW] Registration failed:', err));
   });
