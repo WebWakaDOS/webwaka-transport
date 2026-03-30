@@ -10,7 +10,7 @@ import { AuthProvider, useAuth, type WakaRole } from './core/auth/context';
 import { LoginScreen } from './components/login-screen';
 import { BookingFlow } from './components/booking-flow';
 import { api, ApiError } from './api/client';
-import type { TripSummary, Route, Vehicle, Trip, OperatorStats, Booking, SeatAvailability } from './api/client';
+import type { TripSummary, Route, Vehicle, Trip, OperatorStats, Booking, SeatAvailability, TripManifest, ManifestEntry } from './api/client';
 
 // ============================================================
 // Error Boundary
@@ -633,6 +633,9 @@ function TripsPanel({ onBack }: { onBack: () => void }) {
   const [createForm, setCreateForm] = useState({ route_id: '', vehicle_id: '', departure_time: '', base_fare: '', total_seats: '' });
   const [saving, setSaving] = useState(false);
   const [createError, setCreateError] = useState('');
+  const [manifestTripId, setManifestTripId] = useState<string | null>(null);
+  const [manifest, setManifest] = useState<TripManifest | null>(null);
+  const [loadingManifest, setLoadingManifest] = useState(false);
 
   const stateColors: Record<string, string> = {
     scheduled: '#2563eb', boarding: '#d97706', in_transit: '#16a34a',
@@ -716,6 +719,17 @@ function TripsPanel({ onBack }: { onBack: () => void }) {
       await api.transitionTrip(tripId, newState);
       await load();
     } catch { /* ignore */ } finally { setUpdatingId(null); }
+  };
+
+  const loadManifest = async (tripId: string) => {
+    if (manifestTripId === tripId) { setManifestTripId(null); setManifest(null); return; }
+    setManifestTripId(tripId);
+    setManifest(null);
+    setLoadingManifest(true);
+    try {
+      setManifest(await api.getTripManifest(tripId));
+    } catch { setManifest(null); }
+    finally { setLoadingManifest(false); }
   };
 
   return (
@@ -827,11 +841,81 @@ function TripsPanel({ onBack }: { onBack: () => void }) {
                   ))}
                 </div>
               )}
+              <button
+                onClick={() => void loadManifest(trip.id)}
+                style={{
+                  marginTop: 10, width: '100%', padding: '7px', borderRadius: 8,
+                  border: '1.5px solid #2563eb20', background: '#eff6ff',
+                  color: '#2563eb', fontWeight: 600, fontSize: 12, cursor: 'pointer',
+                }}
+              >
+                {manifestTripId === trip.id ? '▲ Close Manifest' : '▼ Passenger Manifest'}
+              </button>
+
+              {manifestTripId === trip.id && (
+                <div style={{ marginTop: 8 }}>
+                  {loadingManifest ? (
+                    <p style={{ color: '#94a3b8', fontSize: 12, textAlign: 'center' }}>{t('loading')}</p>
+                  ) : manifest ? (
+                    <ManifestPanel manifest={manifest} />
+                  ) : (
+                    <p style={{ color: '#dc2626', fontSize: 12 }}>Failed to load manifest</p>
+                  )}
+                </div>
+              )}
             </div>
           );
         })
       )}
     </>
+  );
+}
+
+function ManifestPanel({ manifest }: { manifest: TripManifest }) {
+  const { summary, passengers } = manifest;
+  const payColors: Record<string, string> = { paid: '#16a34a', pending: '#d97706', refunded: '#6366f1' };
+  return (
+    <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: 10 }}>
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 10, fontSize: 12 }}>
+        <span style={{ color: '#64748b' }}>
+          <strong>{summary.total_bookings}</strong> booked / <strong>{summary.total_seats}</strong> seats
+          ({summary.load_factor}% load)
+        </span>
+        <span style={{ color: '#16a34a', fontWeight: 700 }}>
+          {formatKoboToNaira(summary.confirmed_revenue_kobo)} collected
+        </span>
+      </div>
+      {passengers.length === 0 ? (
+        <p style={{ color: '#94a3b8', fontSize: 12, textAlign: 'center' }}>No passengers yet</p>
+      ) : (
+        passengers.map((p: ManifestEntry) => (
+          <div key={p.booking_id} style={{
+            padding: '8px 10px', borderRadius: 8, background: '#f8fafc',
+            border: '1px solid #e2e8f0', marginBottom: 6,
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontWeight: 700, fontSize: 13 }}>{p.customer_name}</span>
+              <span style={{
+                fontSize: 10, fontWeight: 700, padding: '2px 6px', borderRadius: 10,
+                background: `${payColors[p.payment_status] ?? '#64748b'}20`,
+                color: payColors[p.payment_status] ?? '#64748b',
+              }}>{p.payment_status}</span>
+            </div>
+            <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>
+              {p.passenger_names.join(', ')}
+              {p.seat_ids.length > 0 && (
+                <span style={{ marginLeft: 6 }}>
+                  · Seats: {p.seat_ids.map(s => s.split('_s')[1] ?? s).join(', ')}
+                </span>
+              )}
+            </div>
+            <div style={{ fontSize: 11, color: '#64748b', marginTop: 1 }}>
+              {formatKoboToNaira(p.total_amount)} · #{p.booking_id.slice(-8)}
+            </div>
+          </div>
+        ))
+      )}
+    </div>
   );
 }
 
@@ -856,6 +940,7 @@ function MyBookingsModule() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [cancelling, setCancelling] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const loadBookings = useCallback(() => {
     setLoading(true);
@@ -892,44 +977,105 @@ function MyBookingsModule() {
       ) : bookings.length === 0 ? (
         <p style={{ color: '#94a3b8', textAlign: 'center', fontSize: 14 }}>{t('no_trips_found')}</p>
       ) : (
-        bookings.map(bkg => (
-          <div key={bkg.id} style={cardStyle}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span style={{ fontWeight: 700 }}>
-                {bkg.origin != null ? bkg.origin : '—'} → {bkg.destination != null ? bkg.destination : '—'}
-              </span>
-              <span style={{
-                fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 12,
-                background: `${statusColors[bkg.status] ?? '#64748b'}20`,
-                color: statusColors[bkg.status] ?? '#64748b',
-              }}>
-                {t(bkg.status)}
-              </span>
-            </div>
-            {bkg.departure_time != null && (
-              <div style={{ fontSize: 13, color: '#64748b', marginTop: 4 }}>
-                {new Date(bkg.departure_time).toLocaleString('en-NG')}
+        bookings.map(bkg => {
+          const isExpanded = expandedId === bkg.id;
+          const safeSeatIds: string[] = (() => {
+            if (Array.isArray(bkg.seat_ids)) return bkg.seat_ids;
+            try { return JSON.parse(bkg.seat_ids as unknown as string) as string[]; } catch { return []; }
+          })();
+          const safePassengerNames: string[] = (() => {
+            if (!bkg.passenger_names) return [];
+            if (Array.isArray(bkg.passenger_names)) return bkg.passenger_names;
+            try { return JSON.parse(bkg.passenger_names as unknown as string) as string[]; } catch { return []; }
+          })();
+          return (
+            <div
+              key={bkg.id}
+              style={{ ...cardStyle, cursor: 'pointer' }}
+              onClick={() => setExpandedId(isExpanded ? null : bkg.id)}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontWeight: 700 }}>
+                  {bkg.origin != null ? bkg.origin : '—'} → {bkg.destination != null ? bkg.destination : '—'}
+                </span>
+                <span style={{
+                  fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 12,
+                  background: `${statusColors[bkg.status] ?? '#64748b'}20`,
+                  color: statusColors[bkg.status] ?? '#64748b',
+                }}>
+                  {t(bkg.status)}
+                </span>
               </div>
-            )}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
-              <div style={{ fontSize: 15, fontWeight: 700, color: '#16a34a' }}>
-                {formatKoboToNaira(bkg.total_amount)}
+              {bkg.departure_time != null && (
+                <div style={{ fontSize: 13, color: '#64748b', marginTop: 4 }}>
+                  {new Date(bkg.departure_time).toLocaleString('en-NG')}
+                </div>
+              )}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
+                <div style={{ fontSize: 15, fontWeight: 700, color: '#16a34a' }}>
+                  {formatKoboToNaira(bkg.total_amount)}
+                </div>
+                {bkg.status === 'pending' && (
+                  <button
+                    disabled={cancelling === bkg.id}
+                    onClick={e => { e.stopPropagation(); void handleCancel(bkg.id); }}
+                    style={{
+                      padding: '5px 12px', borderRadius: 8, border: '1.5px solid #dc2626',
+                      background: '#fee2e2', color: '#b91c1c', fontWeight: 600, fontSize: 12, cursor: 'pointer',
+                    }}
+                  >
+                    {cancelling === bkg.id ? '…' : 'Cancel'}
+                  </button>
+                )}
               </div>
-              {bkg.status === 'pending' && (
-                <button
-                  disabled={cancelling === bkg.id}
-                  onClick={() => void handleCancel(bkg.id)}
-                  style={{
-                    padding: '5px 12px', borderRadius: 8, border: '1.5px solid #dc2626',
-                    background: '#fee2e2', color: '#b91c1c', fontWeight: 600, fontSize: 12, cursor: 'pointer',
-                  }}
-                >
-                  {cancelling === bkg.id ? '…' : 'Cancel'}
-                </button>
+
+              {isExpanded && (
+                <div style={{ marginTop: 12, borderTop: '1px solid #e2e8f0', paddingTop: 12 }}
+                     onClick={e => e.stopPropagation()}>
+                  <div style={{
+                    background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10,
+                    padding: '12px 14px', fontFamily: 'monospace',
+                  }}>
+                    <div style={{ fontSize: 11, color: '#16a34a', fontWeight: 700, letterSpacing: 1, marginBottom: 6 }}>
+                      BOOKING CONFIRMATION
+                    </div>
+                    <div style={{ fontSize: 18, fontWeight: 900, letterSpacing: 2, color: '#1e293b', marginBottom: 8 }}>
+                      #{bkg.id.slice(-10).toUpperCase()}
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 12px', fontSize: 12 }}>
+                      <span style={{ color: '#64748b' }}>Route</span>
+                      <span style={{ fontWeight: 600 }}>{bkg.origin ?? '—'} → {bkg.destination ?? '—'}</span>
+                      {bkg.departure_time != null && <>
+                        <span style={{ color: '#64748b' }}>Departure</span>
+                        <span style={{ fontWeight: 600 }}>{new Date(bkg.departure_time).toLocaleString('en-NG')}</span>
+                      </>}
+                      {safePassengerNames.length > 0 && <>
+                        <span style={{ color: '#64748b' }}>Passenger{safePassengerNames.length > 1 ? 's' : ''}</span>
+                        <span style={{ fontWeight: 600 }}>{safePassengerNames.join(', ')}</span>
+                      </>}
+                      {safeSeatIds.length > 0 && <>
+                        <span style={{ color: '#64748b' }}>Seat{safeSeatIds.length > 1 ? 's' : ''}</span>
+                        <span style={{ fontWeight: 600 }}>{safeSeatIds.map(s => s.split('_s')[1] ?? s).join(', ')}</span>
+                      </>}
+                      <span style={{ color: '#64748b' }}>Amount</span>
+                      <span style={{ fontWeight: 600, color: '#16a34a' }}>{formatKoboToNaira(bkg.total_amount)}</span>
+                      <span style={{ color: '#64748b' }}>Payment</span>
+                      <span style={{ fontWeight: 600 }}>{bkg.payment_status} · {bkg.payment_method}</span>
+                      {bkg.payment_reference && <>
+                        <span style={{ color: '#64748b' }}>Ref</span>
+                        <span style={{ fontWeight: 600, wordBreak: 'break-all', fontSize: 11 }}>{bkg.payment_reference}</span>
+                      </>}
+                      {bkg.operator_name && <>
+                        <span style={{ color: '#64748b' }}>Operator</span>
+                        <span style={{ fontWeight: 600 }}>{bkg.operator_name}</span>
+                      </>}
+                    </div>
+                  </div>
+                </div>
               )}
             </div>
-          </div>
-        ))
+          );
+        })
       )}
     </div>
   );

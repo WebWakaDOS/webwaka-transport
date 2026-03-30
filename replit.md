@@ -205,6 +205,8 @@ Multi-step wizard integrated with `TripSearchModule` in `app.tsx`:
 - `PATCH /api/operator/vehicles/:id` — update model/status/seats (TRN-4)
 - `POST /api/operator/trips` — create trip + batch-insert seats; derives `operator_id` from route; accepts `base_fare`/`total_seats` overrides (TRN-4, Phase 7)
 - `PATCH /api/booking/bookings/:id/cancel` — customer self-cancel pending booking; releases seats (TRN-3, Phase 7)
+- `GET /api/operator/trips/:id/manifest` — passenger manifest: trip summary, passenger list (name/phone/seats/payment), load factor, confirmed revenue (TRN-4, Phase 8)
+- `GET /api/booking/bookings/:id` — single booking detail with passenger_names, seat_ids, operator_name (TRN-3, Phase 8)
 
 ### Hardening applied to all 4 API files
 - All D1 queries wrapped in try/catch with 500 fallback
@@ -236,7 +238,7 @@ KV namespace provisioning script (SESSIONS_KV, TENANT_CONFIG_KV, SEAT_CACHE_KV).
 - `fake-indexeddb` — dev dependency for Dexie unit testing in Node environment
 - `hono` — Web framework for Cloudflare Workers
 - `react` + `react-dom` — React 19 UI framework
-- `vitest` — Test runner (242 unit tests across 7 test files)
+- `vitest` — Test runner (249 unit tests across 7 test files)
 
 ## Roles (RBAC)
 Six roles defined in `WakaRole` type: `SUPER_ADMIN`, `TENANT_ADMIN`, `SUPERVISOR`, `STAFF`, `DRIVER`, `CUSTOMER`.

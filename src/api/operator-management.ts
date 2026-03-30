@@ -513,6 +513,94 @@ operatorManagementRouter.patch('/trips/:id/location', requireRole(['SUPER_ADMIN'
   }
 });
 
+// ============================================================
+// GET /trips/:id/manifest — passenger manifest for boarding
+// ============================================================
+operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
+  const id = c.req.param('id');
+  const db = c.env.DB;
+
+  try {
+    const trip = await db.prepare(
+      `SELECT id, operator_id, route_id, state, departure_time FROM trips WHERE id = ? AND deleted_at IS NULL`
+    ).bind(id).first<{ id: string; operator_id: string; route_id: string; state: string; departure_time: number }>();
+    if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
+
+    const [routeRow, bookingsResult, seatsResult] = await Promise.all([
+      db.prepare(
+        `SELECT origin, destination, base_fare FROM routes WHERE id = ?`
+      ).bind(trip.route_id).first<{ origin: string; destination: string; base_fare: number }>(),
+      db.prepare(
+        `SELECT id, customer_id, seat_ids, passenger_names, status, payment_status, total_amount, created_at
+         FROM bookings WHERE trip_id = ? AND deleted_at IS NULL AND status != 'cancelled'
+         ORDER BY created_at ASC`
+      ).bind(id).all<{ id: string; customer_id: string; seat_ids: string; passenger_names: string; status: string; payment_status: string; total_amount: number; created_at: number }>(),
+      db.prepare(
+        `SELECT id FROM seats WHERE trip_id = ?`
+      ).bind(id).all<{ id: string }>(),
+    ]);
+
+    // Fetch customer details per booking (small list — boarding manifest scenario)
+    const passengers = await Promise.all(
+      bookingsResult.results.map(async (bkg) => {
+        let customer_name = 'Unknown';
+        let customer_phone = '';
+        try {
+          const customer = await db.prepare(
+            `SELECT name, phone FROM customers WHERE id = ?`
+          ).bind(bkg.customer_id).first<{ name: string; phone: string }>();
+          if (customer) { customer_name = customer.name; customer_phone = customer.phone; }
+        } catch { /* gracefully skip customer lookup failure */ }
+
+        const seatIds = JSON.parse(bkg.seat_ids) as string[];
+        const passengerNames = JSON.parse(bkg.passenger_names) as string[];
+
+        return {
+          booking_id: bkg.id,
+          customer_name,
+          customer_phone,
+          seat_ids: seatIds,
+          passenger_names: passengerNames,
+          status: bkg.status,
+          payment_status: bkg.payment_status,
+          total_amount: bkg.total_amount,
+          booked_at: bkg.created_at,
+        };
+      })
+    );
+
+    const confirmedRevenue = bookingsResult.results
+      .filter(b => b.payment_status === 'paid' || b.status === 'confirmed')
+      .reduce((sum, b) => sum + b.total_amount, 0);
+
+    return c.json({
+      success: true,
+      data: {
+        trip: {
+          id: trip.id,
+          state: trip.state,
+          departure_time: trip.departure_time,
+          origin: routeRow?.origin ?? '',
+          destination: routeRow?.destination ?? '',
+          base_fare: routeRow?.base_fare ?? 0,
+          total_seats: seatsResult.results.length,
+        },
+        passengers,
+        summary: {
+          total_bookings: passengers.length,
+          total_seats: seatsResult.results.length,
+          load_factor: seatsResult.results.length > 0
+            ? Math.round((passengers.length / seatsResult.results.length) * 100)
+            : 0,
+          confirmed_revenue_kobo: confirmedRevenue,
+        },
+      },
+    });
+  } catch {
+    return c.json({ success: false, error: 'Failed to fetch trip manifest' }, 500);
+  }
+});
+
 operatorManagementRouter.get('/dashboard', async (c) => {
   const { operator_id } = c.req.query();
   const db = c.env.DB;

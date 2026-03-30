@@ -1018,6 +1018,121 @@ describe('Phase 7: PATCH /bookings/:id/cancel — Booking Cancellation (TRN-3)',
 });
 
 // ============================================================
+// Phase 8 — Trip Manifest & Booking Ticket Tests
+// ============================================================
+
+describe('Phase 8: GET /trips/:id/manifest — Trip Manifest (TRN-4)', () => {
+  let db: any;
+  beforeEach(() => {
+    db = createMockDB();
+    db._tables.trips.push({
+      id: 'trp_m1', operator_id: 'opr_1', route_id: 'rte_m1', state: 'boarding',
+      departure_time: Date.now() + 1800_000, deleted_at: null,
+      created_at: Date.now(), updated_at: Date.now(),
+    });
+    db._tables.routes.push({
+      id: 'rte_m1', operator_id: 'opr_1', origin: 'Lagos', destination: 'Abuja',
+      base_fare: 500000, status: 'active', deleted_at: null,
+      created_at: Date.now(), updated_at: Date.now(),
+    });
+    db._tables.seats.push(
+      { id: 'trp_m1_s1', trip_id: 'trp_m1', seat_number: '01', status: 'confirmed', version: 1 },
+      { id: 'trp_m1_s2', trip_id: 'trp_m1', seat_number: '02', status: 'confirmed', version: 1 },
+      { id: 'trp_m1_s3', trip_id: 'trp_m1', seat_number: '03', status: 'available', version: 0 },
+    );
+    db._tables.customers.push({
+      id: 'cust_m1', name: 'Adaeze Obi', phone: '08011111111',
+      ndpr_consent: 1, status: 'active', deleted_at: null,
+      created_at: Date.now(), updated_at: Date.now(),
+    });
+    db._tables.bookings.push({
+      id: 'bkg_m1', customer_id: 'cust_m1', trip_id: 'trp_m1',
+      seat_ids: '["trp_m1_s1","trp_m1_s2"]',
+      passenger_names: '["Adaeze Obi","Chinedu Obi"]',
+      total_amount: 1000000, status: 'confirmed', payment_status: 'paid',
+      payment_method: 'paystack', payment_reference: 'PAY_001',
+      created_at: Date.now(), confirmed_at: Date.now(), cancelled_at: null, deleted_at: null,
+    });
+  });
+
+  it('returns manifest with trip summary and passengers', async () => {
+    const res = await operatorManagementRouter.request('/trips/trp_m1/manifest', {}, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.trip.id).toBe('trp_m1');
+    expect(body.data.trip.origin).toBe('Lagos');
+    expect(body.data.trip.destination).toBe('Abuja');
+    expect(body.data.trip.state).toBe('boarding');
+    expect(body.data.passengers).toHaveLength(1);
+    expect(body.data.passengers[0].booking_id).toBe('bkg_m1');
+    expect(body.data.passengers[0].seat_ids).toEqual(['trp_m1_s1', 'trp_m1_s2']);
+    expect(body.data.passengers[0].passenger_names).toEqual(['Adaeze Obi', 'Chinedu Obi']);
+    expect(body.data.summary.total_bookings).toBe(1);
+    expect(body.data.summary.total_seats).toBe(3);
+  });
+
+  it('includes confirmed_revenue_kobo for paid bookings', async () => {
+    const res = await operatorManagementRouter.request('/trips/trp_m1/manifest', {}, makeEnv(db));
+    const body = await res.json() as any;
+    expect(body.data.summary.confirmed_revenue_kobo).toBe(1000000);
+  });
+
+  it('returns empty passengers when no bookings exist', async () => {
+    db._tables.bookings = [];
+    const res = await operatorManagementRouter.request('/trips/trp_m1/manifest', {}, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.data.passengers).toHaveLength(0);
+    expect(body.data.summary.total_bookings).toBe(0);
+    expect(body.data.summary.confirmed_revenue_kobo).toBe(0);
+  });
+
+  it('returns 404 for unknown trip', async () => {
+    const res = await operatorManagementRouter.request('/trips/trp_ghost/manifest', {}, makeEnv(db));
+    expect(res.status).toBe(404);
+    const body = await res.json() as any;
+    expect(body.error).toMatch(/trip not found/i);
+  });
+
+  it('load_factor reflects seats vs bookings ratio', async () => {
+    const res = await operatorManagementRouter.request('/trips/trp_m1/manifest', {}, makeEnv(db));
+    const body = await res.json() as any;
+    expect(body.data.summary.load_factor).toBe(33); // 1/3 seats booked = 33%
+  });
+});
+
+describe('Phase 8: GET /bookings/:id — Booking Detail (TRN-3)', () => {
+  let db: any;
+  beforeEach(() => {
+    db = createMockDB();
+    db._tables.bookings.push({
+      id: 'bkg_detail1', customer_id: 'cust_1', trip_id: 'trp_1',
+      seat_ids: '["trp_1_s3"]', passenger_names: '["Emeka Eze"]',
+      total_amount: 750000, status: 'confirmed', payment_status: 'paid',
+      payment_method: 'cash', payment_reference: 'pay_xyz',
+      created_at: Date.now(), confirmed_at: Date.now(), cancelled_at: null, deleted_at: null,
+    });
+  });
+
+  it('returns booking detail with seat_ids and passenger_names', async () => {
+    const res = await bookingPortalRouter.request('/bookings/bkg_detail1', {}, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.id).toBe('bkg_detail1');
+    expect(body.data.seat_ids).toBe('["trp_1_s3"]');
+    expect(body.data.passenger_names).toBe('["Emeka Eze"]');
+    expect(body.data.total_amount).toBe(750000);
+  });
+
+  it('returns 404 for unknown booking', async () => {
+    const res = await bookingPortalRouter.request('/bookings/bkg_ghost', {}, makeEnv(db));
+    expect(res.status).toBe(404);
+  });
+});
+
+// ============================================================
 // Phase 2 — Pagination Tests
 // ============================================================
 

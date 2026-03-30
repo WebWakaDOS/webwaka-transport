@@ -1,0 +1,191 @@
+Understood — that materially changes the framing. The **Legal Practice Management System** should be treated as one of the core Professional modules already implemented, so the Professional prompt should be reorganized around that reality rather than around generic services-marketplace ideas.
+
+Here is the corrected version:
+
+***
+
+## Replit Prompt — WebWaka Professional Repo
+
+You are the Replit agent responsible for **WebWaka Professional** within a **multi-repo platform**. This repository is **not a standalone app**; it is one modular component in the broader WebWaka ecosystem, and you must always account for how it integrates with shared platform services and other repositories.
+
+## Mission
+
+Perform **very comprehensive deep research** into:
+
+1. The entire Professional codebase in this repo.
+2. The broader WebWaka platform architecture and cross-repo integration points.
+3. The already implemented and intended Professional modules, with particular attention to the fact that the **Legal Practice Management System is one of the most important modules and has already been implemented**.
+4. The Nigerian professional ecosystem in depth, especially the legal and professional-services operating environment, workflow expectations, compliance realities, trust requirements, records handling, scheduling, billing, and client-service needs.
+5. The best enhancements for the WebWaka Professional vertical across its core use cases and modules.
+
+Your output must be based on actual research, existing implementation reality, and governance documents — not assumptions.
+
+## Core Requirements
+
+### 1) Deep codebase research
+Inspect the repo thoroughly and identify:
+- Current architecture.
+- Existing Professional modules and workflows.
+- Which modules are already implemented.
+- The current implementation footprint of the **Legal Practice Management System**.
+- Shared abstractions and reusable components.
+- Gaps, duplication, and missing functionality.
+- Dependencies on other repos or shared services.
+- Places where the **build once, use everywhere** principle can be applied.
+- Features that should be integrated from other repos instead of rebuilt here.
+
+### 2) Professional domain research
+Research the Nigerian professional-services ecosystem deeply, with emphasis on professional operations and structured service delivery, including:
+- Legal practice workflows.
+- Case and matter management expectations.
+- Client onboarding and communications.
+- Appointments, scheduling, and reminders.
+- Documentation and records handling.
+- Billing, invoicing, retainers, and payment expectations.
+- Staff, role, and approval workflows.
+- Trust, compliance, privacy, and audit expectations.
+- Other high-value professional service modules adjacent to legal practice.
+
+### 3) Professional enhancement generation
+From the codebase research and market/domain research, produce the **top 20 enhancements** for each of the following module areas:
+
+- Legal Practice Management System
+- Client & Case / Matter Management
+- Appointments / Calendar / Hearings / Reminders
+- Documents / Records / Compliance Workflows
+- Billing / Invoicing / Retainers / Payments
+- Professional Team Operations / Roles / Approvals
+- Other Professional Service Modules already present or clearly intended in the repo
+
+For each enhancement, include:
+- Enhancement name.
+- Why it matters.
+- What problem it solves.
+- Whether it should be built in this repo, integrated from another repo, or exposed via shared platform services.
+- Dependency or integration notes.
+- Priority level.
+
+### 4) Multi-repo awareness
+You must explicitly account for the fact that:
+- This repo is **not the full application**.
+- The platform is **multi-repo**.
+- Shared functionality may already exist elsewhere and should be integrated, not duplicated.
+- Professional workflows must follow **build once, use everywhere** through reusable packages and shared services.
+
+### 5) Legal Practice Management priority
+Pay special attention to the fact that:
+- The **Legal Practice Management System is one of the most important Professional modules**.
+- It is **already implemented**, so your job is not to ignore or flatten it into generic marketplace language.
+- You must treat it as a major anchor module in the Professional repo.
+- Recommendations must distinguish clearly between:
+  - already implemented legal capabilities,
+  - missing enhancements,
+  - reusable patterns that can power other professional modules,
+  - areas that should be extended rather than rebuilt.
+
+### 6) Cross-repo reuse boundaries
+Pay special attention to what should **not** be rebuilt here:
+- Shared identity, tenancy, audit, notifications, and workflow primitives may already exist elsewhere.
+- Payments and financial workflows may depend on shared commerce/fintech modules.
+- Messaging, AI, compliance logging, and document primitives may already belong to shared platform capabilities.
+- Admin and governance enforcement should reuse platform-wide capabilities.
+- Any logistics, commerce, or civic-adjacent workflows should integrate where appropriate instead of duplicating platform features.
+
+### 7) Professional use-case coverage
+Your research and recommendations must clearly address these Professional scenarios:
+
+- **Legal practice management**: law firm operations, case/matter lifecycle, client files, legal documents, court dates, hearing schedules, internal workflows, billing, retainers, and service delivery.
+- **Client management**: intake, onboarding, communication history, records, follow-ups, and service visibility.
+- **Scheduling and reminders**: appointments, consultations, deadlines, hearing dates, internal tasks, and notification flows.
+- **Document and record workflows**: matter documents, templates, uploads, organization, compliance-sensitive storage, auditability, and retrieval.
+- **Financial workflows**: invoices, retainers, fee tracking, payment status, reconciliations, and receipts.
+- **Professional operations**: partners, associates, clerks, support staff, assignment flows, approvals, and workload management.
+- **Module expansion**: identify how existing Professional patterns may extend into other professional verticals without diluting the core legal module.
+
+## Platform principles
+
+Your recommendations must respect all of the following:
+
+- **Thoroughness Over Speed**: depth, validation, and completeness are non-negotiable.
+- **Zero Skipping Policy**: no phase skipping, no task skipping, no batching shortcuts; every task must produce concrete deliverables.
+- **Governance-Driven Execution**: no assumptions; consult governance documents deeply each time for full clarity and compliance.
+- **CI/CD Native Development**: everything must be designed, built, and validated through GitHub-based pipelines.
+- **Cloudflare-First Deployment**: optimize architecture and services primarily for Cloudflare environments.
+- **Multi-Repo Platform Architecture**: treat this repo as one part of an integrated ecosystem, not a complete product.
+- **Nigeria-First, Africa-Ready**: optimize for Nigeria first, with readiness for broader African expansion.
+- **Build Once, Use Everywhere**: avoid duplicating logic; prefer shared abstractions, reusable packages, and platform services.
+- **Mobile/PWA/Offline First**: critical workflows should remain usable on mobile and under unreliable connectivity conditions.
+- **Vendor Neutral AI**: if AI appears in any enhancement, use OpenRouter abstraction only.
+- **Event-Driven Architecture**: do not use direct inter-database access; use events and integrations.
+- **Strict multi-tenancy**: recommendations must preserve tenant isolation and tenant-as-code principles.
+
+## Deliverables
+
+Provide the following outputs:
+
+1. **Professional codebase architecture report**
+   - Major modules.
+   - Integration points.
+   - Shared components.
+   - Reuse opportunities.
+   - Duplication risks.
+
+2. **Professional module reality map**
+   - What is already implemented.
+   - What is partially implemented.
+   - What is missing.
+   - Special analysis of the **Legal Practice Management System**.
+   - Which abstractions can be reused across other professional modules.
+
+3. **Nigeria professional domain research summary**
+   - Legal and professional workflow realities.
+   - Client expectations.
+   - Billing and records realities.
+   - Trust, privacy, and compliance implications.
+   - Product implications for WebWaka Professional.
+
+4. **Top 20 Legal Practice Management enhancements**
+5. **Top 20 Client & Case / Matter Management enhancements**
+6. **Top 20 Appointments / Calendar / Hearings / Reminders enhancements**
+7. **Top 20 Documents / Records / Compliance Workflow enhancements**
+8. **Top 20 Billing / Invoicing / Retainers / Payments enhancements**
+9. **Top 20 Professional Team Operations / Roles / Approvals enhancements**
+10. **Top 20 enhancements for any other major Professional module discovered in the repo**
+
+For each enhancement, include:
+- Title.
+- Description.
+- Why it matters.
+- Implementation approach.
+- Reuse/integration notes.
+- Dependencies.
+- Priority.
+
+11. **Cross-repo integration map**
+   - What should be built here.
+   - What should be integrated from other repos.
+   - What should be exposed as shared platform capabilities.
+   - What should never be duplicated.
+
+12. **Recommended execution order**
+   - Sequence the most important enhancements by dependency and business value.
+
+## Rules
+
+- Do not assume anything.
+- Verify everything against the codebase and governance documents.
+- Treat the **Legal Practice Management System** as a core anchor module, not a side mention.
+- Do not flatten Professional into only a generic freelancer or services marketplace interpretation.
+- Favor reuse over rebuilding.
+- Think platform-wide, not repo-locally.
+- Be exhaustive, structured, and precise.
+
+## Expected standard
+
+I expect a deeply researched, platform-aware, implementation-ready response that properly reflects the true center of gravity of the WebWaka Professional repo, especially the already implemented **Legal Practice Management System**, and that can guide real roadmap decisions for the Professional vertical.
+
+***
+
+A further improvement would be to make this even more accurate by explicitly naming the other already-implemented Professional modules alongside Legal Practice Management, so the prompt anchors around the actual repo structure rather than inferred categories. Would you like me to now produce a **v2 Professional prompt** that is centered first on **Legal Practice Management**, then layers the other Professional modules around it in a sharper module-by-module structure?
+
+Sources

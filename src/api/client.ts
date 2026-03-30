@@ -53,6 +53,7 @@ export interface Booking {
   customer_id: string;
   trip_id: string;
   seat_ids: string[];
+  passenger_names?: string[];
   total_amount: number;
   status: 'pending' | 'confirmed' | 'cancelled';
   payment_status: string;
@@ -64,6 +65,37 @@ export interface Booking {
   destination: string | undefined;
   departure_time: number | undefined;
   operator_name: string | undefined;
+}
+
+export interface ManifestEntry {
+  booking_id: string;
+  customer_name: string;
+  customer_phone: string;
+  seat_ids: string[];
+  passenger_names: string[];
+  status: string;
+  payment_status: string;
+  total_amount: number;
+  booked_at: number;
+}
+
+export interface TripManifest {
+  trip: {
+    id: string;
+    state: string;
+    departure_time: number;
+    origin: string;
+    destination: string;
+    base_fare: number;
+    total_seats: number;
+  };
+  passengers: ManifestEntry[];
+  summary: {
+    total_bookings: number;
+    total_seats: number;
+    load_factor: number;
+    confirmed_revenue_kobo: number;
+  };
 }
 
 export interface Route {
@@ -355,6 +387,14 @@ export class ApiClient {
   async getOperatorTrips(params?: { state?: string }): Promise<Trip[]> {
     const q = params?.state ? `?state=${params.state}` : '';
     return this.request<Trip[]>('GET', `/api/operator/trips${q}`);
+  }
+
+  async getTripManifest(tripId: string): Promise<TripManifest> {
+    return this.request<TripManifest>('GET', `/api/operator/trips/${tripId}/manifest`);
+  }
+
+  async getBookingById(id: string): Promise<Booking> {
+    return this.request<Booking>('GET', `/api/booking/bookings/${id}`);
   }
 
   async createTrip(data: {
