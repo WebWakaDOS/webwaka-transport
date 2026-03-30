@@ -1018,6 +1018,55 @@ describe('Phase 7: PATCH /bookings/:id/cancel — Booking Cancellation (TRN-3)',
 });
 
 // ============================================================
+// Phase 11 — Super Admin: PATCH /operators/:id Tests
+// ============================================================
+
+describe('Phase 11: PATCH /operators/:id — Update Operator (SUPER_ADMIN)', () => {
+  let db: any;
+  beforeEach(() => {
+    db = createMockDB();
+    db._tables.operators.push({
+      id: 'opr_upd1', name: 'Sunrise Motors', code: 'SRM', phone: null, email: null,
+      status: 'active', created_at: Date.now(), updated_at: Date.now(), deleted_at: null,
+    });
+  });
+
+  it('suspends an active operator', async () => {
+    const res = await operatorManagementRouter.request('/operators/opr_upd1', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'suspended' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.id).toBe('opr_upd1');
+  });
+
+  it('updates operator name', async () => {
+    const res = await operatorManagementRouter.request('/operators/opr_upd1', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Sunrise Express' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+  });
+
+  it('returns 404 for unknown operator id', async () => {
+    const res = await operatorManagementRouter.request('/operators/opr_ghost', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'suspended' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(404);
+    const body = await res.json() as any;
+    expect(body.error).toMatch(/not found/i);
+  });
+});
+
+// ============================================================
 // Phase 10 — Agent Management + Revenue Reports Tests
 // ============================================================
 

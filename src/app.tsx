@@ -10,7 +10,7 @@ import { AuthProvider, useAuth, type WakaRole } from './core/auth/context';
 import { LoginScreen } from './components/login-screen';
 import { BookingFlow } from './components/booking-flow';
 import { api, ApiError } from './api/client';
-import type { TripSummary, Route, Vehicle, Trip, OperatorStats, Booking, SeatAvailability, TripManifest, ManifestEntry, Driver, Agent, RevenueReport, RouteRevenue } from './api/client';
+import type { TripSummary, Route, Vehicle, Trip, OperatorStats, Booking, SeatAvailability, TripManifest, ManifestEntry, Driver, Agent, RevenueReport, RouteRevenue, PlatformOperator } from './api/client';
 
 // ============================================================
 // Error Boundary
@@ -1495,13 +1495,143 @@ function MyBookingsModule() {
 // ============================================================
 // Role gating — which roles can see which tabs
 // ============================================================
+// ============================================================
+// Super Admin Module — Operator CRUD (Platform view)
+// ============================================================
+function OperatorsPanel() {
+  const [operators, setOperators] = useState<PlatformOperator[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ name: '', code: '', phone: '', email: '' });
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState('');
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try { setOperators(await api.getOperators()); }
+    catch { setOperators([]); } finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const handleCreate = async () => {
+    if (!form.name.trim() || !form.code.trim()) { setFormError('Name and code are required'); return; }
+    setSaving(true); setFormError('');
+    try {
+      await api.createOperator({
+        name: form.name.trim(),
+        code: form.code.trim().toUpperCase(),
+        ...(form.phone.trim() ? { phone: form.phone.trim() } : {}),
+        ...(form.email.trim() ? { email: form.email.trim() } : {}),
+      });
+      setShowForm(false);
+      setForm({ name: '', code: '', phone: '', email: '' });
+      await load();
+    } catch (e) {
+      setFormError(e instanceof ApiError ? e.message : 'Failed to create operator');
+    } finally { setSaving(false); }
+  };
+
+  const toggleStatus = async (op: PlatformOperator) => {
+    const newStatus = op.status === 'active' ? 'suspended' : 'active';
+    try { await api.updateOperator(op.id, { status: newStatus }); await load(); }
+    catch { /* ignore */ }
+  };
+
+  const statusColor = (s: string) => s === 'active' ? '#16a34a' : '#dc2626';
+
+  return (
+    <>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+        <h2 style={{ margin: 0, fontSize: 18, flex: 1 }}>Operators</h2>
+        <button onClick={() => void load()} style={{ ...secondaryBtnStyle, padding: '8px 14px', fontSize: 13 }}>↻</button>
+        <button onClick={() => setShowForm(s => !s)} style={{ ...primaryBtnStyle, padding: '8px 14px', fontSize: 13 }}>
+          {showForm ? 'Cancel' : '+ New'}
+        </button>
+      </div>
+
+      {showForm && (
+        <div style={{ ...cardStyle, cursor: 'default', marginBottom: 16 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <input placeholder="Operator name (e.g. Sunrise Motors)" value={form.name}
+              onChange={e => setForm(f => ({ ...f, name: e.target.value }))} style={inputStyle} />
+            <input placeholder="Short code (e.g. SRM) — unique" value={form.code}
+              onChange={e => setForm(f => ({ ...f, code: e.target.value }))} style={inputStyle} />
+            <input placeholder="Phone (optional)" value={form.phone}
+              onChange={e => setForm(f => ({ ...f, phone: e.target.value }))} style={inputStyle} />
+            <input placeholder="Email (optional)" value={form.email}
+              onChange={e => setForm(f => ({ ...f, email: e.target.value }))} style={inputStyle} />
+            {formError && <p style={{ color: '#dc2626', fontSize: 12, margin: 0 }}>{formError}</p>}
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={handleCreate} disabled={saving} style={{ ...primaryBtnStyle, flex: 1 }}>
+                {saving ? 'Creating…' : 'Create Operator'}
+              </button>
+              <button onClick={() => { setShowForm(false); setFormError(''); }}
+                style={{ ...secondaryBtnStyle, flex: 1 }}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <p style={{ color: '#94a3b8', textAlign: 'center' }}>{t('loading')}</p>
+      ) : operators.length === 0 ? (
+        <p style={{ color: '#94a3b8', textAlign: 'center', marginTop: 32 }}>No operators yet. Create one to get started.</p>
+      ) : (
+        operators.map(op => (
+          <div key={op.id} style={{ ...cardStyle, cursor: 'default', marginBottom: 10 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+              <div>
+                <div style={{ fontWeight: 700 }}>{op.name}</div>
+                <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>
+                  Code: <span style={{ fontFamily: 'monospace', fontWeight: 700 }}>{op.code}</span>
+                  {op.phone && <> · {op.phone}</>}
+                  {op.email && <> · {op.email}</>}
+                </div>
+                <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 2 }}>
+                  ID: <span style={{ fontFamily: 'monospace' }}>{op.id}</span>
+                </div>
+              </div>
+              <span style={{
+                fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 10,
+                background: `${statusColor(op.status)}20`, color: statusColor(op.status),
+              }}>{op.status}</span>
+            </div>
+            <button
+              onClick={() => void toggleStatus(op)}
+              style={{ ...secondaryBtnStyle, marginTop: 10, width: '100%', fontSize: 12 }}
+            >
+              {op.status === 'active' ? 'Suspend' : 'Reactivate'}
+            </button>
+          </div>
+        ))
+      )}
+    </>
+  );
+}
+
+function SuperAdminModule() {
+  return (
+    <div style={{ padding: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 20 }}>
+        <span style={{ fontSize: 22 }}>⚙️</span>
+        <div>
+          <div style={{ fontWeight: 800, fontSize: 17 }}>Platform Admin</div>
+          <div style={{ fontSize: 11, color: '#64748b' }}>WebWaka OS — Super Admin Console</div>
+        </div>
+      </div>
+      <OperatorsPanel />
+    </div>
+  );
+}
+
 const STAFF_ROLES: WakaRole[] = ['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR', 'STAFF'];
 const ADMIN_ROLES: WakaRole[] = ['SUPER_ADMIN', 'TENANT_ADMIN'];
 
 // ============================================================
 // Main App — inner shell (requires AuthProvider above it)
 // ============================================================
-type Tab = 'search' | 'bookings' | 'agent' | 'operator';
+type Tab = 'search' | 'bookings' | 'agent' | 'operator' | 'admin';
 
 function AppContent() {
   const { user, isAuthenticated, isLoading, logout, hasRole } = useAuth();
@@ -1543,6 +1673,7 @@ function AppContent() {
     { id: 'bookings', icon: '🎫', label: t('my_bookings') },
     ...(hasRole(STAFF_ROLES) ? [{ id: 'agent' as Tab, icon: '💰', label: t('agent_pos') }] : []),
     ...(hasRole(ADMIN_ROLES) ? [{ id: 'operator' as Tab, icon: '🚌', label: t('operator') }] : []),
+    ...(hasRole(['SUPER_ADMIN']) ? [{ id: 'admin' as Tab, icon: '⚙️', label: 'Platform' }] : []),
   ];
 
   // Reset tab if current tab is no longer visible (e.g. after role change)
@@ -1595,6 +1726,9 @@ function AppContent() {
         </ErrorBoundary>
         <ErrorBoundary label="Operator Dashboard">
           {validTab === 'operator' && <OperatorDashboardModule />}
+        </ErrorBoundary>
+        <ErrorBoundary label="Platform Admin">
+          {validTab === 'admin' && <SuperAdminModule />}
         </ErrorBoundary>
       </div>
 

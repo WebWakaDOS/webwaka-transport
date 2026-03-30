@@ -177,6 +177,17 @@ export interface RevenueReport {
   top_routes: RouteRevenue[];
 }
 
+export interface PlatformOperator {
+  id: string;
+  name: string;
+  code: string;
+  phone: string | null;
+  email: string | null;
+  status: string;
+  created_at: number;
+  updated_at: number;
+}
+
 export interface ReservationResult {
   seat_id: string;
   trip_id: string;
@@ -499,6 +510,25 @@ export class ApiClient {
     if (params?.operator_id) q.set('operator_id', params.operator_id);
     const qs = q.toString() ? `?${q.toString()}` : '';
     return this.request<RevenueReport>('GET', `/api/operator/reports/revenue${qs}`);
+  }
+
+  // ---- Super Admin: Operator Management ----
+
+  async getOperators(params?: { status?: string }): Promise<PlatformOperator[]> {
+    const q = new URLSearchParams();
+    if (params?.status) q.set('status', params.status);
+    const qs = q.toString() ? `?${q.toString()}` : '';
+    const res = await this.request<{ data: PlatformOperator[] }>('GET', `/api/operator/operators${qs}`);
+    return res.data;
+  }
+
+  async createOperator(body: { name: string; code: string; phone?: string; email?: string }): Promise<PlatformOperator> {
+    const res = await this.request<{ id: string; name: string; code: string; status: string }>('POST', '/api/operator/operators', body);
+    return { ...res, phone: null, email: null, created_at: Date.now(), updated_at: Date.now() };
+  }
+
+  async updateOperator(id: string, body: { name?: string; phone?: string; email?: string; status?: string }): Promise<void> {
+    await this.request('PATCH', `/api/operator/operators/${id}`, body);
   }
 }
 
