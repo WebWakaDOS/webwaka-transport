@@ -66,6 +66,29 @@ npm run typecheck # TypeScript strict mode check (0 errors required)
 - **Cloudflare-First**: D1, KV, Workers Cron, no Vercel/AWS dependencies
 - **Zero Skipping**: No `|| true` in CI, strict TypeScript (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`)
 
+## Frontend Layer (Phase 3 — complete)
+
+### `src/api/client.ts` — Typed API client
+`ApiClient` class wraps all API endpoints. No raw `fetch()` in components. `ApiError` class carries HTTP status + endpoint. Exported singleton `api`. Key methods: `searchTrips`, `getSeatAvailability`, `reserveSeat`, `releaseSeat`, `registerCustomer`, `createBooking`, `confirmBooking`, `cancelBooking`, `getBookings`, `recordSale`, `getOperatorDashboard`, `getOperatorRoutes`, `createRoute`, `getVehicles`, `createVehicle`, `getOperatorTrips`, `transitionTrip`, `deleteTrip`.
+
+### `src/components/seat-map.tsx` — TRN-1 Seat Inventory UI
+Visual seat grid. Calls `api.getSeatAvailability(tripId)`. Color-coded: green=available, yellow=reserved, blue=confirmed, red=blocked. Selected seats: dark blue. 4-across bus layout with aisle column. Retry on error. Multi-select up to `maxSelectable`. `readOnly` mode for display.
+
+### `src/components/booking-flow.tsx` — TRN-3 Complete Booking Journey
+Multi-step wizard integrated with `TripSearchModule` in `app.tsx`:
+1. **StepSeats** — seat map, select seat(s), shows total fare
+2. **StepCustomer** — full name, phone, email (optional), NDPR consent checkbox (enforced)
+3. **StepConfirm** — booking summary, 3 payment method selectors (Paystack/Mobile Money/Bank Transfer), calls `POST /bookings` → `PATCH /confirm`
+4. **TicketView** — confirmation receipt with booking ref, route, departure, operator, total paid
+
+### `src/app.tsx` — Updated + Error Boundaries
+- `ErrorBoundary` class component wraps each module tab
+- All raw `fetch()` replaced with `api.*` calls
+- All `any` type casts replaced with proper types from `client.ts`
+- `MyBookingsModule` uses `Booking[]` state from `api.getBookings()`
+- `AgentPOSModule` uses `api.recordSale()`
+- All operator panels use `api.getOperatorDashboard()`, `api.getOperatorRoutes()`, etc.
+
 ## API Layer (Phase 2 — complete)
 
 ### `src/api/types.ts` — Shared types and helpers

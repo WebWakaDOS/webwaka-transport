@@ -3,9 +3,47 @@
  * Modules: TRN-1 Seat Inventory, TRN-2 Agent POS, TRN-3 Booking Portal, TRN-4 Operator Dashboard
  * Invariants: Mobile-First, PWA-First, Offline-First, Nigeria-First (₦), Africa-First (4 languages)
  */
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { Component, useState, useEffect, useCallback } from 'react';
 import { t, setLanguage, getLanguage, getSupportedLanguages, formatKoboToNaira, type Language } from './core/i18n/index';
 import { useOnlineStatus, useSyncQueue } from './core/offline/hooks';
+import { BookingFlow } from './components/booking-flow';
+import { api, ApiError } from './api/client';
+import type { TripSummary, Route, Vehicle, Trip, OperatorStats, Booking } from './api/client';
+
+// ============================================================
+// Error Boundary
+// ============================================================
+interface ErrorBoundaryState { hasError: boolean; message: string }
+
+class ErrorBoundary extends Component<React.PropsWithChildren<{ label: string }>, ErrorBoundaryState> {
+  constructor(props: React.PropsWithChildren<{ label: string }>) {
+    super(props);
+    this.state = { hasError: false, message: '' };
+  }
+
+  static getDerivedStateFromError(err: unknown): ErrorBoundaryState {
+    return { hasError: true, message: err instanceof Error ? err.message : 'Unknown error' };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: 24, textAlign: 'center', color: '#b91c1c' }}>
+          <div style={{ fontSize: 32, marginBottom: 8 }}>⚠️</div>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>{this.props.label} failed to load</div>
+          <div style={{ fontSize: 12, color: '#64748b' }}>{this.state.message}</div>
+          <button
+            onClick={() => this.setState({ hasError: false, message: '' })}
+            style={{ marginTop: 16, padding: '8px 20px', borderRadius: 8, border: '1px solid #dc2626', background: '#fff', color: '#dc2626', cursor: 'pointer' }}
+          >
+            Retry
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 // ============================================================
 // Status Bar
@@ -42,19 +80,19 @@ function TripSearchModule() {
   const [origin, setOrigin] = useState('');
   const [destination, setDestination] = useState('');
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]!);
-  const [trips, setTrips] = useState<any[]>([]);
+  const [trips, setTrips] = useState<TripSummary[]>([]);
   const [loading, setLoading] = useState(false);
-  const [selectedTrip, setSelectedTrip] = useState<any>(null);
-  const [ndprConsent, setNdprConsent] = useState(false);
+  const [error, setError] = useState('');
+  const [selectedTrip, setSelectedTrip] = useState<TripSummary | null>(null);
 
   const search = useCallback(async () => {
     setLoading(true);
+    setError('');
     try {
-      const params = new URLSearchParams({ origin, destination, date });
-      const res = await fetch(`/api/booking/trips/search?${params}`);
-      const data = await res.json() as any;
-      setTrips(data.data ?? []);
-    } catch {
+      const results = await api.searchTrips({ origin, destination, date });
+      setTrips(results);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Search failed');
       setTrips([]);
     } finally {
       setLoading(false);
@@ -63,29 +101,10 @@ function TripSearchModule() {
 
   if (selectedTrip) {
     return (
-      <div style={{ padding: 16 }}>
-        <button onClick={() => setSelectedTrip(null)} style={backBtnStyle}>← {t('back')}</button>
-        <h3 style={{ margin: '12px 0 8px' }}>{selectedTrip.origin} → {selectedTrip.destination}</h3>
-        <p style={{ color: '#64748b', fontSize: 13 }}>
-          {t('departure')}: {new Date(selectedTrip.departure_time).toLocaleString('en-NG')}
-        </p>
-        <p style={{ fontSize: 18, fontWeight: 700, color: '#16a34a' }}>
-          {formatKoboToNaira(selectedTrip.base_fare)}
-        </p>
-        <p style={{ color: '#64748b', fontSize: 13 }}>{selectedTrip.available_seats} {t('available_seats')}</p>
-        <div style={{ marginTop: 16, padding: 12, background: '#fef9c3', borderRadius: 8, fontSize: 12 }}>
-          <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', cursor: 'pointer' }}>
-            <input type="checkbox" checked={ndprConsent} onChange={e => setNdprConsent(e.target.checked)} />
-            <span>{t('ndpr_consent')}</span>
-          </label>
-        </div>
-        <button
-          onClick={() => { if (!ndprConsent) { alert(t('ndpr_required')); return; } alert(t('booking_confirmed')); }}
-          style={{ ...primaryBtnStyle, marginTop: 16, width: '100%' }}
-        >
-          {t('confirm_booking')}
-        </button>
-      </div>
+      <BookingFlow
+        trip={selectedTrip}
+        onBack={() => setSelectedTrip(null)}
+      />
     );
   }
 
@@ -96,10 +115,17 @@ function TripSearchModule() {
         <input placeholder={t('origin')} value={origin} onChange={e => setOrigin(e.target.value)} style={inputStyle} />
         <input placeholder={t('destination')} value={destination} onChange={e => setDestination(e.target.value)} style={inputStyle} />
         <input type="date" value={date} onChange={e => setDate(e.target.value)} style={inputStyle} />
-        <button onClick={search} style={primaryBtnStyle}>{loading ? t('loading') : t('search')}</button>
+        <button onClick={() => void search()} style={primaryBtnStyle}>
+          {loading ? t('loading') : t('search')}
+        </button>
       </div>
+      {error && (
+        <div style={{ marginTop: 12, padding: '10px 14px', background: '#fee2e2', borderRadius: 8, color: '#b91c1c', fontSize: 13 }}>
+          {error}
+        </div>
+      )}
       <div style={{ marginTop: 20 }}>
-        {trips.length === 0 && !loading && (
+        {trips.length === 0 && !loading && !error && (
           <p style={{ color: '#94a3b8', textAlign: 'center', fontSize: 14 }}>{t('no_trips_found')}</p>
         )}
         {trips.map(trip => (
@@ -128,18 +154,19 @@ function AgentPOSModule({ online }: { online: boolean }) {
   const [passengers, setPassengers] = useState('');
   const [amount, setAmount] = useState('');
   const [method, setMethod] = useState<'cash' | 'mobile_money' | 'card'>('cash');
-  const [lastReceipt, setLastReceipt] = useState<any>(null);
+  const [lastReceipt, setLastReceipt] = useState<{ receipt_id: string; total_amount: number; payment_method: string } | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
 
   const handleSale = async () => {
     if (!tripId || !seatIds || !passengers || !amount) return;
     setSubmitting(true);
+    setError('');
     const amountKobo = Math.round(parseFloat(amount) * 100);
-    const seatArr = seatIds.split(',').map(s => s.trim());
-    const passArr = passengers.split(',').map(p => p.trim());
+    const seatArr = seatIds.split(',').map(s => s.trim()).filter(Boolean);
+    const passArr = passengers.split(',').map(p => p.trim()).filter(Boolean);
 
     if (!online) {
-      // Offline-First: queue locally
       const { saveOfflineTransaction } = await import('./core/offline/db');
       await saveOfflineTransaction({
         local_id: `local_${Date.now()}`,
@@ -158,34 +185,38 @@ function AgentPOSModule({ online }: { online: boolean }) {
     }
 
     try {
-      const res = await fetch('/api/agent-sales/transactions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          agent_id: 'current_agent', trip_id: tripId,
-          seat_ids: seatArr, passenger_names: passArr,
-          total_amount: amountKobo, payment_method: method,
-        }),
+      const receipt = await api.recordSale({
+        agent_id: 'current_agent',
+        trip_id: tripId,
+        seat_ids: seatArr,
+        passenger_names: passArr,
+        total_amount: amountKobo,
+        payment_method: method,
       });
-      const data = await res.json() as any;
-      if (data.success) {
-        setLastReceipt(data.data);
-        setTripId(''); setSeatIds(''); setPassengers(''); setAmount('');
-      }
-    } catch { alert(t('error')); }
-    setSubmitting(false);
+      setLastReceipt(receipt);
+      setTripId(''); setSeatIds(''); setPassengers(''); setAmount('');
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : t('error'));
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
     <div style={{ padding: 16 }}>
       <h2 style={{ margin: '0 0 16px', fontSize: 18 }}>{t('agent_pos')}</h2>
       {lastReceipt && (
-        <div style={{ ...cardStyle, background: '#f0fdf4', borderColor: '#16a34a', marginBottom: 16 }}>
+        <div style={{ ...cardStyle, background: '#f0fdf4', borderColor: '#16a34a', marginBottom: 16, cursor: 'default' }}>
           <div style={{ fontWeight: 700, color: '#16a34a' }}>✓ {t('sale_complete')}</div>
           <div style={{ fontSize: 13, marginTop: 4 }}>
             {t('fare')}: {formatKoboToNaira(lastReceipt.total_amount)} · {lastReceipt.payment_method}
           </div>
           <div style={{ fontSize: 12, color: '#64748b' }}>Receipt: {lastReceipt.receipt_id}</div>
+        </div>
+      )}
+      {error && (
+        <div style={{ padding: '10px 14px', background: '#fee2e2', borderRadius: 8, color: '#b91c1c', fontSize: 13, marginBottom: 12 }}>
+          {error}
         </div>
       )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -205,7 +236,7 @@ function AgentPOSModule({ online }: { online: boolean }) {
             </button>
           ))}
         </div>
-        <button onClick={handleSale} disabled={submitting} style={primaryBtnStyle}>
+        <button onClick={() => void handleSale()} disabled={submitting} style={primaryBtnStyle}>
           {submitting ? t('loading') : t('sale_complete')}
         </button>
       </div>
@@ -219,13 +250,12 @@ function AgentPOSModule({ online }: { online: boolean }) {
 type OperatorView = 'overview' | 'routes' | 'vehicles' | 'trips';
 
 function OperatorOverview({ onNav }: { onNav: (v: OperatorView) => void }) {
-  const [stats, setStats] = useState<any>(null);
+  const [stats, setStats] = useState<OperatorStats | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch('/api/operator/dashboard')
-      .then(r => r.json())
-      .then((d: any) => setStats(d.data))
+    api.getOperatorDashboard()
+      .then(setStats)
       .catch(() => setStats(null))
       .finally(() => setLoading(false));
   }, []);
@@ -247,14 +277,14 @@ function OperatorOverview({ onNav }: { onNav: (v: OperatorView) => void }) {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 16 }}>
             {tripStates.map(state => (
               <div key={state} style={{ ...cardStyle, borderLeft: `4px solid ${stateColors[state]}`, cursor: 'default' }}>
-                <div style={{ fontSize: 22, fontWeight: 800, color: stateColors[state] }}>{stats?.trips?.[state] ?? 0}</div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: stateColors[state] }}>{stats?.trips[state] ?? 0}</div>
                 <div style={{ fontSize: 12, color: '#64748b', marginTop: 2, textTransform: 'capitalize' }}>{state.replace('_', ' ')}</div>
               </div>
             ))}
             {stats?.today_revenue_kobo != null && (
               <div style={{ ...cardStyle, borderLeft: '4px solid #16a34a', cursor: 'default', gridColumn: 'span 2' }}>
                 <div style={{ fontSize: 18, fontWeight: 800, color: '#16a34a' }}>
-                  {formatKoboToNaira(stats.today_revenue_kobo as number)}
+                  {formatKoboToNaira(stats.today_revenue_kobo)}
                 </div>
                 <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>Today's Revenue</div>
               </div>
@@ -281,7 +311,7 @@ function OperatorOverview({ onNav }: { onNav: (v: OperatorView) => void }) {
 }
 
 function RoutesPanel({ onBack }: { onBack: () => void }) {
-  const [routes, setRoutes] = useState<any[]>([]);
+  const [routes, setRoutes] = useState<Route[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ origin: '', destination: '', base_fare: '', operator_id: '' });
@@ -291,9 +321,8 @@ function RoutesPanel({ onBack }: { onBack: () => void }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await fetch('/api/operator/routes');
-      const d = await r.json() as any;
-      setRoutes(d.data ?? []);
+      const data = await api.getOperatorRoutes();
+      setRoutes(data);
     } catch { setRoutes([]); } finally { setLoading(false); }
   }, []);
 
@@ -307,20 +336,16 @@ function RoutesPanel({ onBack }: { onBack: () => void }) {
     setSaving(true);
     setError('');
     try {
-      const r = await fetch('/api/operator/routes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...form, base_fare: Math.round(parseFloat(form.base_fare) * 100) }),
+      await api.createRoute({
+        ...form,
+        base_fare: Math.round(parseFloat(form.base_fare) * 100),
       });
-      const d = await r.json() as any;
-      if (d.success) {
-        setShowForm(false);
-        setForm({ origin: '', destination: '', base_fare: '', operator_id: '' });
-        await load();
-      } else {
-        setError(d.error ?? 'Failed to create route');
-      }
-    } catch { setError('Network error'); } finally { setSaving(false); }
+      setShowForm(false);
+      setForm({ origin: '', destination: '', base_fare: '', operator_id: '' });
+      await load();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Failed to create route');
+    } finally { setSaving(false); }
   };
 
   return (
@@ -340,7 +365,9 @@ function RoutesPanel({ onBack }: { onBack: () => void }) {
             <input placeholder="Base fare (₦)" type="number" value={form.base_fare} onChange={e => setForm(f => ({ ...f, base_fare: e.target.value }))} style={inputStyle} />
             <input placeholder="Operator ID" value={form.operator_id} onChange={e => setForm(f => ({ ...f, operator_id: e.target.value }))} style={inputStyle} />
             {error && <p style={{ color: '#dc2626', fontSize: 12, margin: 0 }}>{error}</p>}
-            <button onClick={handleCreate} disabled={saving} style={primaryBtnStyle}>{saving ? t('loading') : 'Create Route'}</button>
+            <button onClick={() => void handleCreate()} disabled={saving} style={primaryBtnStyle}>
+              {saving ? t('loading') : 'Create Route'}
+            </button>
           </div>
         </div>
       )}
@@ -353,14 +380,14 @@ function RoutesPanel({ onBack }: { onBack: () => void }) {
           <div key={r.id} style={{ ...cardStyle, cursor: 'default' }}>
             <div style={{ fontWeight: 700 }}>{r.origin} → {r.destination}</div>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, alignItems: 'center' }}>
-              <span style={{ color: '#16a34a', fontWeight: 700 }}>{formatKoboToNaira(r.base_fare as number)}</span>
+              <span style={{ color: '#16a34a', fontWeight: 700 }}>{formatKoboToNaira(r.base_fare)}</span>
               <span style={{
                 fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 12,
                 background: r.status === 'active' ? '#dcfce7' : '#f1f5f9',
                 color: r.status === 'active' ? '#16a34a' : '#64748b',
-              }}>{r.status as string}</span>
+              }}>{r.status}</span>
             </div>
-            <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>ID: {r.id as string}</div>
+            <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>ID: {r.id}</div>
           </div>
         ))
       )}
@@ -369,7 +396,7 @@ function RoutesPanel({ onBack }: { onBack: () => void }) {
 }
 
 function VehiclesPanel({ onBack }: { onBack: () => void }) {
-  const [vehicles, setVehicles] = useState<any[]>([]);
+  const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ operator_id: '', plate_number: '', model: '', total_seats: '', vehicle_type: 'bus' });
@@ -379,36 +406,33 @@ function VehiclesPanel({ onBack }: { onBack: () => void }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await fetch('/api/operator/vehicles');
-      const d = await r.json() as any;
-      setVehicles(d.data ?? []);
+      setVehicles(await api.getVehicles());
     } catch { setVehicles([]); } finally { setLoading(false); }
   }, []);
 
   useEffect(() => { void load(); }, [load]);
 
   const handleCreate = async () => {
-    if (!form.operator_id || !form.plate_number || !form.model || !form.total_seats) {
+    if (!form.operator_id || !form.plate_number || !form.total_seats) {
       setError('All fields required');
       return;
     }
     setSaving(true);
     setError('');
     try {
-      const r = await fetch('/api/operator/vehicles', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...form, total_seats: parseInt(form.total_seats, 10) }),
+      await api.createVehicle({
+        operator_id: form.operator_id,
+        plate_number: form.plate_number,
+        vehicle_type: form.vehicle_type,
+        total_seats: parseInt(form.total_seats, 10),
+        ...(form.model ? { model: form.model } : {}),
       });
-      const d = await r.json() as any;
-      if (d.success) {
-        setShowForm(false);
-        setForm({ operator_id: '', plate_number: '', model: '', total_seats: '', vehicle_type: 'bus' });
-        await load();
-      } else {
-        setError(d.error ?? 'Failed to register vehicle');
-      }
-    } catch { setError('Network error'); } finally { setSaving(false); }
+      setShowForm(false);
+      setForm({ operator_id: '', plate_number: '', model: '', total_seats: '', vehicle_type: 'bus' });
+      await load();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Failed to register vehicle');
+    } finally { setSaving(false); }
   };
 
   return (
@@ -433,7 +457,9 @@ function VehiclesPanel({ onBack }: { onBack: () => void }) {
               <option value="car">Car</option>
             </select>
             {error && <p style={{ color: '#dc2626', fontSize: 12, margin: 0 }}>{error}</p>}
-            <button onClick={handleCreate} disabled={saving} style={primaryBtnStyle}>{saving ? t('loading') : 'Register Vehicle'}</button>
+            <button onClick={() => void handleCreate()} disabled={saving} style={primaryBtnStyle}>
+              {saving ? t('loading') : 'Register Vehicle'}
+            </button>
           </div>
         </div>
       )}
@@ -446,16 +472,16 @@ function VehiclesPanel({ onBack }: { onBack: () => void }) {
           <div key={v.id} style={{ ...cardStyle, cursor: 'default' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
-                <div style={{ fontWeight: 700 }}>{v.plate_number as string}</div>
-                <div style={{ fontSize: 13, color: '#64748b', marginTop: 2 }}>{v.model as string} · {v.total_seats as number} seats</div>
+                <div style={{ fontWeight: 700 }}>{v.plate_number}</div>
+                <div style={{ fontSize: 13, color: '#64748b', marginTop: 2 }}>{v.model ?? 'N/A'} · {v.total_seats} seats</div>
               </div>
               <span style={{
                 fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 12,
                 background: v.status === 'active' ? '#dcfce7' : '#f1f5f9',
                 color: v.status === 'active' ? '#16a34a' : '#64748b',
-              }}>{v.status as string}</span>
+              }}>{v.status}</span>
             </div>
-            <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4, textTransform: 'capitalize' }}>{v.vehicle_type as string}</div>
+            <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4, textTransform: 'capitalize' }}>{v.vehicle_type}</div>
           </div>
         ))
       )}
@@ -464,7 +490,7 @@ function VehiclesPanel({ onBack }: { onBack: () => void }) {
 }
 
 function TripsPanel({ onBack }: { onBack: () => void }) {
-  const [trips, setTrips] = useState<any[]>([]);
+  const [trips, setTrips] = useState<Trip[]>([]);
   const [loading, setLoading] = useState(true);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
 
@@ -484,9 +510,7 @@ function TripsPanel({ onBack }: { onBack: () => void }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await fetch('/api/operator/trips');
-      const d = await r.json() as any;
-      setTrips(d.data ?? []);
+      setTrips(await api.getOperatorTrips());
     } catch { setTrips([]); } finally { setLoading(false); }
   }, []);
 
@@ -495,11 +519,7 @@ function TripsPanel({ onBack }: { onBack: () => void }) {
   const transition = async (tripId: string, newState: string) => {
     setUpdatingId(tripId);
     try {
-      await fetch(`/api/operator/trips/${tripId}/transition`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ to_state: newState }),
-      });
+      await api.transitionTrip(tripId, newState);
       await load();
     } catch { /* ignore */ } finally { setUpdatingId(null); }
   };
@@ -517,25 +537,26 @@ function TripsPanel({ onBack }: { onBack: () => void }) {
         <p style={{ color: '#94a3b8', textAlign: 'center', fontSize: 14 }}>No trips found</p>
       ) : (
         trips.map(trip => {
-          const possibleNext = nextStates[trip.state as string] ?? [];
+          const possibleNext = nextStates[trip.state] ?? [];
           return (
             <div key={trip.id} style={{ ...cardStyle, cursor: 'default' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                 <div>
-                  <div style={{ fontWeight: 700 }}>{trip.origin as string} → {trip.destination as string}</div>
+                  <div style={{ fontWeight: 700 }}>{trip.origin ?? trip.route_id} → {trip.destination ?? ''}</div>
                   <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>
-                    {new Date(trip.departure_time as number).toLocaleString('en-NG')}
+                    {new Date(trip.departure_time).toLocaleString('en-NG')}
                   </div>
                 </div>
                 <span style={{
                   fontSize: 11, fontWeight: 700, padding: '3px 9px', borderRadius: 12,
-                  background: `${stateColors[trip.state as string]}20`,
-                  color: stateColors[trip.state as string],
+                  background: `${stateColors[trip.state] ?? '#64748b'}20`,
+                  color: stateColors[trip.state] ?? '#64748b',
                   whiteSpace: 'nowrap',
-                }}>{(trip.state as string).replace('_', ' ')}</span>
+                }}>{trip.state.replace('_', ' ')}</span>
               </div>
               <div style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>
-                {trip.available_seats as number} available · {formatKoboToNaira(trip.base_fare as number)}
+                {trip.available_seats ?? '—'} available
+                {trip.base_fare != null && ` · ${formatKoboToNaira(trip.base_fare)}`}
               </div>
               {possibleNext.length > 0 && (
                 <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
@@ -543,7 +564,7 @@ function TripsPanel({ onBack }: { onBack: () => void }) {
                     <button
                       key={ns}
                       disabled={updatingId === trip.id}
-                      onClick={() => void transition(trip.id as string, ns)}
+                      onClick={() => void transition(trip.id, ns)}
                       style={{
                         flex: 1, padding: '7px 4px', borderRadius: 8, border: '1.5px solid',
                         borderColor: stateColors[ns] ?? '#e2e8f0',
@@ -582,14 +603,14 @@ function OperatorDashboardModule() {
 // My Bookings Module (TRN-3)
 // ============================================================
 function MyBookingsModule() {
-  const [bookings, setBookings] = useState<any[]>([]);
+  const [bookings, setBookings] = useState<Booking[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
   useEffect(() => {
-    fetch('/api/booking/bookings')
-      .then(r => r.json())
-      .then((d: any) => setBookings(d.data ?? []))
-      .catch(() => setBookings([]))
+    api.getBookings()
+      .then(data => setBookings(data))
+      .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false));
   }, []);
 
@@ -602,23 +623,30 @@ function MyBookingsModule() {
       <h2 style={{ margin: '0 0 16px', fontSize: 18 }}>{t('my_bookings')}</h2>
       {loading ? (
         <p style={{ color: '#94a3b8', textAlign: 'center' }}>{t('loading')}</p>
+      ) : error ? (
+        <div style={{ padding: '10px 14px', background: '#fee2e2', borderRadius: 8, color: '#b91c1c', fontSize: 13 }}>{error}</div>
       ) : bookings.length === 0 ? (
         <p style={{ color: '#94a3b8', textAlign: 'center', fontSize: 14 }}>{t('no_trips_found')}</p>
       ) : (
         bookings.map(bkg => (
           <div key={bkg.id} style={cardStyle}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span style={{ fontWeight: 700 }}>{bkg.origin} → {bkg.destination}</span>
+              <span style={{ fontWeight: 700 }}>
+                {bkg.origin != null ? bkg.origin : '—'} → {bkg.destination != null ? bkg.destination : '—'}
+              </span>
               <span style={{
                 fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 12,
-                background: `${statusColors[bkg.status]}20`, color: statusColors[bkg.status],
+                background: `${statusColors[bkg.status] ?? '#64748b'}20`,
+                color: statusColors[bkg.status] ?? '#64748b',
               }}>
                 {t(bkg.status)}
               </span>
             </div>
-            <div style={{ fontSize: 13, color: '#64748b', marginTop: 4 }}>
-              {new Date(bkg.departure_time).toLocaleString('en-NG')}
-            </div>
+            {bkg.departure_time != null && (
+              <div style={{ fontSize: 13, color: '#64748b', marginTop: 4 }}>
+                {new Date(bkg.departure_time).toLocaleString('en-NG')}
+              </div>
+            )}
             <div style={{ fontSize: 15, fontWeight: 700, color: '#16a34a', marginTop: 4 }}>
               {formatKoboToNaira(bkg.total_amount)}
             </div>
@@ -659,10 +687,18 @@ export function TransportApp() {
         🚌 {t('app_name')}
       </div>
       <div style={{ flex: 1, overflowY: 'auto', paddingBottom: 70 }}>
-        {tab === 'search' && <TripSearchModule />}
-        {tab === 'bookings' && <MyBookingsModule />}
-        {tab === 'agent' && <AgentPOSModule online={online} />}
-        {tab === 'operator' && <OperatorDashboardModule />}
+        <ErrorBoundary label="Trip Search">
+          {tab === 'search' && <TripSearchModule />}
+        </ErrorBoundary>
+        <ErrorBoundary label="My Bookings">
+          {tab === 'bookings' && <MyBookingsModule />}
+        </ErrorBoundary>
+        <ErrorBoundary label="Agent POS">
+          {tab === 'agent' && <AgentPOSModule online={online} />}
+        </ErrorBoundary>
+        <ErrorBoundary label="Operator Dashboard">
+          {tab === 'operator' && <OperatorDashboardModule />}
+        </ErrorBoundary>
       </div>
       {/* Mobile-First bottom navigation */}
       <nav style={{
