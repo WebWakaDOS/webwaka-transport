@@ -43,7 +43,7 @@ npm run dev:ui
 ```
 
 ## Dependencies
-- `@webwaka/core` — Local stub at `/home/runner/webwaka-core/` (symlinked from node_modules). Provides JWT auth middleware and role-based access control stubs for local development.
+- `@webwaka/core` — ESM stub at `node_modules/@webwaka/core/` (created directly). Provides `requireRole` RBAC middleware, JWT helpers, and `nanoid`. In Vitest (`VITEST=true`), `requireRole` injects a SUPER_ADMIN test user and passes through so all API tests work without auth headers.
 - `dexie` — IndexedDB wrapper for offline-first storage
 - `hono` — Web framework for Cloudflare Workers
 - `react` + `react-dom` — UI framework

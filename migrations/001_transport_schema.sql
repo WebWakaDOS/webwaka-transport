@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS vehicles (
   operator_id TEXT NOT NULL REFERENCES operators(id),
   plate_number TEXT NOT NULL UNIQUE,
   vehicle_type TEXT NOT NULL, -- bus | minibus | car
+  model TEXT, -- e.g. Toyota Coaster, Ford Transit
   total_seats INTEGER NOT NULL,
   status TEXT NOT NULL DEFAULT 'active',
   created_at INTEGER NOT NULL,

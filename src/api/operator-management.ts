@@ -141,7 +141,7 @@ operatorManagementRouter.get('/vehicles', async (c) => {
 // POST /vehicles — register a vehicle
 operatorManagementRouter.post('/vehicles', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
   const body = await c.req.json() as any;
-  const { operator_id, plate_number, vehicle_type, total_seats } = body;
+  const { operator_id, plate_number, vehicle_type, total_seats, model } = body;
 
   if (!operator_id || !plate_number || !vehicle_type || !total_seats) {
     return c.json({ success: false, error: 'operator_id, plate_number, vehicle_type, total_seats required' }, 400);
@@ -153,9 +153,9 @@ operatorManagementRouter.post('/vehicles', requireRole(['SUPER_ADMIN', 'TENANT_A
 
   try {
     await db.prepare(
-      `INSERT INTO vehicles (id, operator_id, plate_number, vehicle_type, total_seats, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`
-    ).bind(id, operator_id, plate_number, vehicle_type, total_seats, now, now).run();
+      `INSERT INTO vehicles (id, operator_id, plate_number, vehicle_type, model, total_seats, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`
+    ).bind(id, operator_id, plate_number, vehicle_type, model ?? null, total_seats, now, now).run();
   } catch (e: any) {
     if (e.message?.includes('UNIQUE')) {
       return c.json({ success: false, error: 'Plate number already registered' }, 409);
@@ -163,12 +163,29 @@ operatorManagementRouter.post('/vehicles', requireRole(['SUPER_ADMIN', 'TENANT_A
     throw e;
   }
 
-  return c.json({ success: true, data: { id, operator_id, plate_number, vehicle_type, total_seats, status: 'active' } }, 201);
+  return c.json({ success: true, data: { id, operator_id, plate_number, vehicle_type, model: model ?? null, total_seats, status: 'active' } }, 201);
 });
 
 // ============================================================
 // TRIP STATE MACHINE (TRN-4)
 // ============================================================
+
+// GET /trips — list trips for operator dashboard
+operatorManagementRouter.get('/trips', async (c) => {
+  const { operator_id, state } = c.req.query();
+  const db = c.env.DB;
+
+  let query = `SELECT t.*, r.origin, r.destination, r.base_fare FROM trips t
+    JOIN routes r ON t.route_id = r.id
+    WHERE t.deleted_at IS NULL`;
+  const params: unknown[] = [];
+  if (operator_id) { query += ` AND t.operator_id = ?`; params.push(operator_id); }
+  if (state) { query += ` AND t.state = ?`; params.push(state); }
+  query += ` ORDER BY t.departure_time DESC LIMIT 100`;
+
+  const result = await db.prepare(query).bind(...params).all();
+  return c.json({ success: true, data: result.results });
+});
 
 // GET /trips/:id/state — get current trip state
 operatorManagementRouter.get('/trips/:id/state', async (c) => {
@@ -253,12 +270,28 @@ operatorManagementRouter.get('/dashboard', async (c) => {
   const { operator_id } = c.req.query();
   const db = c.env.DB;
 
-  let tripQuery = `SELECT state, COUNT(*) as count FROM trips WHERE deleted_at IS NULL`;
   const params: unknown[] = [];
+  let tripQuery = `SELECT state, COUNT(*) as count FROM trips WHERE deleted_at IS NULL`;
   if (operator_id) { tripQuery += ` AND operator_id = ?`; params.push(operator_id); }
   tripQuery += ` GROUP BY state`;
 
-  const tripStats = await db.prepare(tripQuery).bind(...params).all();
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const todayStartMs = todayStart.getTime();
+
+  const revenueParams: unknown[] = [todayStartMs];
+  let revenueQuery = `SELECT COALESCE(SUM(total_amount), 0) as total FROM sales_transactions
+    WHERE payment_status = 'completed' AND created_at >= ?`;
+  if (operator_id) {
+    revenueQuery += ` AND agent_id IN (SELECT id FROM agents WHERE operator_id = ? AND deleted_at IS NULL)`;
+    revenueParams.push(operator_id);
+  }
+
+  const [tripStats, revenueResult] = await Promise.all([
+    db.prepare(tripQuery).bind(...params).all(),
+    db.prepare(revenueQuery).bind(...revenueParams).first(),
+  ]);
+
   const stats = (tripStats.results as any[]).reduce((acc: any, r: any) => {
     acc[r.state] = r.count;
     return acc;
@@ -274,6 +307,7 @@ operatorManagementRouter.get('/dashboard', async (c) => {
         completed: stats.completed ?? 0,
         cancelled: stats.cancelled ?? 0,
       },
+      today_revenue_kobo: (revenueResult as any)?.total ?? 0,
     },
   });
 });

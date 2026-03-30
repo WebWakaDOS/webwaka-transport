@@ -257,7 +257,10 @@ const translations: Record<Language, Record<string, string>> = {
   },
 };
 
-let currentLanguage: Language = (localStorage?.getItem('trn_language') as Language) ?? 'en';
+function readStoredLanguage(): Language {
+  try { return (localStorage?.getItem('trn_language') as Language) ?? 'en'; } catch { return 'en'; }
+}
+let currentLanguage: Language = readStoredLanguage();
 
 export function t(key: string): string {
   return translations[currentLanguage]?.[key] ?? translations.en[key] ?? key;

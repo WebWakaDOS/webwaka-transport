@@ -22,6 +22,7 @@ export interface Booking {
   createdAt: Date;
   confirmedAt?: Date;
   cancelledAt?: Date;
+  metadata?: Record<string, unknown>;
 }
 
 export interface Customer {

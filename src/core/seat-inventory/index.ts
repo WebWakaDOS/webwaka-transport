@@ -32,6 +32,7 @@ export interface Trip {
 export interface ReservationToken {
   id: string;
   seatId: string;
+  tripId: string;
   userId: string;
   expiresAt: Date;
   createdAt: Date;
@@ -146,6 +147,7 @@ export class SeatInventoryManager {
     const reservationToken: ReservationToken = {
       id: token,
       seatId: seat.id,
+      tripId,
       userId,
       expiresAt,
       createdAt: new Date()
@@ -296,7 +298,7 @@ export class SeatInventoryManager {
 
     for (const [token, reservation] of this.reservationTokens.entries()) {
       if (now > reservation.expiresAt) {
-        const trip = this.trips.get(reservation.seatId.split('_')[1]);
+        const trip = this.trips.get(reservation.tripId);
         if (trip) {
           const seat = trip.seats.find(s => s.id === reservation.seatId);
           if (seat && seat.reservationToken === token) {

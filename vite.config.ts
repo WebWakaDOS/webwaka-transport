@@ -1,8 +1,22 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import path from 'path';
 
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    alias: {
+      '@webwaka/core': path.resolve('node_modules/@webwaka/core/index.js'),
+    },
+  },
+  test: {
+    environment: 'node',
+    resolve: {
+      alias: {
+        '@webwaka/core': path.resolve('node_modules/@webwaka/core/index.js'),
+      },
+    },
+  },
   build: {
     outDir: 'dist',
     sourcemap: false,

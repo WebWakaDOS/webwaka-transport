@@ -397,7 +397,7 @@ function VehiclesPanel({ onBack }: { onBack: () => void }) {
   const [vehicles, setVehicles] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ operator_id: '', plate_number: '', model: '', capacity: '', vehicle_type: 'bus' });
+  const [form, setForm] = useState({ operator_id: '', plate_number: '', model: '', total_seats: '', vehicle_type: 'bus' });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -413,7 +413,7 @@ function VehiclesPanel({ onBack }: { onBack: () => void }) {
   useEffect(() => { void load(); }, [load]);
 
   const handleCreate = async () => {
-    if (!form.operator_id || !form.plate_number || !form.model || !form.capacity) {
+    if (!form.operator_id || !form.plate_number || !form.model || !form.total_seats) {
       setError('All fields required');
       return;
     }
@@ -423,12 +423,12 @@ function VehiclesPanel({ onBack }: { onBack: () => void }) {
       const r = await fetch('/api/operator/vehicles', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...form, capacity: parseInt(form.capacity, 10) }),
+        body: JSON.stringify({ ...form, total_seats: parseInt(form.total_seats, 10) }),
       });
       const d = await r.json() as any;
       if (d.success) {
         setShowForm(false);
-        setForm({ operator_id: '', plate_number: '', model: '', capacity: '', vehicle_type: 'bus' });
+        setForm({ operator_id: '', plate_number: '', model: '', total_seats: '', vehicle_type: 'bus' });
         await load();
       } else {
         setError(d.error ?? 'Failed to register vehicle');
@@ -451,7 +451,7 @@ function VehiclesPanel({ onBack }: { onBack: () => void }) {
             <input placeholder="Operator ID" value={form.operator_id} onChange={e => setForm(f => ({ ...f, operator_id: e.target.value }))} style={inputStyle} />
             <input placeholder="Plate number (e.g. LAG-123-XY)" value={form.plate_number} onChange={e => setForm(f => ({ ...f, plate_number: e.target.value }))} style={inputStyle} />
             <input placeholder="Model (e.g. Toyota Coaster)" value={form.model} onChange={e => setForm(f => ({ ...f, model: e.target.value }))} style={inputStyle} />
-            <input placeholder="Capacity (seats)" type="number" value={form.capacity} onChange={e => setForm(f => ({ ...f, capacity: e.target.value }))} style={inputStyle} />
+            <input placeholder="Capacity (seats)" type="number" value={form.total_seats} onChange={e => setForm(f => ({ ...f, total_seats: e.target.value }))} style={inputStyle} />
             <select value={form.vehicle_type} onChange={e => setForm(f => ({ ...f, vehicle_type: e.target.value }))} style={inputStyle}>
               <option value="bus">Bus</option>
               <option value="minibus">Minibus</option>
@@ -472,7 +472,7 @@ function VehiclesPanel({ onBack }: { onBack: () => void }) {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
                 <div style={{ fontWeight: 700 }}>{v.plate_number as string}</div>
-                <div style={{ fontSize: 13, color: '#64748b', marginTop: 2 }}>{v.model as string} · {v.capacity as number} seats</div>
+                <div style={{ fontSize: 13, color: '#64748b', marginTop: 2 }}>{v.model as string} · {v.total_seats as number} seats</div>
               </div>
               <span style={{
                 fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 12,
@@ -520,10 +520,10 @@ function TripsPanel({ onBack }: { onBack: () => void }) {
   const transition = async (tripId: string, newState: string) => {
     setUpdatingId(tripId);
     try {
-      await fetch(`/api/operator/trips/${tripId}/state`, {
-        method: 'PATCH',
+      await fetch(`/api/operator/trips/${tripId}/transition`, {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ state: newState }),
+        body: JSON.stringify({ to_state: newState }),
       });
       await load();
     } catch { /* ignore */ } finally { setUpdatingId(null); }
