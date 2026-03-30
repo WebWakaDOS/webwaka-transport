@@ -530,3 +530,499 @@ describe('TRN-4: Operator Management API', () => {
     expect(body.data.trips).toHaveProperty('in_transit');
   });
 });
+
+// ============================================================
+// Phase 2 — New PATCH/DELETE Endpoint Tests
+// ============================================================
+
+describe('Phase 2: PATCH /trips/:tripId/seats/:seatId — Seat Update (TRN-1)', () => {
+  let db: any;
+  beforeEach(() => { db = createMockDB(); });
+
+  it('returns 400 for invalid status value', async () => {
+    const res = await seatInventoryRouter.request('/trips/trp_1/seats/s1', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'sold' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(400);
+    const body = await res.json() as any;
+    expect(body.error).toContain('Invalid status');
+  });
+
+  it('returns 404 for unknown seat', async () => {
+    const res = await seatInventoryRouter.request('/trips/trp_1/seats/s_unknown', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'blocked' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(404);
+    const body = await res.json() as any;
+    expect(body.success).toBe(false);
+    expect(body.error).toContain('not found');
+  });
+
+  it('accepts valid statuses: available, reserved, confirmed, blocked', async () => {
+    // Pre-populate a seat. Mock first() uses last param as id → tripId='trp_1'
+    db._tables.seats.push({
+      id: 'trp_1', trip_id: 'trp_1', seat_number: '01', status: 'available', version: 0,
+      reserved_by: null, confirmed_by: null, created_at: Date.now(), updated_at: Date.now(),
+    });
+    const res = await seatInventoryRouter.request('/trips/trp_1/seats/trp_1', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'blocked' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.status).toBe('blocked');
+  });
+});
+
+describe('Phase 2: PATCH /bookings/:id — Booking Update (TRN-3)', () => {
+  let db: any;
+  beforeEach(() => { db = createMockDB(); });
+
+  it('returns 404 for unknown booking', async () => {
+    const res = await bookingPortalRouter.request('/bookings/bkg_unknown', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ payment_reference: 'pay_new_ref' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(404);
+    const body = await res.json() as any;
+    expect(body.success).toBe(false);
+  });
+
+  it('returns 409 for cancelled booking', async () => {
+    db._tables.bookings.push({
+      id: 'bkg_1', customer_id: 'cust_1', trip_id: 'trp_1',
+      seat_ids: '["s1"]', passenger_names: '["Chidi"]',
+      total_amount: 500000, status: 'cancelled', payment_status: 'pending',
+      payment_method: 'paystack', payment_reference: 'old_ref',
+      created_at: Date.now(), confirmed_at: null, cancelled_at: Date.now(), deleted_at: null,
+    });
+    const res = await bookingPortalRouter.request('/bookings/bkg_1', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ payment_reference: 'pay_new_ref' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(409);
+    const body = await res.json() as any;
+    expect(body.error).toContain('cancelled');
+  });
+
+  it('returns 422 when attempting to set status to confirmed via PATCH', async () => {
+    db._tables.bookings.push({
+      id: 'bkg_2', customer_id: 'cust_1', trip_id: 'trp_1',
+      seat_ids: '["s1"]', passenger_names: '["Amaka"]',
+      total_amount: 500000, status: 'pending', payment_status: 'pending',
+      payment_method: 'paystack', payment_reference: 'old_ref',
+      created_at: Date.now(), confirmed_at: null, cancelled_at: null, deleted_at: null,
+    });
+    const res = await bookingPortalRouter.request('/bookings/bkg_2', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'confirmed' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(422);
+    const body = await res.json() as any;
+    expect(body.error).toContain('confirm');
+  });
+
+  it('updates payment_reference successfully', async () => {
+    db._tables.bookings.push({
+      id: 'bkg_3', customer_id: 'cust_1', trip_id: 'trp_1',
+      seat_ids: '["s1"]', passenger_names: '["Ngozi"]',
+      total_amount: 250000, status: 'pending', payment_status: 'pending',
+      payment_method: 'paystack', payment_reference: 'old_ref',
+      created_at: Date.now(), confirmed_at: null, cancelled_at: null, deleted_at: null,
+    });
+    const res = await bookingPortalRouter.request('/bookings/bkg_3', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ payment_reference: 'pay_new_123' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.id).toBe('bkg_3');
+  });
+});
+
+describe('Phase 2: PATCH /trips/:id — Trip Update (TRN-4)', () => {
+  let db: any;
+  beforeEach(() => { db = createMockDB(); });
+
+  it('returns 404 for unknown trip', async () => {
+    const res = await operatorManagementRouter.request('/trips/trp_unknown', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ vehicle_id: 'veh_2' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(404);
+  });
+
+  it('updates trip vehicle and departure time', async () => {
+    db._tables.trips.push({
+      id: 'trp_upd', operator_id: 'opr_1', route_id: 'rte_1', vehicle_id: 'veh_1',
+      departure_time: Date.now() + 3600000, state: 'scheduled', deleted_at: null,
+      created_at: Date.now(), updated_at: Date.now(),
+    });
+    const newTime = Date.now() + 7200000;
+    const res = await operatorManagementRouter.request('/trips/trp_upd', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ vehicle_id: 'veh_2', departure_time: newTime }),
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.id).toBe('trp_upd');
+  });
+});
+
+describe('Phase 2: DELETE /trips/:id — Soft Delete Trip (TRN-4)', () => {
+  let db: any;
+  beforeEach(() => { db = createMockDB(); });
+
+  it('returns 404 for unknown trip', async () => {
+    const res = await operatorManagementRouter.request('/trips/trp_gone', {
+      method: 'DELETE',
+    }, makeEnv(db));
+    expect(res.status).toBe(404);
+  });
+
+  it('soft-deletes a scheduled trip', async () => {
+    db._tables.trips.push({
+      id: 'trp_del', operator_id: 'opr_1', route_id: 'rte_1', vehicle_id: 'veh_1',
+      departure_time: Date.now() + 3600000, state: 'scheduled', deleted_at: null,
+      created_at: Date.now(), updated_at: Date.now(),
+    });
+    const res = await operatorManagementRouter.request('/trips/trp_del', {
+      method: 'DELETE',
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data).toHaveProperty('deleted_at');
+  });
+
+  it('returns 409 for a boarding trip', async () => {
+    db._tables.trips.push({
+      id: 'trp_boarding', operator_id: 'opr_1', route_id: 'rte_1', vehicle_id: 'veh_1',
+      departure_time: Date.now(), state: 'boarding', deleted_at: null,
+      created_at: Date.now(), updated_at: Date.now(),
+    });
+    const res = await operatorManagementRouter.request('/trips/trp_boarding', {
+      method: 'DELETE',
+    }, makeEnv(db));
+    expect(res.status).toBe(409);
+    const body = await res.json() as any;
+    expect(body.error).toContain('boarding');
+  });
+
+  it('returns 409 for an in_transit trip', async () => {
+    db._tables.trips.push({
+      id: 'trp_transit', operator_id: 'opr_1', route_id: 'rte_1', vehicle_id: 'veh_1',
+      departure_time: Date.now(), state: 'in_transit', deleted_at: null,
+      created_at: Date.now(), updated_at: Date.now(),
+    });
+    const res = await operatorManagementRouter.request('/trips/trp_transit', {
+      method: 'DELETE',
+    }, makeEnv(db));
+    expect(res.status).toBe(409);
+  });
+});
+
+describe('Phase 2: PATCH /routes/:id — Route Update (TRN-4)', () => {
+  let db: any;
+  beforeEach(() => { db = createMockDB(); });
+
+  it('returns 404 for unknown route', async () => {
+    const res = await operatorManagementRouter.request('/routes/rte_unknown', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ base_fare: 2000000 }),
+    }, makeEnv(db));
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 400 for non-integer base_fare', async () => {
+    db._tables.routes.push({
+      id: 'rte_1', operator_id: 'opr_1', origin: 'Lagos', destination: 'Abuja',
+      base_fare: 1500000, status: 'active', deleted_at: null,
+      created_at: Date.now(), updated_at: Date.now(),
+    });
+    const res = await operatorManagementRouter.request('/routes/rte_1', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ base_fare: 1500.50 }),
+    }, makeEnv(db));
+    expect(res.status).toBe(400);
+    const body = await res.json() as any;
+    expect(body.error).toContain('kobo');
+  });
+
+  it('updates route base_fare', async () => {
+    db._tables.routes.push({
+      id: 'rte_2', operator_id: 'opr_1', origin: 'Port Harcourt', destination: 'Enugu',
+      base_fare: 800000, status: 'active', deleted_at: null,
+      created_at: Date.now(), updated_at: Date.now(),
+    });
+    const res = await operatorManagementRouter.request('/routes/rte_2', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ base_fare: 950000 }),
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.id).toBe('rte_2');
+  });
+
+  it('updates route status to inactive', async () => {
+    db._tables.routes.push({
+      id: 'rte_3', operator_id: 'opr_1', origin: 'Kano', destination: 'Kaduna',
+      base_fare: 600000, status: 'active', deleted_at: null,
+      created_at: Date.now(), updated_at: Date.now(),
+    });
+    const res = await operatorManagementRouter.request('/routes/rte_3', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'inactive' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+  });
+});
+
+describe('Phase 2: PATCH /vehicles/:id — Vehicle Update (TRN-4)', () => {
+  let db: any;
+  beforeEach(() => { db = createMockDB(); });
+
+  it('returns 404 for unknown vehicle', async () => {
+    const res = await operatorManagementRouter.request('/vehicles/veh_unknown', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'maintenance' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(404);
+  });
+
+  it('updates vehicle status to maintenance', async () => {
+    db._tables.vehicles.push({
+      id: 'veh_1', operator_id: 'opr_1', plate_number: 'ABC-123-LG',
+      vehicle_type: 'bus', model: null, total_seats: 45, status: 'active',
+      deleted_at: null, created_at: Date.now(), updated_at: Date.now(),
+    });
+    const res = await operatorManagementRouter.request('/vehicles/veh_1', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'maintenance' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.id).toBe('veh_1');
+  });
+
+  it('updates vehicle model and total_seats', async () => {
+    db._tables.vehicles.push({
+      id: 'veh_2', operator_id: 'opr_1', plate_number: 'XYZ-456-AB',
+      vehicle_type: 'minibus', model: null, total_seats: 18, status: 'active',
+      deleted_at: null, created_at: Date.now(), updated_at: Date.now(),
+    });
+    const res = await operatorManagementRouter.request('/vehicles/veh_2', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'Toyota HiAce 2023', total_seats: 14 }),
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+  });
+});
+
+// ============================================================
+// Phase 2 — Pagination Tests
+// ============================================================
+
+describe('Phase 2: Pagination meta in list responses', () => {
+  let db: any;
+  beforeEach(() => { db = createMockDB(); });
+
+  it('GET /trips includes meta.limit and meta.offset (TRN-1)', async () => {
+    const res = await seatInventoryRouter.request('/trips?limit=10&offset=0', {}, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.meta).toBeDefined();
+    expect(body.meta.limit).toBe(10);
+    expect(body.meta.offset).toBe(0);
+    expect(body.meta).toHaveProperty('has_more');
+  });
+
+  it('GET /agents includes meta.limit (TRN-2)', async () => {
+    const res = await agentSalesRouter.request('/agents?limit=5', {}, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.meta).toBeDefined();
+    expect(body.meta.limit).toBe(5);
+  });
+
+  it('GET /transactions includes meta.offset (TRN-2)', async () => {
+    const res = await agentSalesRouter.request('/transactions?offset=20', {}, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.meta).toBeDefined();
+    expect(body.meta.offset).toBe(20);
+  });
+
+  it('GET /bookings includes pagination meta (TRN-3)', async () => {
+    const res = await bookingPortalRouter.request('/bookings?limit=25&offset=50', {}, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.meta).toBeDefined();
+    expect(body.meta.limit).toBe(25);
+    expect(body.meta.offset).toBe(50);
+  });
+
+  it('GET /operators includes pagination meta (TRN-4)', async () => {
+    const res = await operatorManagementRouter.request('/operators?limit=20', {}, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.meta).toBeDefined();
+    expect(body.meta.limit).toBe(20);
+  });
+
+  it('GET /routes includes pagination meta (TRN-4)', async () => {
+    const res = await operatorManagementRouter.request('/routes?limit=10&offset=0', {}, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.meta).toBeDefined();
+    expect(body.meta.limit).toBe(10);
+  });
+
+  it('GET /vehicles includes pagination meta (TRN-4)', async () => {
+    const res = await operatorManagementRouter.request('/vehicles?limit=50', {}, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.meta).toBeDefined();
+    expect(body.meta.limit).toBe(50);
+  });
+
+  it('GET /trips includes pagination meta (TRN-4)', async () => {
+    const res = await operatorManagementRouter.request('/trips?limit=100&offset=200', {}, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.meta).toBeDefined();
+    expect(body.meta.limit).toBe(100);
+    expect(body.meta.offset).toBe(200);
+  });
+
+  it('clamps limit to max 200', async () => {
+    const res = await seatInventoryRouter.request('/trips?limit=999', {}, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.meta.limit).toBe(200);
+  });
+
+  it('defaults to limit=50 when not supplied', async () => {
+    const res = await agentSalesRouter.request('/agents', {}, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.meta.limit).toBe(50);
+  });
+});
+
+// ============================================================
+// Phase 2 — Error Handling + Validation Tests
+// ============================================================
+
+describe('Phase 2: Input validation and error handling', () => {
+  let db: any;
+  beforeEach(() => { db = createMockDB(); });
+
+  it('POST /trips requires total_seats to be a positive integer (TRN-1)', async () => {
+    const res = await seatInventoryRouter.request('/trips', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        operator_id: 'opr_1', route_id: 'rte_1', vehicle_id: 'veh_1',
+        departure_time: Date.now() + 3600000, total_seats: -5,
+      }),
+    }, makeEnv(db));
+    expect(res.status).toBe(400);
+  });
+
+  it('POST /transactions rejects empty seat_ids array (TRN-2)', async () => {
+    const res = await agentSalesRouter.request('/transactions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        agent_id: 'agt_1', trip_id: 'trp_1',
+        seat_ids: [], passenger_names: [],
+        total_amount: 500000, payment_method: 'cash',
+      }),
+    }, makeEnv(db));
+    expect(res.status).toBe(400);
+    const body = await res.json() as any;
+    expect(body.error).toContain('non-empty');
+  });
+
+  it('POST /sync returns 400 if mutations is not an array (TRN-1)', async () => {
+    const res = await seatInventoryRouter.request('/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mutations: 'not-an-array' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(400);
+  });
+
+  it('POST /trips/:id/transition returns 400 if to_state missing (TRN-4)', async () => {
+    db._tables.trips.push({
+      id: 'trp_x', state: 'scheduled', deleted_at: null,
+      operator_id: 'opr_1', route_id: 'rte_1', vehicle_id: 'veh_1',
+      departure_time: Date.now(), created_at: Date.now(), updated_at: Date.now(),
+    });
+    const res = await operatorManagementRouter.request('/trips/trp_x/transition', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }, makeEnv(db));
+    expect(res.status).toBe(400);
+    const body = await res.json() as any;
+    expect(body.error).toContain('to_state');
+  });
+
+  it('PATCH /trips/:id/location rejects string coordinates (TRN-4)', async () => {
+    const res = await operatorManagementRouter.request('/trips/trp_1/location', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ latitude: '6.5244', longitude: '3.3792' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(400);
+    const body = await res.json() as any;
+    expect(body.error).toContain('numbers');
+  });
+
+  it('POST /customers returns 400 for missing phone (TRN-3)', async () => {
+    const res = await bookingPortalRouter.request('/customers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Test User', ndpr_consent: true }),
+    }, makeEnv(db));
+    expect(res.status).toBe(400);
+    const body = await res.json() as any;
+    expect(body.error).toContain('phone');
+  });
+
+  it('GET /receipts/:id returns 404 for unknown receipt (TRN-2)', async () => {
+    const res = await agentSalesRouter.request('/receipts/rct_unknown', {}, makeEnv(db));
+    expect(res.status).toBe(404);
+    const body = await res.json() as any;
+    expect(body.success).toBe(false);
+  });
+});

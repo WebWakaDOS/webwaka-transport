@@ -53,7 +53,7 @@ The frontend runs as a Vite dev server on port 5000. The backend (Cloudflare Wor
 
 ```bash
 npm run dev:ui   # start Vite frontend
-npm test         # run all 140 unit tests (vitest)
+npm test         # run all 219 unit tests (vitest)
 npm run typecheck # TypeScript strict mode check (0 errors required)
 ```
 
@@ -65,6 +65,25 @@ npm run typecheck # TypeScript strict mode check (0 errors required)
 - **Build Once Use Infinitely**: `@webwaka/core` shared across all modules
 - **Cloudflare-First**: D1, KV, Workers Cron, no Vercel/AWS dependencies
 - **Zero Skipping**: No `|| true` in CI, strict TypeScript (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`)
+
+## API Layer (Phase 2 — complete)
+
+### `src/api/types.ts` — Shared types and helpers
+`Env` (all KV + D1 bindings), `AppContext` (Hono context with `Variables: { user: WakaUser | undefined }`), `HonoCtx`. D1 row interfaces for all tables: `DbOperator`, `DbRoute`, `DbVehicle`, `DbTrip`, `DbSeat`, `DbBooking`, `DbCustomer`, `DbAgent`, `DbSalesTransaction`, `DbReceipt`. Helpers: `getOperatorScope(c)` (returns operator_id from JWT or null for SUPER_ADMIN), `applyTenantScope(c, query, params, alias?)` (appends AND filter), `parsePagination(q)` (limit 1-200, offset ≥0), `metaResponse(count, limit, offset)`, `requireFields(body, fields)`, `genId(prefix)`.
+
+### New endpoints added in Phase 2
+- `PATCH /api/seat-inventory/trips/:tripId/seats/:seatId` — offline seat mutation sync (TRN-1)
+- `PATCH /api/booking/bookings/:id` — update payment_reference/method on pending booking (TRN-3)
+- `PATCH /api/operator/trips/:id` — update vehicle/departure_time (TRN-4)
+- `DELETE /api/operator/trips/:id` — soft-delete trip (blocked if boarding/in_transit) (TRN-4)
+- `PATCH /api/operator/routes/:id` — update fare/status/origin/destination (TRN-4)
+- `PATCH /api/operator/vehicles/:id` — update model/status/seats (TRN-4)
+
+### Hardening applied to all 4 API files
+- All D1 queries wrapped in try/catch with 500 fallback
+- All `as any` body casts replaced with typed `Record<string, unknown>` + `requireFields()`
+- Pagination (`limit`, `offset`, `meta`) on all list endpoints
+- Multi-tenant enforcement via `applyTenantScope()` on tenant-scoped queries
 
 ## Offline Data Layer (Phase 1 — complete)
 
@@ -90,7 +109,7 @@ KV namespace provisioning script (SESSIONS_KV, TENANT_CONFIG_KV, SEAT_CACHE_KV).
 - `fake-indexeddb` — dev dependency for Dexie unit testing in Node environment
 - `hono` — Web framework for Cloudflare Workers
 - `react` + `react-dom` — React 19 UI framework
-- `vitest` — Test runner (182 unit tests across 7 test files)
+- `vitest` — Test runner (219 unit tests across 7 test files)
 
 ## Roles (RBAC)
 Six roles defined in `WakaRole` type: `SUPER_ADMIN`, `TENANT_ADMIN`, `SUPERVISOR`, `STAFF`, `DRIVER`, `CUSTOMER`.

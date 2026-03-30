@@ -5,39 +5,43 @@
  */
 import { Hono } from 'hono';
 import { requireRole } from '@webwaka/core';
-import type { Env } from './seat-inventory';
+import type { AppContext, DbOperator, DbRoute, DbVehicle, DbTrip } from './types';
+import { genId, parsePagination, metaResponse, requireFields, applyTenantScope } from './types';
 
-export const operatorManagementRouter = new Hono<{ Bindings: Env }>();
+export const operatorManagementRouter = new Hono<AppContext>();
 
 // ============================================================
 // OPERATORS
 // ============================================================
 
-// GET /operators — list all operators
 operatorManagementRouter.get('/operators', async (c) => {
-  const { status } = c.req.query();
+  const q = c.req.query();
+  const { status } = q;
+  const { limit, offset } = parsePagination(q);
   const db = c.env.DB;
 
   let query = `SELECT * FROM operators WHERE deleted_at IS NULL`;
   const params: unknown[] = [];
   if (status) { query += ` AND status = ?`; params.push(status); }
-  query += ` ORDER BY name ASC`;
+  query += ` ORDER BY name ASC LIMIT ? OFFSET ?`;
+  params.push(limit, offset);
 
-  const result = await db.prepare(query).bind(...params).all();
-  return c.json({ success: true, data: result.results });
+  try {
+    const result = await db.prepare(query).bind(...params).all<DbOperator>();
+    return c.json({ success: true, data: result.results, meta: metaResponse(result.results.length, limit, offset) });
+  } catch {
+    return c.json({ success: false, error: 'Failed to fetch operators' }, 500);
+  }
 });
 
-// POST /operators — register an operator
 operatorManagementRouter.post('/operators', requireRole(['SUPER_ADMIN']), async (c) => {
-  const body = await c.req.json() as any;
-  const { name, code, phone, email } = body;
+  const body = await c.req.json() as Record<string, unknown>;
+  const err = requireFields(body, ['name', 'code']);
+  if (err) return c.json({ success: false, error: err }, 400);
 
-  if (!name || !code) {
-    return c.json({ success: false, error: 'name and code required' }, 400);
-  }
-
+  const { name, code, phone, email } = body as { name: string; code: string; phone?: string; email?: string };
   const db = c.env.DB;
-  const id = `opr_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+  const id = genId('opr');
   const now = Date.now();
 
   try {
@@ -45,110 +49,183 @@ operatorManagementRouter.post('/operators', requireRole(['SUPER_ADMIN']), async 
       `INSERT INTO operators (id, name, code, phone, email, status, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`
     ).bind(id, name, code, phone ?? null, email ?? null, now, now).run();
-  } catch (e: any) {
-    if (e.message?.includes('UNIQUE')) {
-      return c.json({ success: false, error: 'Operator code already exists' }, 409);
-    }
-    throw e;
-  }
 
-  return c.json({ success: true, data: { id, name, code, status: 'active' } }, 201);
+    return c.json({ success: true, data: { id, name, code, status: 'active' } }, 201);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : '';
+    if (msg.includes('UNIQUE')) return c.json({ success: false, error: 'Operator code already exists' }, 409);
+    return c.json({ success: false, error: 'Failed to create operator' }, 500);
+  }
 });
 
-// PATCH /operators/:id — update operator status
 operatorManagementRouter.patch('/operators/:id', requireRole(['SUPER_ADMIN']), async (c) => {
   const id = c.req.param('id');
-  const body = await c.req.json() as any;
-  const { status, name, phone, email } = body;
+  const body = await c.req.json() as Record<string, unknown>;
+  const { status, name, phone, email } = body as {
+    status?: string; name?: string; phone?: string; email?: string;
+  };
 
   const db = c.env.DB;
   const now = Date.now();
 
-  const op = await db.prepare(`SELECT * FROM operators WHERE id = ? AND deleted_at IS NULL`).bind(id).first();
-  if (!op) return c.json({ success: false, error: 'Operator not found' }, 404);
+  try {
+    const op = await db.prepare(
+      `SELECT * FROM operators WHERE id = ? AND deleted_at IS NULL`
+    ).bind(id).first<DbOperator>();
+    if (!op) return c.json({ success: false, error: 'Operator not found' }, 404);
 
-  await db.prepare(
-    `UPDATE operators SET name = COALESCE(?, name), phone = COALESCE(?, phone),
-     email = COALESCE(?, email), status = COALESCE(?, status), updated_at = ? WHERE id = ?`
-  ).bind(name ?? null, phone ?? null, email ?? null, status ?? null, now, id).run();
+    await db.prepare(
+      `UPDATE operators SET name = COALESCE(?, name), phone = COALESCE(?, phone),
+       email = COALESCE(?, email), status = COALESCE(?, status), updated_at = ? WHERE id = ?`
+    ).bind(name ?? null, phone ?? null, email ?? null, status ?? null, now, id).run();
 
-  return c.json({ success: true, data: { id, status: status ?? (op as any).status } });
+    return c.json({ success: true, data: { id, status: status ?? op.status } });
+  } catch {
+    return c.json({ success: false, error: 'Failed to update operator' }, 500);
+  }
 });
 
 // ============================================================
 // ROUTES
 // ============================================================
 
-// GET /routes — list routes
 operatorManagementRouter.get('/routes', async (c) => {
-  const { operator_id } = c.req.query();
+  const q = c.req.query();
+  const { limit, offset } = parsePagination(q);
   const db = c.env.DB;
 
   let query = `SELECT r.*, o.name as operator_name FROM routes r
     JOIN operators o ON r.operator_id = o.id
     WHERE r.deleted_at IS NULL`;
   const params: unknown[] = [];
-  if (operator_id) { query += ` AND r.operator_id = ?`; params.push(operator_id); }
-  query += ` ORDER BY r.origin, r.destination`;
 
-  const result = await db.prepare(query).bind(...params).all();
-  return c.json({ success: true, data: result.results });
+  const scoped = applyTenantScope(c, query, params, 'r.');
+  query = scoped.query;
+  params.splice(0, params.length, ...scoped.params);
+
+  query += ` ORDER BY r.origin, r.destination LIMIT ? OFFSET ?`;
+  params.push(limit, offset);
+
+  try {
+    const result = await db.prepare(query).bind(...params).all<DbRoute>();
+    return c.json({ success: true, data: result.results, meta: metaResponse(result.results.length, limit, offset) });
+  } catch {
+    return c.json({ success: false, error: 'Failed to fetch routes' }, 500);
+  }
 });
 
-// POST /routes — create a route
 operatorManagementRouter.post('/routes', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
-  const body = await c.req.json() as any;
-  const { operator_id, origin, destination, distance_km, duration_minutes, base_fare } = body;
+  const body = await c.req.json() as Record<string, unknown>;
+  const err = requireFields(body, ['operator_id', 'origin', 'destination', 'base_fare']);
+  if (err) return c.json({ success: false, error: err }, 400);
 
-  if (!operator_id || !origin || !destination || !base_fare) {
-    return c.json({ success: false, error: 'operator_id, origin, destination, base_fare required' }, 400);
-  }
+  const { operator_id, origin, destination, distance_km, duration_minutes, base_fare } = body as {
+    operator_id: string; origin: string; destination: string;
+    distance_km?: number; duration_minutes?: number; base_fare: number;
+  };
+
   if (!Number.isInteger(base_fare) || base_fare <= 0) {
     return c.json({ success: false, error: 'base_fare must be a positive integer (kobo)' }, 400);
   }
 
   const db = c.env.DB;
-  const id = `rte_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+  const id = genId('rte');
   const now = Date.now();
 
-  await db.prepare(
-    `INSERT INTO routes (id, operator_id, origin, destination, distance_km, duration_minutes, base_fare, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`
-  ).bind(id, operator_id, origin, destination, distance_km ?? null, duration_minutes ?? null, base_fare, now, now).run();
+  try {
+    await db.prepare(
+      `INSERT INTO routes (id, operator_id, origin, destination, distance_km, duration_minutes, base_fare, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`
+    ).bind(id, operator_id, origin, destination, distance_km ?? null, duration_minutes ?? null, base_fare, now, now).run();
 
-  return c.json({ success: true, data: { id, operator_id, origin, destination, base_fare, status: 'active' } }, 201);
+    return c.json({ success: true, data: { id, operator_id, origin, destination, base_fare, status: 'active' } }, 201);
+  } catch {
+    return c.json({ success: false, error: 'Failed to create route' }, 500);
+  }
+});
+
+operatorManagementRouter.patch('/routes/:id', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+  const id = c.req.param('id');
+  const body = await c.req.json() as Record<string, unknown>;
+  const db = c.env.DB;
+  const now = Date.now();
+
+  try {
+    const route = await db.prepare(
+      `SELECT * FROM routes WHERE id = ? AND deleted_at IS NULL`
+    ).bind(id).first<DbRoute>();
+    if (!route) return c.json({ success: false, error: 'Route not found' }, 404);
+
+    const { origin, destination, distance_km, duration_minutes, base_fare, status } = body as {
+      origin?: string; destination?: string; distance_km?: number;
+      duration_minutes?: number; base_fare?: number; status?: string;
+    };
+
+    if (base_fare !== undefined && (!Number.isInteger(base_fare) || base_fare <= 0)) {
+      return c.json({ success: false, error: 'base_fare must be a positive integer (kobo)' }, 400);
+    }
+
+    await db.prepare(
+      `UPDATE routes
+       SET origin = COALESCE(?, origin),
+           destination = COALESCE(?, destination),
+           distance_km = COALESCE(?, distance_km),
+           duration_minutes = COALESCE(?, duration_minutes),
+           base_fare = COALESCE(?, base_fare),
+           status = COALESCE(?, status),
+           updated_at = ?
+       WHERE id = ?`
+    ).bind(
+      origin ?? null, destination ?? null, distance_km ?? null,
+      duration_minutes ?? null, base_fare ?? null, status ?? null, now, id
+    ).run();
+
+    return c.json({ success: true, data: { id, updated_at: now } });
+  } catch {
+    return c.json({ success: false, error: 'Failed to update route' }, 500);
+  }
 });
 
 // ============================================================
 // VEHICLES
 // ============================================================
 
-// GET /vehicles — list vehicles
 operatorManagementRouter.get('/vehicles', async (c) => {
-  const { operator_id, status } = c.req.query();
+  const q = c.req.query();
+  const { status } = q;
+  const { limit, offset } = parsePagination(q);
   const db = c.env.DB;
 
   let query = `SELECT * FROM vehicles WHERE deleted_at IS NULL`;
   const params: unknown[] = [];
-  if (operator_id) { query += ` AND operator_id = ?`; params.push(operator_id); }
-  if (status) { query += ` AND status = ?`; params.push(status); }
-  query += ` ORDER BY plate_number ASC`;
 
-  const result = await db.prepare(query).bind(...params).all();
-  return c.json({ success: true, data: result.results });
+  const scoped = applyTenantScope(c, query, params);
+  query = scoped.query;
+  params.splice(0, params.length, ...scoped.params);
+
+  if (status) { query += ` AND status = ?`; params.push(status); }
+  query += ` ORDER BY plate_number ASC LIMIT ? OFFSET ?`;
+  params.push(limit, offset);
+
+  try {
+    const result = await db.prepare(query).bind(...params).all<DbVehicle>();
+    return c.json({ success: true, data: result.results, meta: metaResponse(result.results.length, limit, offset) });
+  } catch {
+    return c.json({ success: false, error: 'Failed to fetch vehicles' }, 500);
+  }
 });
 
-// POST /vehicles — register a vehicle
 operatorManagementRouter.post('/vehicles', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
-  const body = await c.req.json() as any;
-  const { operator_id, plate_number, vehicle_type, total_seats, model } = body;
+  const body = await c.req.json() as Record<string, unknown>;
+  const err = requireFields(body, ['operator_id', 'plate_number', 'vehicle_type', 'total_seats']);
+  if (err) return c.json({ success: false, error: err }, 400);
 
-  if (!operator_id || !plate_number || !vehicle_type || !total_seats) {
-    return c.json({ success: false, error: 'operator_id, plate_number, vehicle_type, total_seats required' }, 400);
-  }
+  const { operator_id, plate_number, vehicle_type, total_seats, model } = body as {
+    operator_id: string; plate_number: string; vehicle_type: string; total_seats: number; model?: string;
+  };
 
   const db = c.env.DB;
-  const id = `veh_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+  const id = genId('veh');
   const now = Date.now();
 
   try {
@@ -156,59 +233,161 @@ operatorManagementRouter.post('/vehicles', requireRole(['SUPER_ADMIN', 'TENANT_A
       `INSERT INTO vehicles (id, operator_id, plate_number, vehicle_type, model, total_seats, status, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`
     ).bind(id, operator_id, plate_number, vehicle_type, model ?? null, total_seats, now, now).run();
-  } catch (e: any) {
-    if (e.message?.includes('UNIQUE')) {
-      return c.json({ success: false, error: 'Plate number already registered' }, 409);
-    }
-    throw e;
-  }
 
-  return c.json({ success: true, data: { id, operator_id, plate_number, vehicle_type, model: model ?? null, total_seats, status: 'active' } }, 201);
+    return c.json({ success: true, data: { id, operator_id, plate_number, vehicle_type, model: model ?? null, total_seats, status: 'active' } }, 201);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : '';
+    if (msg.includes('UNIQUE')) return c.json({ success: false, error: 'Plate number already registered' }, 409);
+    return c.json({ success: false, error: 'Failed to register vehicle' }, 500);
+  }
+});
+
+operatorManagementRouter.patch('/vehicles/:id', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+  const id = c.req.param('id');
+  const body = await c.req.json() as Record<string, unknown>;
+  const db = c.env.DB;
+  const now = Date.now();
+
+  try {
+    const vehicle = await db.prepare(
+      `SELECT * FROM vehicles WHERE id = ? AND deleted_at IS NULL`
+    ).bind(id).first<DbVehicle>();
+    if (!vehicle) return c.json({ success: false, error: 'Vehicle not found' }, 404);
+
+    const { plate_number, vehicle_type, model, total_seats, status } = body as {
+      plate_number?: string; vehicle_type?: string; model?: string; total_seats?: number; status?: string;
+    };
+
+    await db.prepare(
+      `UPDATE vehicles
+       SET plate_number = COALESCE(?, plate_number),
+           vehicle_type = COALESCE(?, vehicle_type),
+           model = COALESCE(?, model),
+           total_seats = COALESCE(?, total_seats),
+           status = COALESCE(?, status),
+           updated_at = ?
+       WHERE id = ?`
+    ).bind(plate_number ?? null, vehicle_type ?? null, model ?? null, total_seats ?? null, status ?? null, now, id).run();
+
+    return c.json({ success: true, data: { id, updated_at: now } });
+  } catch {
+    return c.json({ success: false, error: 'Failed to update vehicle' }, 500);
+  }
 });
 
 // ============================================================
 // TRIP STATE MACHINE (TRN-4)
 // ============================================================
 
-// GET /trips — list trips for operator dashboard
 operatorManagementRouter.get('/trips', async (c) => {
-  const { operator_id, state } = c.req.query();
+  const q = c.req.query();
+  const { state } = q;
+  const { limit, offset } = parsePagination(q);
   const db = c.env.DB;
 
   let query = `SELECT t.*, r.origin, r.destination, r.base_fare FROM trips t
     JOIN routes r ON t.route_id = r.id
     WHERE t.deleted_at IS NULL`;
   const params: unknown[] = [];
-  if (operator_id) { query += ` AND t.operator_id = ?`; params.push(operator_id); }
-  if (state) { query += ` AND t.state = ?`; params.push(state); }
-  query += ` ORDER BY t.departure_time DESC LIMIT 100`;
 
-  const result = await db.prepare(query).bind(...params).all();
-  return c.json({ success: true, data: result.results });
+  const scoped = applyTenantScope(c, query, params, 't.');
+  query = scoped.query;
+  params.splice(0, params.length, ...scoped.params);
+
+  if (state) { query += ` AND t.state = ?`; params.push(state); }
+  query += ` ORDER BY t.departure_time DESC LIMIT ? OFFSET ?`;
+  params.push(limit, offset);
+
+  try {
+    const result = await db.prepare(query).bind(...params).all<DbTrip>();
+    return c.json({ success: true, data: result.results, meta: metaResponse(result.results.length, limit, offset) });
+  } catch {
+    return c.json({ success: false, error: 'Failed to fetch trips' }, 500);
+  }
 });
 
-// GET /trips/:id/state — get current trip state
+operatorManagementRouter.patch('/trips/:id', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
+  const id = c.req.param('id');
+  const body = await c.req.json() as Record<string, unknown>;
+  const db = c.env.DB;
+  const now = Date.now();
+
+  try {
+    const trip = await db.prepare(
+      `SELECT * FROM trips WHERE id = ? AND deleted_at IS NULL`
+    ).bind(id).first<DbTrip>();
+    if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
+
+    const { vehicle_id, departure_time } = body as {
+      vehicle_id?: string; departure_time?: number;
+    };
+
+    await db.prepare(
+      `UPDATE trips
+       SET vehicle_id = COALESCE(?, vehicle_id),
+           departure_time = COALESCE(?, departure_time),
+           updated_at = ?
+       WHERE id = ?`
+    ).bind(vehicle_id ?? null, departure_time ?? null, now, id).run();
+
+    return c.json({ success: true, data: { id, updated_at: now } });
+  } catch {
+    return c.json({ success: false, error: 'Failed to update trip' }, 500);
+  }
+});
+
+operatorManagementRouter.delete('/trips/:id', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+  const id = c.req.param('id');
+  const db = c.env.DB;
+  const now = Date.now();
+
+  try {
+    const trip = await db.prepare(
+      `SELECT * FROM trips WHERE id = ? AND deleted_at IS NULL`
+    ).bind(id).first<DbTrip>();
+    if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
+
+    if (trip.state === 'boarding' || trip.state === 'in_transit') {
+      return c.json({ success: false, error: `Cannot delete a trip in ${trip.state} state` }, 409);
+    }
+
+    await db.prepare(
+      `UPDATE trips SET deleted_at = ?, updated_at = ? WHERE id = ?`
+    ).bind(now, now, id).run();
+
+    return c.json({ success: true, data: { id, deleted_at: now } });
+  } catch {
+    return c.json({ success: false, error: 'Failed to delete trip' }, 500);
+  }
+});
+
 operatorManagementRouter.get('/trips/:id/state', async (c) => {
   const id = c.req.param('id');
   const db = c.env.DB;
 
-  const trip = await db.prepare(
-    `SELECT t.*, r.origin, r.destination FROM trips t JOIN routes r ON t.route_id = r.id WHERE t.id = ?`
-  ).bind(id).first() as any;
-  if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
+  try {
+    const trip = await db.prepare(
+      `SELECT t.*, r.origin, r.destination FROM trips t JOIN routes r ON t.route_id = r.id WHERE t.id = ?`
+    ).bind(id).first<DbTrip & { origin: string; destination: string }>();
+    if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
 
-  const transitions = await db.prepare(
-    `SELECT * FROM trip_state_transitions WHERE trip_id = ? ORDER BY transitioned_at ASC`
-  ).bind(id).all();
+    const transitions = await db.prepare(
+      `SELECT * FROM trip_state_transitions WHERE trip_id = ? ORDER BY transitioned_at ASC`
+    ).bind(id).all();
 
-  return c.json({ success: true, data: { ...trip, transitions: transitions.results } });
+    return c.json({ success: true, data: { ...trip, transitions: transitions.results } });
+  } catch {
+    return c.json({ success: false, error: 'Failed to fetch trip state' }, 500);
+  }
 });
 
-// POST /trips/:id/transition — advance trip state
 operatorManagementRouter.post('/trips/:id/transition', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
   const id = c.req.param('id');
-  const body = await c.req.json() as any;
-  const { to_state, reason } = body;
+  const body = await c.req.json() as Record<string, unknown>;
+  const err = requireFields(body, ['to_state']);
+  if (err) return c.json({ success: false, error: err }, 400);
+
+  const { to_state, reason } = body as { to_state: string; reason?: string };
 
   const VALID_TRANSITIONS: Record<string, string[]> = {
     scheduled: ['boarding', 'cancelled'],
@@ -221,35 +400,39 @@ operatorManagementRouter.post('/trips/:id/transition', requireRole(['SUPER_ADMIN
   const db = c.env.DB;
   const now = Date.now();
 
-  const trip = await db.prepare(`SELECT * FROM trips WHERE id = ? AND deleted_at IS NULL`).bind(id).first() as any;
-  if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
+  try {
+    const trip = await db.prepare(
+      `SELECT * FROM trips WHERE id = ? AND deleted_at IS NULL`
+    ).bind(id).first<DbTrip>();
+    if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
 
-  const allowed = VALID_TRANSITIONS[trip.state] ?? [];
-  if (!allowed.includes(to_state)) {
-    return c.json({
-      success: false,
-      error: `Invalid transition: ${trip.state} → ${to_state}. Allowed: ${allowed.join(', ') || 'none'}`,
-    }, 422);
+    const allowed = VALID_TRANSITIONS[trip.state] ?? [];
+    if (!allowed.includes(to_state)) {
+      return c.json({
+        success: false,
+        error: `Invalid transition: ${trip.state} → ${to_state}. Allowed: ${allowed.join(', ') || 'none'}`,
+      }, 422);
+    }
+
+    const transitionId = genId('tst');
+    await db.batch([
+      db.prepare(`UPDATE trips SET state = ?, updated_at = ? WHERE id = ?`).bind(to_state, now, id),
+      db.prepare(
+        `INSERT INTO trip_state_transitions (id, trip_id, from_state, to_state, reason, transitioned_at)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      ).bind(transitionId, id, trip.state, to_state, reason ?? null, now),
+    ]);
+
+    return c.json({ success: true, data: { id, from_state: trip.state, to_state, transitioned_at: now } });
+  } catch {
+    return c.json({ success: false, error: 'Failed to transition trip state' }, 500);
   }
-
-  // Record transition
-  const transitionId = `tst_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-  await db.batch([
-    db.prepare(`UPDATE trips SET state = ?, updated_at = ? WHERE id = ?`).bind(to_state, now, id),
-    db.prepare(
-      `INSERT INTO trip_state_transitions (id, trip_id, from_state, to_state, reason, transitioned_at)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    ).bind(transitionId, id, trip.state, to_state, reason ?? null, now),
-  ]);
-
-  return c.json({ success: true, data: { id, from_state: trip.state, to_state, transitioned_at: now } });
 });
 
-// PATCH /trips/:id/location — update GPS location
 operatorManagementRouter.patch('/trips/:id/location', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
   const id = c.req.param('id');
-  const body = await c.req.json() as any;
-  const { latitude, longitude } = body;
+  const body = await c.req.json() as Record<string, unknown>;
+  const { latitude, longitude } = body as { latitude?: unknown; longitude?: unknown };
 
   if (typeof latitude !== 'number' || typeof longitude !== 'number') {
     return c.json({ success: false, error: 'latitude and longitude required as numbers' }, 400);
@@ -258,14 +441,17 @@ operatorManagementRouter.patch('/trips/:id/location', requireRole(['SUPER_ADMIN'
   const db = c.env.DB;
   const now = Date.now();
 
-  await db.prepare(
-    `UPDATE trips SET current_latitude = ?, current_longitude = ?, updated_at = ? WHERE id = ?`
-  ).bind(latitude, longitude, now, id).run();
+  try {
+    await db.prepare(
+      `UPDATE trips SET current_latitude = ?, current_longitude = ?, updated_at = ? WHERE id = ?`
+    ).bind(latitude, longitude, now, id).run();
 
-  return c.json({ success: true, data: { id, latitude, longitude, updated_at: now } });
+    return c.json({ success: true, data: { id, latitude, longitude, updated_at: now } });
+  } catch {
+    return c.json({ success: false, error: 'Failed to update trip location' }, 500);
+  }
 });
 
-// GET /dashboard — operator dashboard
 operatorManagementRouter.get('/dashboard', async (c) => {
   const { operator_id } = c.req.query();
   const db = c.env.DB;
@@ -275,10 +461,7 @@ operatorManagementRouter.get('/dashboard', async (c) => {
   if (operator_id) { tripQuery += ` AND operator_id = ?`; params.push(operator_id); }
   tripQuery += ` GROUP BY state`;
 
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
-  const todayStartMs = todayStart.getTime();
-
+  const todayStartMs = new Date().setHours(0, 0, 0, 0);
   const revenueParams: unknown[] = [todayStartMs];
   let revenueQuery = `SELECT COALESCE(SUM(total_amount), 0) as total FROM sales_transactions
     WHERE payment_status = 'completed' AND created_at >= ?`;
@@ -287,27 +470,31 @@ operatorManagementRouter.get('/dashboard', async (c) => {
     revenueParams.push(operator_id);
   }
 
-  const [tripStats, revenueResult] = await Promise.all([
-    db.prepare(tripQuery).bind(...params).all(),
-    db.prepare(revenueQuery).bind(...revenueParams).first(),
-  ]);
+  try {
+    const [tripStats, revenueResult] = await Promise.all([
+      db.prepare(tripQuery).bind(...params).all<{ state: string; count: number }>(),
+      db.prepare(revenueQuery).bind(...revenueParams).first<{ total: number }>(),
+    ]);
 
-  const stats = (tripStats.results as any[]).reduce((acc: any, r: any) => {
-    acc[r.state] = r.count;
-    return acc;
-  }, {});
+    const stats = tripStats.results.reduce((acc: Record<string, number>, r) => {
+      acc[r.state] = r.count;
+      return acc;
+    }, {});
 
-  return c.json({
-    success: true,
-    data: {
-      trips: {
-        scheduled: stats.scheduled ?? 0,
-        boarding: stats.boarding ?? 0,
-        in_transit: stats.in_transit ?? 0,
-        completed: stats.completed ?? 0,
-        cancelled: stats.cancelled ?? 0,
+    return c.json({
+      success: true,
+      data: {
+        trips: {
+          scheduled: stats['scheduled'] ?? 0,
+          boarding: stats['boarding'] ?? 0,
+          in_transit: stats['in_transit'] ?? 0,
+          completed: stats['completed'] ?? 0,
+          cancelled: stats['cancelled'] ?? 0,
+        },
+        today_revenue_kobo: revenueResult?.total ?? 0,
       },
-      today_revenue_kobo: (revenueResult as any)?.total ?? 0,
-    },
-  });
+    });
+  } catch {
+    return c.json({ success: false, error: 'Failed to fetch dashboard' }, 500);
+  }
 });
