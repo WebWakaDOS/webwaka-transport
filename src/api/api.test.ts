@@ -1018,6 +1018,75 @@ describe('Phase 7: PATCH /bookings/:id/cancel — Booking Cancellation (TRN-3)',
 });
 
 // ============================================================
+// Phase 12 — Trip Copy Tests
+// ============================================================
+
+describe('Phase 12: POST /trips/:id/copy — Duplicate Trip', () => {
+  let db: any;
+  const now = Date.now();
+  const futureMs = now + 86400_000 * 2;
+
+  beforeEach(() => {
+    db = createMockDB();
+    db._tables.trips.push({
+      id: 'trp_src1', operator_id: 'opr_1', route_id: 'rte_1', vehicle_id: 'veh_1',
+      driver_id: null, departure_time: now + 3600_000, state: 'scheduled',
+      base_fare: 1200000, created_at: now, updated_at: now, deleted_at: null,
+    });
+    db._tables.seats.push(
+      { id: 'trp_src1_s1', trip_id: 'trp_src1', seat_number: '01', status: 'available', version: 0, created_at: now, updated_at: now, deleted_at: null },
+      { id: 'trp_src1_s2', trip_id: 'trp_src1', seat_number: '02', status: 'available', version: 0, created_at: now, updated_at: now, deleted_at: null },
+    );
+  });
+
+  it('creates a copy with a new departure time and returns 201', async () => {
+    const res = await operatorManagementRouter.request('/trips/trp_src1/copy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ departure_time: futureMs }),
+    }, makeEnv(db));
+    expect(res.status).toBe(201);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.id).not.toBe('trp_src1');
+    expect(body.data.state).toBe('scheduled');
+    expect(body.data.departure_time).toBe(futureMs);
+    expect(body.data.copied_from).toBe('trp_src1');
+  });
+
+  it('returns 404 for unknown source trip', async () => {
+    const res = await operatorManagementRouter.request('/trips/trp_ghost/copy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ departure_time: futureMs }),
+    }, makeEnv(db));
+    expect(res.status).toBe(404);
+    const body = await res.json() as any;
+    expect(body.error).toMatch(/not found/i);
+  });
+
+  it('returns 400 when departure_time is missing', async () => {
+    const res = await operatorManagementRouter.request('/trips/trp_src1/copy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }, makeEnv(db));
+    expect(res.status).toBe(400);
+    const body = await res.json() as any;
+    expect(body.error).toMatch(/departure_time/i);
+  });
+
+  it('returns 400 when departure_time is a string instead of integer', async () => {
+    const res = await operatorManagementRouter.request('/trips/trp_src1/copy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ departure_time: 'tomorrow' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(400);
+  });
+});
+
+// ============================================================
 // Phase 11 — Super Admin: PATCH /operators/:id Tests
 // ============================================================
 

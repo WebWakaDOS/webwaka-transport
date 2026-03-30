@@ -467,6 +467,10 @@ export class ApiClient {
     await this.request('DELETE', `/api/operator/trips/${tripId}`);
   }
 
+  async copyTrip(tripId: string, departureTime: number): Promise<Trip> {
+    return this.request<Trip>('POST', `/api/operator/trips/${tripId}/copy`, { departure_time: departureTime });
+  }
+
   async updateTrip(tripId: string, data: { vehicle_id?: string; departure_time?: number; driver_id?: string | null }): Promise<void> {
     await this.request('PATCH', `/api/operator/trips/${tripId}`, data);
   }

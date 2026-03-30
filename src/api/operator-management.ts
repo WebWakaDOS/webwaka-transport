@@ -4,7 +4,7 @@
  * Invariants: Multi-tenancy (operator_id), Nigeria-First, Build Once Use Infinitely
  */
 import { Hono } from 'hono';
-import { requireRole } from '@webwaka/core';
+import { requireRole, publishEvent } from '@webwaka/core';
 import type { AppContext, DbOperator, DbRoute, DbVehicle, DbTrip, DbDriver } from './types';
 import { genId, parsePagination, metaResponse, requireFields, applyTenantScope } from './types';
 
@@ -398,6 +398,64 @@ operatorManagementRouter.patch('/trips/:id', requireRole(['SUPER_ADMIN', 'TENANT
   }
 });
 
+// ============================================================
+// POST /trips/:id/copy — duplicate a trip to a new departure time
+// ============================================================
+operatorManagementRouter.post('/trips/:id/copy', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+  const sourceId = c.req.param('id');
+  let body: Record<string, unknown>;
+  try { body = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ success: false, error: 'Invalid JSON body' }, 400); }
+
+  const { departure_time } = body as { departure_time?: unknown };
+  if (typeof departure_time !== 'number' || !Number.isInteger(departure_time) || departure_time <= 0) {
+    return c.json({ success: false, error: 'departure_time is required (positive integer unix ms)' }, 400);
+  }
+
+  const db = c.env.DB;
+  const now = Date.now();
+
+  try {
+    const source = await db.prepare(
+      `SELECT * FROM trips WHERE id = ? AND deleted_at IS NULL`
+    ).bind(sourceId).first<DbTrip>();
+    if (!source) return c.json({ success: false, error: 'Source trip not found' }, 404);
+
+    const seatCount = await db.prepare(
+      `SELECT COUNT(*) as cnt FROM seats WHERE trip_id = ? AND deleted_at IS NULL`
+    ).bind(sourceId).first<{ cnt: number }>();
+    const total_seats = seatCount?.cnt ?? 0;
+
+    const newId = genId('trp');
+    await db.prepare(
+      `INSERT INTO trips (id, operator_id, route_id, vehicle_id, driver_id, departure_time, state, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'scheduled', ?, ?)`
+    ).bind(newId, source.operator_id, source.route_id, source.vehicle_id, source.driver_id ?? null, departure_time, now, now).run();
+
+    if (total_seats > 0) {
+      const seatBatch = Array.from({ length: total_seats }, (_, i) =>
+        db.prepare(
+          `INSERT INTO seats (id, trip_id, seat_number, status, version, created_at, updated_at) VALUES (?, ?, ?, 'available', 0, ?, ?)`
+        ).bind(`${newId}_s${i + 1}`, newId, String(i + 1).padStart(2, '0'), now, now)
+      );
+      await db.batch(seatBatch);
+    }
+
+    return c.json({ success: true, data: {
+      id: newId,
+      operator_id: source.operator_id,
+      route_id: source.route_id,
+      vehicle_id: source.vehicle_id,
+      departure_time,
+      state: 'scheduled',
+      total_seats,
+      copied_from: sourceId,
+    } }, 201);
+  } catch {
+    return c.json({ success: false, error: 'Failed to copy trip' }, 500);
+  }
+});
+
 operatorManagementRouter.delete('/trips/:id', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
   const id = c.req.param('id');
   const db = c.env.DB;
@@ -484,6 +542,16 @@ operatorManagementRouter.post('/trips/:id/transition', requireRole(['SUPER_ADMIN
          VALUES (?, ?, ?, ?, ?, ?)`
       ).bind(transitionId, id, trip.state, to_state, reason ?? null, now),
     ]);
+
+    try {
+      await publishEvent(db, {
+        event_type: 'trip.state_changed',
+        aggregate_id: id,
+        aggregate_type: 'trip',
+        payload: { trip_id: id, from_state: trip.state, to_state, reason: reason ?? null, operator_id: trip.operator_id },
+        timestamp: now,
+      });
+    } catch { /* non-fatal */ }
 
     return c.json({ success: true, data: { id, from_state: trip.state, to_state, transitioned_at: now } });
   } catch {

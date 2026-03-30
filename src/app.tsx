@@ -650,6 +650,8 @@ function TripsPanel({ onBack }: { onBack: () => void }) {
   const [manifestTripId, setManifestTripId] = useState<string | null>(null);
   const [manifest, setManifest] = useState<TripManifest | null>(null);
   const [loadingManifest, setLoadingManifest] = useState(false);
+  const [copyingTripId, setCopyingTripId] = useState<string | null>(null);
+  const [copyTime, setCopyTime] = useState('');
 
   const stateColors: Record<string, string> = {
     scheduled: '#2563eb', boarding: '#d97706', in_transit: '#16a34a',
@@ -746,6 +748,25 @@ function TripsPanel({ onBack }: { onBack: () => void }) {
       await api.transitionTrip(tripId, newState);
       await load();
     } catch { /* ignore */ } finally { setUpdatingId(null); }
+  };
+
+  const startCopy = (trip: Trip) => {
+    const nextDay = new Date(trip.departure_time + 86400_000);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const local = `${nextDay.getFullYear()}-${pad(nextDay.getMonth() + 1)}-${pad(nextDay.getDate())}T${pad(nextDay.getHours())}:${pad(nextDay.getMinutes())}`;
+    setCopyingTripId(trip.id);
+    setCopyTime(local);
+  };
+
+  const handleCopy = async (tripId: string) => {
+    const ms = new Date(copyTime).getTime();
+    if (isNaN(ms)) return;
+    try {
+      await api.copyTrip(tripId, ms);
+      setCopyingTripId(null);
+      setCopyTime('');
+      await load();
+    } catch { /* ignore */ }
   };
 
   const loadManifest = async (tripId: string) => {
@@ -881,16 +902,48 @@ function TripsPanel({ onBack }: { onBack: () => void }) {
                   ))}
                 </div>
               )}
-              <button
-                onClick={() => void loadManifest(trip.id)}
-                style={{
-                  marginTop: 10, width: '100%', padding: '7px', borderRadius: 8,
-                  border: '1.5px solid #2563eb20', background: '#eff6ff',
-                  color: '#2563eb', fontWeight: 600, fontSize: 12, cursor: 'pointer',
-                }}
-              >
-                {manifestTripId === trip.id ? '▲ Close Manifest' : '▼ Passenger Manifest'}
-              </button>
+              <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+                <button
+                  onClick={() => void loadManifest(trip.id)}
+                  style={{
+                    flex: 1, padding: '7px', borderRadius: 8,
+                    border: '1.5px solid #2563eb20', background: '#eff6ff',
+                    color: '#2563eb', fontWeight: 600, fontSize: 12, cursor: 'pointer',
+                  }}
+                >
+                  {manifestTripId === trip.id ? '▲ Manifest' : '▼ Manifest'}
+                </button>
+                {trip.state !== 'cancelled' && (
+                  <button
+                    onClick={() => copyingTripId === trip.id ? (setCopyingTripId(null), setCopyTime('')) : startCopy(trip)}
+                    style={{
+                      padding: '7px 12px', borderRadius: 8,
+                      border: '1.5px solid #d97706', background: copyingTripId === trip.id ? '#fef3c7' : '#fff',
+                      color: '#d97706', fontWeight: 600, fontSize: 12, cursor: 'pointer',
+                    }}
+                  >
+                    {copyingTripId === trip.id ? '✕' : '⧉ Copy'}
+                  </button>
+                )}
+              </div>
+
+              {copyingTripId === trip.id && (
+                <div style={{ marginTop: 8, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <input
+                    type="datetime-local"
+                    value={copyTime}
+                    onChange={e => setCopyTime(e.target.value)}
+                    style={{ ...inputStyle, flex: 1, minWidth: 160, fontSize: 12, padding: '6px 8px' }}
+                  />
+                  <button
+                    onClick={() => void handleCopy(trip.id)}
+                    disabled={!copyTime}
+                    style={{ ...primaryBtnStyle, padding: '7px 14px', fontSize: 12, whiteSpace: 'nowrap' }}
+                  >
+                    Confirm Copy
+                  </button>
+                </div>
+              )}
 
               {manifestTripId === trip.id && (
                 <div style={{ marginTop: 8 }}>

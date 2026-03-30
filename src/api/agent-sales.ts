@@ -4,7 +4,7 @@
  * Security: JWT auth via global middleware in worker.ts; per-route RBAC via requireRole
  */
 import { Hono } from 'hono';
-import { requireRole } from '@webwaka/core';
+import { requireRole, publishEvent } from '@webwaka/core';
 import type { AppContext, DbAgent, DbSalesTransaction, DbReceipt } from './types';
 import { genId, parsePagination, metaResponse, requireFields, applyTenantScope } from './types';
 
@@ -104,6 +104,16 @@ agentSalesRouter.post('/transactions', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN
       `INSERT INTO receipts (id, transaction_id, agent_id, trip_id, passenger_names, seat_numbers, total_amount, payment_method, issued_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(receiptId, id, agent_id, trip_id, JSON.stringify(passenger_names), JSON.stringify(seat_ids), total_amount, payment_method, now).run();
+
+    try {
+      await publishEvent(db, {
+        event_type: 'agent.sale.completed',
+        aggregate_id: id,
+        aggregate_type: 'sales_transaction',
+        payload: { transaction_id: id, agent_id, trip_id, total_amount, payment_method, receipt_id: receiptId },
+        timestamp: now,
+      });
+    } catch { /* non-fatal */ }
 
     return c.json({
       success: true,
