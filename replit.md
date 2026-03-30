@@ -66,6 +66,46 @@ npm run typecheck # TypeScript strict mode check (0 errors required)
 - **Cloudflare-First**: D1, KV, Workers Cron, no Vercel/AWS dependencies
 - **Zero Skipping**: No `|| true` in CI, strict TypeScript (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`)
 
+## Phase 6: Operator Context Hardening + SyncEngine Auth + Agent POS Trip Selector (complete)
+
+### `src/core/auth/context.tsx` — SyncEngine auth wiring
+`AuthProvider` now wires the `syncEngine` singleton whenever auth state changes:
+- **On rehydrate**: if a valid token is found in `localStorage`, calls `syncEngine.setAuthToken(token)` so that any queued offline mutations are authenticated immediately on app load.
+- **On OTP verify**: after JWT is issued and stored, calls `syncEngine.setAuthToken(newToken)`.
+- **On logout**: calls `syncEngine.clearAuthToken()` before clearing React state.
+
+Before this, the `_fetchWithAuth` method existed but `_authToken` was always `undefined` — every sync mutation was sent without an `Authorization` header, causing 401 rejections on reconnect.
+
+### `src/api/auth.ts` — OTP rate limiting
+Added a sliding-window rate limiter on `POST /api/auth/otp/request`:
+- Key: `rate:{phone}` in `SESSIONS_KV`; value: request count as a string; TTL: 600 seconds (10 minutes).
+- If `count >= 5`, returns HTTP 429 with error `"Too many OTP requests. Please wait 10 minutes and try again."`
+- If `count < 5`, increments and proceeds (sliding window — TTL resets on each request).
+- Non-fatal: if the KV rate-check itself throws (e.g. quota error), the OTP request is allowed through.
+
+### `src/app.tsx` — Operator context auto-fill (RoutesPanel, VehiclesPanel)
+`RoutesPanel` and `VehiclesPanel` now call `useAuth()`:
+- If the logged-in user has `user.operator_id` (i.e. TENANT_ADMIN), the form shows a read-only blue badge `"Operator: opr_xxx"` instead of an editable input field.
+- For SUPER_ADMIN (no `operator_id`), the text input remains so they can target any operator.
+- `operator_id` is derived as `user?.operator_id ?? form.operator_id` when calling the API — no accidental empty string sent.
+- Form resets to `operator_id: user?.operator_id ?? ''` after successful create.
+
+### `src/app.tsx` — Agent POS trip selector + seat grid (AgentPOSModule)
+Replaced all three free-text inputs with a real interactive flow:
+1. **Trip dropdown** (when online and trips are loaded): `getOperatorTrips()` fetches scheduled + boarding trips. Each option shows `Origin → Destination · HH:MM · N avail`. Falls back to a plain text input if offline or no trips returned.
+2. **Seat grid** (auto-loads on trip select): calls `getSeatAvailability(tripId)`. Renders a 4-column button grid; available seats are tappable, occupied/blocked seats are greyed out and disabled. Multiple seats can be selected.
+3. **Auto-amount**: when seats are selected, `amount` is auto-filled from `trip.base_fare × selectedSeats.length / 100` (kobo → naira). Agent can still override.
+4. **`agent_id`** is now `user?.id ?? 'agent'` (from JWT), not the hardcoded `'current_agent'`.
+5. **Submit guard**: button is disabled unless a trip, at least one seat, and an amount are provided.
+6. **Offline path**: uses the same `saveOfflineTransaction()` flow as before, with the real agent ID and selected seat IDs.
+
+### `src/api/api.test.ts` — OTP rate limiting tests (4 new tests, 232 total)
+New `describe('OTP Rate Limiting')` block covers:
+- 503 when `SESSIONS_KV` is not configured
+- First 5 requests succeed and return a `dev_code`
+- 6th request returns HTTP 429 with "too many" message
+- Rate limit is per-phone — exhausting one phone does not affect another
+
 ## Payment Integration Layer (Phase 5 — complete)
 
 ### `migrations/005_payment_columns.sql`

@@ -8,6 +8,7 @@ import { agentSalesRouter } from './agent-sales';
 import { bookingPortalRouter } from './booking-portal';
 import { operatorManagementRouter } from './operator-management';
 import { paymentsRouter } from './payments';
+import { authRouter } from './auth';
 
 // ============================================================
 // Mock D1 Database
@@ -157,6 +158,21 @@ function createMockDB() {
 
 function makeEnv(db: any) {
   return { DB: db };
+}
+
+function makeKV() {
+  const store = new Map<string, string>();
+  return {
+    get: async (key: string) => store.get(key) ?? null,
+    put: async (key: string, value: string) => { store.set(key, value); },
+    delete: async (key: string) => { store.delete(key); },
+    list: async () => ({ keys: [], list_complete: true, cursor: '' }),
+    getWithMetadata: async (key: string) => ({ value: store.get(key) ?? null, metadata: null }),
+  };
+}
+
+function makeEnvWithKV(db: any, kv?: any) {
+  return { DB: db, SESSIONS_KV: kv ?? makeKV() };
 }
 
 // ============================================================
@@ -1183,5 +1199,86 @@ describe('Paystack Payments API', () => {
     const body = await res.json() as any;
     expect(body.success).toBe(false);
     expect(body.error).toMatch(/cancelled/i);
+  });
+});
+
+// ============================================================
+// OTP Rate Limiting Tests (Phase 6)
+// ============================================================
+describe('OTP Rate Limiting', () => {
+  let db: any;
+  beforeEach(() => { db = createMockDB(); });
+
+  it('returns 503 when SESSIONS_KV is not configured', async () => {
+    const res = await authRouter.request('/otp/request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone: '08012345678' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(503);
+    const body = await res.json() as any;
+    expect(body.success).toBe(false);
+    expect(body.error).toMatch(/unavailable/i);
+  });
+
+  it('allows first 5 OTP requests and returns dev_code each time', async () => {
+    const kv = makeKV();
+    const env = makeEnvWithKV(db, kv);
+    for (let i = 1; i <= 5; i++) {
+      const res = await authRouter.request('/otp/request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: '08099887766' }),
+      }, env);
+      expect(res.status).toBe(200);
+      const body = await res.json() as any;
+      expect(body.success).toBe(true);
+      expect(body.data.dev_code).toMatch(/^\d{6}$/);
+    }
+  });
+
+  it('returns 429 on the 6th OTP request within the window', async () => {
+    const kv = makeKV();
+    const env = makeEnvWithKV(db, kv);
+    // Exhaust the 5-request limit
+    for (let i = 0; i < 5; i++) {
+      await authRouter.request('/otp/request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: '08011112222' }),
+      }, env);
+    }
+    // 6th request should be rate-limited
+    const res = await authRouter.request('/otp/request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone: '08011112222' }),
+    }, env);
+    expect(res.status).toBe(429);
+    const body = await res.json() as any;
+    expect(body.success).toBe(false);
+    expect(body.error).toMatch(/too many/i);
+  });
+
+  it('rate limit is per-phone — different phones are independent', async () => {
+    const kv = makeKV();
+    const env = makeEnvWithKV(db, kv);
+    // Exhaust phone A
+    for (let i = 0; i < 5; i++) {
+      await authRouter.request('/otp/request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: '08033334444' }),
+      }, env);
+    }
+    // Phone B should still succeed
+    const res = await authRouter.request('/otp/request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone: '08055556666' }),
+    }, env);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
   });
 });

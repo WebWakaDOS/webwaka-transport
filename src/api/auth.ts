@@ -42,6 +42,19 @@ authRouter.post('/otp/request', async (c) => {
     return c.json({ success: false, error: 'OTP service unavailable' }, 503);
   }
 
+  // Rate limiting: max 5 OTP requests per phone per 10-minute sliding window
+  const rateKey = `rate:${phone}`;
+  try {
+    const rateRaw = await c.env.SESSIONS_KV.get(rateKey);
+    const rateCount = rateRaw ? parseInt(rateRaw, 10) : 0;
+    if (rateCount >= 5) {
+      return c.json({ success: false, error: 'Too many OTP requests. Please wait 10 minutes and try again.' }, 429);
+    }
+    await c.env.SESSIONS_KV.put(rateKey, String(rateCount + 1), { expirationTtl: 600 });
+  } catch {
+    // Non-fatal — allow through if KV rate-check fails
+  }
+
   const code = String(Math.floor(100_000 + Math.random() * 900_000));
   const requestId = genId('otp');
   const expiresAt = Date.now() + 5 * 60 * 1000;

@@ -10,7 +10,7 @@ import { AuthProvider, useAuth, type WakaRole } from './core/auth/context';
 import { LoginScreen } from './components/login-screen';
 import { BookingFlow } from './components/booking-flow';
 import { api, ApiError } from './api/client';
-import type { TripSummary, Route, Vehicle, Trip, OperatorStats, Booking } from './api/client';
+import type { TripSummary, Route, Vehicle, Trip, OperatorStats, Booking, SeatAvailability } from './api/client';
 
 // ============================================================
 // Error Boundary
@@ -151,8 +151,13 @@ function TripSearchModule() {
 // Agent POS Module (TRN-2)
 // ============================================================
 function AgentPOSModule({ online }: { online: boolean }) {
+  const { user } = useAuth();
+  const [trips, setTrips] = useState<Trip[]>([]);
+  const [tripsLoading, setTripsLoading] = useState(false);
   const [tripId, setTripId] = useState('');
-  const [seatIds, setSeatIds] = useState('');
+  const [seatAvailability, setSeatAvailability] = useState<SeatAvailability | null>(null);
+  const [seatsLoading, setSeatsLoading] = useState(false);
+  const [selectedSeats, setSelectedSeats] = useState<string[]>([]);
   const [passengers, setPassengers] = useState('');
   const [amount, setAmount] = useState('');
   const [method, setMethod] = useState<'cash' | 'mobile_money' | 'card'>('cash');
@@ -160,21 +165,57 @@ function AgentPOSModule({ online }: { online: boolean }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
+  // Load active trips when coming online
+  useEffect(() => {
+    if (!online) return;
+    setTripsLoading(true);
+    api.getOperatorTrips()
+      .then(data => setTrips(data.filter(tr => tr.state === 'scheduled' || tr.state === 'boarding')))
+      .catch(() => setTrips([]))
+      .finally(() => setTripsLoading(false));
+  }, [online]);
+
+  // Load seat availability when trip changes
+  useEffect(() => {
+    if (!tripId) { setSeatAvailability(null); setSelectedSeats([]); return; }
+    setSeatsLoading(true);
+    api.getSeatAvailability(tripId)
+      .then(data => { setSeatAvailability(data); setSelectedSeats([]); })
+      .catch(() => setSeatAvailability(null))
+      .finally(() => setSeatsLoading(false));
+  }, [tripId]);
+
+  // Auto-fill amount from trip base_fare × selected seat count
+  useEffect(() => {
+    const trip = trips.find(tr => tr.id === tripId);
+    if (trip?.base_fare != null && selectedSeats.length > 0) {
+      setAmount(String(Math.round(trip.base_fare * selectedSeats.length / 100)));
+    } else if (selectedSeats.length === 0) {
+      setAmount('');
+    }
+  }, [selectedSeats, tripId, trips]);
+
+  const toggleSeat = (seatId: string) => {
+    setSelectedSeats(prev =>
+      prev.includes(seatId) ? prev.filter(s => s !== seatId) : [...prev, seatId]
+    );
+  };
+
   const handleSale = async () => {
-    if (!tripId || !seatIds || !passengers || !amount) return;
+    if (!tripId || selectedSeats.length === 0 || !amount) return;
     setSubmitting(true);
     setError('');
     const amountKobo = Math.round(parseFloat(amount) * 100);
-    const seatArr = seatIds.split(',').map(s => s.trim()).filter(Boolean);
     const passArr = passengers.split(',').map(p => p.trim()).filter(Boolean);
+    const agentId = user?.id ?? 'agent';
 
     if (!online) {
       const { saveOfflineTransaction } = await import('./core/offline/db');
       await saveOfflineTransaction({
         local_id: `local_${Date.now()}`,
-        agent_id: 'current_agent',
+        agent_id: agentId,
         trip_id: tripId,
-        seat_ids: seatArr,
+        seat_ids: selectedSeats,
         passenger_names: passArr,
         total_amount: amountKobo,
         payment_method: method,
@@ -188,15 +229,16 @@ function AgentPOSModule({ online }: { online: boolean }) {
 
     try {
       const receipt = await api.recordSale({
-        agent_id: 'current_agent',
+        agent_id: agentId,
         trip_id: tripId,
-        seat_ids: seatArr,
+        seat_ids: selectedSeats,
         passenger_names: passArr,
         total_amount: amountKobo,
         payment_method: method,
       });
       setLastReceipt(receipt);
-      setTripId(''); setSeatIds(''); setPassengers(''); setAmount('');
+      setTripId(''); setSelectedSeats([]); setSeatAvailability(null);
+      setPassengers(''); setAmount('');
     } catch (e) {
       setError(e instanceof ApiError ? e.message : t('error'));
     } finally {
@@ -207,6 +249,7 @@ function AgentPOSModule({ online }: { online: boolean }) {
   return (
     <div style={{ padding: 16 }}>
       <h2 style={{ margin: '0 0 16px', fontSize: 18 }}>{t('agent_pos')}</h2>
+
       {lastReceipt && (
         <div style={{ ...cardStyle, background: '#f0fdf4', borderColor: '#16a34a', marginBottom: 16, cursor: 'default' }}>
           <div style={{ fontWeight: 700, color: '#16a34a' }}>✓ {t('sale_complete')}</div>
@@ -216,16 +259,83 @@ function AgentPOSModule({ online }: { online: boolean }) {
           <div style={{ fontSize: 12, color: '#64748b' }}>Receipt: {lastReceipt.receipt_id}</div>
         </div>
       )}
+
       {error && (
         <div style={{ padding: '10px 14px', background: '#fee2e2', borderRadius: 8, color: '#b91c1c', fontSize: 13, marginBottom: 12 }}>
           {error}
         </div>
       )}
+
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        <input placeholder={t('select_trip')} value={tripId} onChange={e => setTripId(e.target.value)} style={inputStyle} />
-        <input placeholder={`${t('select_seats_pos')} (s1, s2)`} value={seatIds} onChange={e => setSeatIds(e.target.value)} style={inputStyle} />
-        <input placeholder={`${t('passenger_name')} (Amaka, Chidi)`} value={passengers} onChange={e => setPassengers(e.target.value)} style={inputStyle} />
-        <input placeholder={`${t('fare')} (₦)`} type="number" value={amount} onChange={e => setAmount(e.target.value)} style={inputStyle} />
+        {/* Trip selector — dropdown when online with trips, text input as fallback */}
+        {online && trips.length > 0 ? (
+          <select value={tripId} onChange={e => setTripId(e.target.value)} style={inputStyle}>
+            <option value="">-- {t('select_trip')} --</option>
+            {trips.map(tr => (
+              <option key={tr.id} value={tr.id}>
+                {tr.origin ?? tr.route_id} → {tr.destination ?? ''} · {new Date(tr.departure_time).toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' })} · {tr.available_seats ?? '?'} avail
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            placeholder={tripsLoading ? t('loading') : t('select_trip')}
+            value={tripId}
+            onChange={e => setTripId(e.target.value)}
+            style={inputStyle}
+            disabled={tripsLoading}
+          />
+        )}
+
+        {/* Seat grid — shown when a trip is selected */}
+        {tripId && (
+          seatsLoading ? (
+            <p style={{ color: '#94a3b8', textAlign: 'center', fontSize: 13, margin: '4px 0' }}>{t('loading')} seats…</p>
+          ) : seatAvailability ? (
+            <div style={{ marginTop: 2 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: '#475569', marginBottom: 6 }}>
+                Seats — {selectedSeats.length} selected
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 5 }}>
+                {seatAvailability.seats.map(seat => {
+                  const isAvail = seat.status === 'available';
+                  const isSel = selectedSeats.includes(seat.id);
+                  return (
+                    <button
+                      key={seat.id}
+                      disabled={!isAvail}
+                      onClick={() => { if (isAvail) toggleSeat(seat.id); }}
+                      style={{
+                        padding: '7px 4px', borderRadius: 6, fontSize: 11, fontWeight: 700,
+                        cursor: isAvail ? 'pointer' : 'not-allowed',
+                        border: '1.5px solid',
+                        borderColor: isSel ? '#1e40af' : isAvail ? '#e2e8f0' : '#f1f5f9',
+                        background: isSel ? '#1e40af' : isAvail ? '#fff' : '#f1f5f9',
+                        color: isSel ? '#fff' : isAvail ? '#1e293b' : '#cbd5e1',
+                      }}
+                    >
+                      {seat.seat_number}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null
+        )}
+
+        <input
+          placeholder={selectedSeats.length > 0 ? `${t('passenger_name')} (${selectedSeats.length}, comma-separated)` : t('passenger_name')}
+          value={passengers}
+          onChange={e => setPassengers(e.target.value)}
+          style={inputStyle}
+        />
+        <input
+          placeholder={`${t('fare')} (₦)`}
+          type="number"
+          value={amount}
+          onChange={e => setAmount(e.target.value)}
+          style={inputStyle}
+        />
         <div style={{ display: 'flex', gap: 8 }}>
           {(['cash', 'mobile_money', 'card'] as const).map(m => (
             <button key={m} onClick={() => setMethod(m)} style={{
@@ -238,7 +348,11 @@ function AgentPOSModule({ online }: { online: boolean }) {
             </button>
           ))}
         </div>
-        <button onClick={() => void handleSale()} disabled={submitting} style={primaryBtnStyle}>
+        <button
+          onClick={() => void handleSale()}
+          disabled={submitting || !tripId || selectedSeats.length === 0 || !amount}
+          style={primaryBtnStyle}
+        >
           {submitting ? t('loading') : t('sale_complete')}
         </button>
       </div>
@@ -313,10 +427,11 @@ function OperatorOverview({ onNav }: { onNav: (v: OperatorView) => void }) {
 }
 
 function RoutesPanel({ onBack }: { onBack: () => void }) {
+  const { user } = useAuth();
   const [routes, setRoutes] = useState<Route[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ origin: '', destination: '', base_fare: '', operator_id: '' });
+  const [form, setForm] = useState({ origin: '', destination: '', base_fare: '', operator_id: user?.operator_id ?? '' });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -331,7 +446,8 @@ function RoutesPanel({ onBack }: { onBack: () => void }) {
   useEffect(() => { void load(); }, [load]);
 
   const handleCreate = async () => {
-    if (!form.origin || !form.destination || !form.base_fare || !form.operator_id) {
+    const operatorId = user?.operator_id ?? form.operator_id;
+    if (!form.origin || !form.destination || !form.base_fare || !operatorId) {
       setError('All fields required');
       return;
     }
@@ -339,11 +455,13 @@ function RoutesPanel({ onBack }: { onBack: () => void }) {
     setError('');
     try {
       await api.createRoute({
-        ...form,
+        origin: form.origin,
+        destination: form.destination,
         base_fare: Math.round(parseFloat(form.base_fare) * 100),
+        operator_id: operatorId,
       });
       setShowForm(false);
-      setForm({ origin: '', destination: '', base_fare: '', operator_id: '' });
+      setForm({ origin: '', destination: '', base_fare: '', operator_id: user?.operator_id ?? '' });
       await load();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Failed to create route');
@@ -365,7 +483,13 @@ function RoutesPanel({ onBack }: { onBack: () => void }) {
             <input placeholder="Origin (e.g. Lagos)" value={form.origin} onChange={e => setForm(f => ({ ...f, origin: e.target.value }))} style={inputStyle} />
             <input placeholder="Destination (e.g. Abuja)" value={form.destination} onChange={e => setForm(f => ({ ...f, destination: e.target.value }))} style={inputStyle} />
             <input placeholder="Base fare (₦)" type="number" value={form.base_fare} onChange={e => setForm(f => ({ ...f, base_fare: e.target.value }))} style={inputStyle} />
-            <input placeholder="Operator ID" value={form.operator_id} onChange={e => setForm(f => ({ ...f, operator_id: e.target.value }))} style={inputStyle} />
+            {user?.operator_id ? (
+              <div style={{ padding: '10px 14px', background: '#eff6ff', borderRadius: 10, fontSize: 13, color: '#1e40af', fontWeight: 600 }}>
+                Operator: {user.operator_id}
+              </div>
+            ) : (
+              <input placeholder="Operator ID (Super Admin)" value={form.operator_id} onChange={e => setForm(f => ({ ...f, operator_id: e.target.value }))} style={inputStyle} />
+            )}
             {error && <p style={{ color: '#dc2626', fontSize: 12, margin: 0 }}>{error}</p>}
             <button onClick={() => void handleCreate()} disabled={saving} style={primaryBtnStyle}>
               {saving ? t('loading') : 'Create Route'}
@@ -398,10 +522,11 @@ function RoutesPanel({ onBack }: { onBack: () => void }) {
 }
 
 function VehiclesPanel({ onBack }: { onBack: () => void }) {
+  const { user } = useAuth();
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ operator_id: '', plate_number: '', model: '', total_seats: '', vehicle_type: 'bus' });
+  const [form, setForm] = useState({ operator_id: user?.operator_id ?? '', plate_number: '', model: '', total_seats: '', vehicle_type: 'bus' });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -415,7 +540,8 @@ function VehiclesPanel({ onBack }: { onBack: () => void }) {
   useEffect(() => { void load(); }, [load]);
 
   const handleCreate = async () => {
-    if (!form.operator_id || !form.plate_number || !form.total_seats) {
+    const operatorId = user?.operator_id ?? form.operator_id;
+    if (!operatorId || !form.plate_number || !form.total_seats) {
       setError('All fields required');
       return;
     }
@@ -423,14 +549,14 @@ function VehiclesPanel({ onBack }: { onBack: () => void }) {
     setError('');
     try {
       await api.createVehicle({
-        operator_id: form.operator_id,
+        operator_id: operatorId,
         plate_number: form.plate_number,
         vehicle_type: form.vehicle_type,
         total_seats: parseInt(form.total_seats, 10),
         ...(form.model ? { model: form.model } : {}),
       });
       setShowForm(false);
-      setForm({ operator_id: '', plate_number: '', model: '', total_seats: '', vehicle_type: 'bus' });
+      setForm({ operator_id: user?.operator_id ?? '', plate_number: '', model: '', total_seats: '', vehicle_type: 'bus' });
       await load();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Failed to register vehicle');
@@ -449,7 +575,13 @@ function VehiclesPanel({ onBack }: { onBack: () => void }) {
       {showForm && (
         <div style={{ ...cardStyle, marginBottom: 16, cursor: 'default' }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <input placeholder="Operator ID" value={form.operator_id} onChange={e => setForm(f => ({ ...f, operator_id: e.target.value }))} style={inputStyle} />
+            {user?.operator_id ? (
+              <div style={{ padding: '10px 14px', background: '#eff6ff', borderRadius: 10, fontSize: 13, color: '#1e40af', fontWeight: 600 }}>
+                Operator: {user.operator_id}
+              </div>
+            ) : (
+              <input placeholder="Operator ID (Super Admin)" value={form.operator_id} onChange={e => setForm(f => ({ ...f, operator_id: e.target.value }))} style={inputStyle} />
+            )}
             <input placeholder="Plate number (e.g. LAG-123-XY)" value={form.plate_number} onChange={e => setForm(f => ({ ...f, plate_number: e.target.value }))} style={inputStyle} />
             <input placeholder="Model (e.g. Toyota Coaster)" value={form.model} onChange={e => setForm(f => ({ ...f, model: e.target.value }))} style={inputStyle} />
             <input placeholder="Capacity (seats)" type="number" value={form.total_seats} onChange={e => setForm(f => ({ ...f, total_seats: e.target.value }))} style={inputStyle} />

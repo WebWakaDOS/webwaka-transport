@@ -9,6 +9,7 @@ import {
   getStoredUser, setStoredUser, isTokenValid,
   type StoredUser,
 } from './store';
+import { syncEngine } from '../offline/sync';
 
 // ============================================================
 // Types
@@ -60,6 +61,7 @@ export function AuthProvider({ children }: React.PropsWithChildren) {
     if (stored && isTokenValid(stored) && storedUser) {
       setToken(stored);
       setUser(storedUser as AuthUser);
+      syncEngine.setAuthToken(stored);
     }
     setIsLoading(false);
   }, []);
@@ -97,10 +99,12 @@ export function AuthProvider({ children }: React.PropsWithChildren) {
     setStoredUser(newUser);
     setToken(newToken);
     setUser(newUser);
+    syncEngine.setAuthToken(newToken);
   }, []);
 
   const logout = useCallback((): void => {
     clearStoredToken();
+    syncEngine.clearAuthToken();
     setToken(null);
     setUser(null);
   }, []);
