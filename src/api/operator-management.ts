@@ -306,6 +306,67 @@ operatorManagementRouter.get('/trips', async (c) => {
   }
 });
 
+// ============================================================
+// POST /trips — create a new scheduled trip with seats
+// ============================================================
+operatorManagementRouter.post('/trips', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+  let body: Record<string, unknown>;
+  try { body = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ success: false, error: 'Invalid JSON body' }, 400); }
+
+  const err = requireFields(body, ['route_id', 'vehicle_id', 'departure_time']);
+  if (err) return c.json({ success: false, error: err }, 400);
+
+  const { route_id, vehicle_id, departure_time, base_fare: fareOverride, total_seats: seatsOverride } = body as {
+    route_id: string; vehicle_id: string; departure_time: number;
+    base_fare?: number; total_seats?: number;
+  };
+
+  if (!Number.isInteger(departure_time) || departure_time <= 0) {
+    return c.json({ success: false, error: 'departure_time must be a positive integer (unix ms)' }, 400);
+  }
+
+  const db = c.env.DB;
+  const now = Date.now();
+
+  try {
+    const route = await db.prepare(
+      'SELECT id, operator_id, origin, destination, base_fare FROM routes WHERE id = ? AND deleted_at IS NULL'
+    ).bind(route_id).first<{ id: string; operator_id: string; origin: string; destination: string; base_fare: number }>();
+    if (!route) return c.json({ success: false, error: 'Route not found' }, 404);
+
+    const vehicle = await db.prepare(
+      'SELECT id, total_seats FROM vehicles WHERE id = ? AND deleted_at IS NULL'
+    ).bind(vehicle_id).first<{ id: string; total_seats: number }>();
+    if (!vehicle) return c.json({ success: false, error: 'Vehicle not found' }, 404);
+
+    const operator_id = route.operator_id;
+    const total_seats = typeof seatsOverride === 'number' && seatsOverride > 0 ? seatsOverride : vehicle.total_seats;
+
+    const id = genId('trp');
+
+    await db.prepare(
+      `INSERT INTO trips (id, operator_id, route_id, vehicle_id, departure_time, state, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?)`
+    ).bind(id, operator_id, route_id, vehicle_id, departure_time, now, now).run();
+
+    const seatBatch = Array.from({ length: total_seats }, (_, i) =>
+      db.prepare(
+        `INSERT INTO seats (id, trip_id, seat_number, status, version, created_at, updated_at) VALUES (?, ?, ?, 'available', 0, ?, ?)`
+      ).bind(`${id}_s${i + 1}`, id, String(i + 1).padStart(2, '0'), now, now)
+    );
+    await db.batch(seatBatch);
+
+    return c.json({ success: true, data: {
+      id, operator_id, route_id, vehicle_id, state: 'scheduled',
+      departure_time, total_seats, base_fare: fareOverride ?? route.base_fare,
+      origin: route.origin, destination: route.destination,
+    } }, 201);
+  } catch {
+    return c.json({ success: false, error: 'Failed to create trip' }, 500);
+  }
+});
+
 operatorManagementRouter.patch('/trips/:id', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
   const id = c.req.param('id');
   const body = await c.req.json() as Record<string, unknown>;

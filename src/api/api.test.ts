@@ -864,6 +864,160 @@ describe('Phase 2: PATCH /vehicles/:id — Vehicle Update (TRN-4)', () => {
 });
 
 // ============================================================
+// Phase 7 — Trip Creation & Booking Cancellation Tests
+// ============================================================
+
+describe('Phase 7: POST /trips — Trip Creation (TRN-4)', () => {
+  let db: any;
+  beforeEach(() => {
+    db = createMockDB();
+    db._tables.routes.push({
+      id: 'rte_p7', operator_id: 'opr_p7', origin: 'Lagos', destination: 'Ibadan',
+      base_fare: 500000, status: 'active', deleted_at: null,
+      distance_km: null, duration_minutes: null,
+      created_at: Date.now(), updated_at: Date.now(),
+    });
+    db._tables.vehicles.push({
+      id: 'veh_p7', operator_id: 'opr_p7', plate_number: 'LG-123-AA',
+      vehicle_type: 'bus', model: null, total_seats: 18, status: 'active',
+      deleted_at: null, created_at: Date.now(), updated_at: Date.now(),
+    });
+  });
+
+  it('creates a trip and batch-inserts seats', async () => {
+    const dep = Date.now() + 3600_000;
+    const res = await operatorManagementRouter.request('/trips', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ route_id: 'rte_p7', vehicle_id: 'veh_p7', departure_time: dep }),
+    }, makeEnv(db));
+    expect(res.status).toBe(201);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.state).toBe('scheduled');
+    expect(body.data.origin).toBe('Lagos');
+    expect(body.data.destination).toBe('Ibadan');
+    expect(body.data.total_seats).toBe(18);
+    expect(body.data.base_fare).toBe(500000);
+    const seats = db._tables.seats.filter((s: any) => s.trip_id === body.data.id);
+    expect(seats.length).toBe(18);
+    expect(seats[0].seat_number).toBe('01');
+    expect(seats[17].seat_number).toBe('18');
+  });
+
+  it('accepts a base_fare override', async () => {
+    const dep = Date.now() + 3600_000;
+    const res = await operatorManagementRouter.request('/trips', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ route_id: 'rte_p7', vehicle_id: 'veh_p7', departure_time: dep, base_fare: 750000 }),
+    }, makeEnv(db));
+    expect(res.status).toBe(201);
+    const body = await res.json() as any;
+    expect(body.data.base_fare).toBe(750000);
+  });
+
+  it('accepts a total_seats override', async () => {
+    const dep = Date.now() + 3600_000;
+    const res = await operatorManagementRouter.request('/trips', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ route_id: 'rte_p7', vehicle_id: 'veh_p7', departure_time: dep, total_seats: 5 }),
+    }, makeEnv(db));
+    expect(res.status).toBe(201);
+    const body = await res.json() as any;
+    expect(body.data.total_seats).toBe(5);
+    const seats = db._tables.seats.filter((s: any) => s.trip_id === body.data.id);
+    expect(seats.length).toBe(5);
+  });
+
+  it('returns 400 if route_id missing', async () => {
+    const res = await operatorManagementRouter.request('/trips', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ vehicle_id: 'veh_p7', departure_time: Date.now() + 3600_000 }),
+    }, makeEnv(db));
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 if departure_time is not a positive integer', async () => {
+    const res = await operatorManagementRouter.request('/trips', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ route_id: 'rte_p7', vehicle_id: 'veh_p7', departure_time: -1 }),
+    }, makeEnv(db));
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 404 if route does not exist', async () => {
+    const res = await operatorManagementRouter.request('/trips', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ route_id: 'rte_ghost', vehicle_id: 'veh_p7', departure_time: Date.now() + 3600_000 }),
+    }, makeEnv(db));
+    expect(res.status).toBe(404);
+    const body = await res.json() as any;
+    expect(body.error).toMatch(/route not found/i);
+  });
+
+  it('returns 404 if vehicle does not exist', async () => {
+    const res = await operatorManagementRouter.request('/trips', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ route_id: 'rte_p7', vehicle_id: 'veh_ghost', departure_time: Date.now() + 3600_000 }),
+    }, makeEnv(db));
+    expect(res.status).toBe(404);
+    const body = await res.json() as any;
+    expect(body.error).toMatch(/vehicle not found/i);
+  });
+});
+
+describe('Phase 7: PATCH /bookings/:id/cancel — Booking Cancellation (TRN-3)', () => {
+  let db: any;
+  beforeEach(() => {
+    db = createMockDB();
+    db._tables.bookings.push({
+      id: 'bkg_p7', customer_id: 'cust_1', trip_id: 'trp_1',
+      seat_ids: '["seat_1"]', total_amount: 500000, status: 'pending',
+      payment_status: 'pending', payment_reference: null,
+      created_at: Date.now(), confirmed_at: null, cancelled_at: null, deleted_at: null,
+    });
+    db._tables.bookings.push({
+      id: 'bkg_p7_already_cancelled', customer_id: 'cust_1', trip_id: 'trp_1',
+      seat_ids: '["seat_2"]', total_amount: 500000, status: 'cancelled',
+      payment_status: 'pending', payment_reference: null,
+      created_at: Date.now(), confirmed_at: null, cancelled_at: Date.now(), deleted_at: null,
+    });
+  });
+
+  it('cancels a pending booking successfully', async () => {
+    const res = await bookingPortalRouter.request('/bookings/bkg_p7/cancel', {
+      method: 'PATCH',
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.status).toBe('cancelled');
+  });
+
+  it('returns 409 when trying to cancel an already-cancelled booking', async () => {
+    const res = await bookingPortalRouter.request('/bookings/bkg_p7_already_cancelled/cancel', {
+      method: 'PATCH',
+    }, makeEnv(db));
+    expect(res.status).toBe(409);
+    const body = await res.json() as any;
+    expect(body.error).toBeDefined();
+  });
+
+  it('returns 404 for unknown booking', async () => {
+    const res = await bookingPortalRouter.request('/bookings/bkg_ghost/cancel', {
+      method: 'PATCH',
+    }, makeEnv(db));
+    expect(res.status).toBe(404);
+  });
+});
+
+// ============================================================
 // Phase 2 — Pagination Tests
 // ============================================================
 

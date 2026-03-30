@@ -357,6 +357,13 @@ export class ApiClient {
     return this.request<Trip[]>('GET', `/api/operator/trips${q}`);
   }
 
+  async createTrip(data: {
+    route_id: string; vehicle_id: string; departure_time: number;
+    base_fare?: number; total_seats?: number;
+  }): Promise<Trip> {
+    return this.request<Trip>('POST', '/api/operator/trips', data);
+  }
+
   async transitionTrip(tripId: string, toState: string, reason?: string): Promise<void> {
     await this.request('POST', `/api/operator/trips/${tripId}/transition`, {
       to_state: toState, reason,

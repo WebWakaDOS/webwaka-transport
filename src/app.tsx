@@ -627,6 +627,12 @@ function TripsPanel({ onBack }: { onBack: () => void }) {
   const [trips, setTrips] = useState<Trip[]>([]);
   const [loading, setLoading] = useState(true);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  const [routes, setRoutes] = useState<Route[]>([]);
+  const [vehicles, setVehicles] = useState<Vehicle[]>([]);
+  const [createForm, setCreateForm] = useState({ route_id: '', vehicle_id: '', departure_time: '', base_fare: '', total_seats: '' });
+  const [saving, setSaving] = useState(false);
+  const [createError, setCreateError] = useState('');
 
   const stateColors: Record<string, string> = {
     scheduled: '#2563eb', boarding: '#d97706', in_transit: '#16a34a',
@@ -650,6 +656,60 @@ function TripsPanel({ onBack }: { onBack: () => void }) {
 
   useEffect(() => { void load(); }, [load]);
 
+  // Load routes + vehicles for the create form dropdowns
+  useEffect(() => {
+    if (!showForm) return;
+    Promise.all([api.getOperatorRoutes(), api.getVehicles()])
+      .then(([r, v]) => { setRoutes(r); setVehicles(v); })
+      .catch(() => {});
+  }, [showForm]);
+
+  // Auto-fill base_fare when route changes
+  const handleRouteChange = (routeId: string) => {
+    const route = routes.find(r => r.id === routeId);
+    setCreateForm(f => ({
+      ...f,
+      route_id: routeId,
+      base_fare: route ? String(Math.round(route.base_fare / 100)) : f.base_fare,
+    }));
+  };
+
+  // Auto-fill total_seats when vehicle changes
+  const handleVehicleChange = (vehicleId: string) => {
+    const vehicle = vehicles.find(v => v.id === vehicleId);
+    setCreateForm(f => ({
+      ...f,
+      vehicle_id: vehicleId,
+      total_seats: vehicle ? String(vehicle.total_seats) : f.total_seats,
+    }));
+  };
+
+  const handleCreate = async () => {
+    if (!createForm.route_id || !createForm.vehicle_id || !createForm.departure_time) {
+      setCreateError('Route, vehicle and departure time are required');
+      return;
+    }
+    const departureMs = new Date(createForm.departure_time).getTime();
+    if (isNaN(departureMs)) { setCreateError('Invalid departure time'); return; }
+
+    setSaving(true);
+    setCreateError('');
+    try {
+      await api.createTrip({
+        route_id: createForm.route_id,
+        vehicle_id: createForm.vehicle_id,
+        departure_time: departureMs,
+        ...(createForm.base_fare ? { base_fare: Math.round(parseFloat(createForm.base_fare) * 100) } : {}),
+        ...(createForm.total_seats ? { total_seats: parseInt(createForm.total_seats, 10) } : {}),
+      });
+      setShowForm(false);
+      setCreateForm({ route_id: '', vehicle_id: '', departure_time: '', base_fare: '', total_seats: '' });
+      await load();
+    } catch (e) {
+      setCreateError(e instanceof ApiError ? e.message : 'Failed to create trip');
+    } finally { setSaving(false); }
+  };
+
   const transition = async (tripId: string, newState: string) => {
     setUpdatingId(tripId);
     try {
@@ -664,7 +724,62 @@ function TripsPanel({ onBack }: { onBack: () => void }) {
         <button onClick={onBack} style={backBtnStyle}>←</button>
         <h2 style={{ margin: 0, fontSize: 18, flex: 1 }}>Manage Trips</h2>
         <button onClick={() => void load()} style={{ ...secondaryBtnStyle, padding: '8px 14px', fontSize: 13 }}>↻</button>
+        <button onClick={() => setShowForm(s => !s)} style={{ ...primaryBtnStyle, padding: '8px 14px', fontSize: 13 }}>
+          {showForm ? 'Cancel' : '+ Add'}
+        </button>
       </div>
+
+      {showForm && (
+        <div style={{ ...cardStyle, marginBottom: 16, cursor: 'default' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <select
+              value={createForm.route_id}
+              onChange={e => handleRouteChange(e.target.value)}
+              style={inputStyle}
+            >
+              <option value="">-- Select Route --</option>
+              {routes.map(r => (
+                <option key={r.id} value={r.id}>{r.origin} → {r.destination} · {formatKoboToNaira(r.base_fare)}</option>
+              ))}
+            </select>
+            <select
+              value={createForm.vehicle_id}
+              onChange={e => handleVehicleChange(e.target.value)}
+              style={inputStyle}
+            >
+              <option value="">-- Select Vehicle --</option>
+              {vehicles.map(v => (
+                <option key={v.id} value={v.id}>{v.plate_number} · {v.model ?? v.vehicle_type} · {v.total_seats} seats</option>
+              ))}
+            </select>
+            <input
+              type="datetime-local"
+              value={createForm.departure_time}
+              onChange={e => setCreateForm(f => ({ ...f, departure_time: e.target.value }))}
+              style={inputStyle}
+            />
+            <input
+              placeholder="Base fare (₦) — defaults to route fare"
+              type="number"
+              value={createForm.base_fare}
+              onChange={e => setCreateForm(f => ({ ...f, base_fare: e.target.value }))}
+              style={inputStyle}
+            />
+            <input
+              placeholder="Seats — defaults to vehicle capacity"
+              type="number"
+              value={createForm.total_seats}
+              onChange={e => setCreateForm(f => ({ ...f, total_seats: e.target.value }))}
+              style={inputStyle}
+            />
+            {createError && <p style={{ color: '#dc2626', fontSize: 12, margin: 0 }}>{createError}</p>}
+            <button onClick={() => void handleCreate()} disabled={saving} style={primaryBtnStyle}>
+              {saving ? t('loading') : 'Schedule Trip'}
+            </button>
+          </div>
+        </div>
+      )}
+
       {loading ? (
         <p style={{ color: '#94a3b8', textAlign: 'center' }}>{t('loading')}</p>
       ) : trips.length === 0 ? (
@@ -740,13 +855,28 @@ function MyBookingsModule() {
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [cancelling, setCancelling] = useState<string | null>(null);
 
-  useEffect(() => {
+  const loadBookings = useCallback(() => {
+    setLoading(true);
     api.getBookings()
       .then(data => setBookings(data))
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => { loadBookings(); }, [loadBookings]);
+
+  const handleCancel = async (id: string) => {
+    if (!confirm('Cancel this booking?')) return;
+    setCancelling(id);
+    try {
+      await api.cancelBooking(id);
+      loadBookings();
+    } catch (e) {
+      alert(e instanceof ApiError ? e.message : 'Failed to cancel booking');
+    } finally { setCancelling(null); }
+  };
 
   const statusColors: Record<string, string> = {
     pending: '#d97706', confirmed: '#16a34a', cancelled: '#dc2626', completed: '#64748b',
@@ -781,8 +911,22 @@ function MyBookingsModule() {
                 {new Date(bkg.departure_time).toLocaleString('en-NG')}
               </div>
             )}
-            <div style={{ fontSize: 15, fontWeight: 700, color: '#16a34a', marginTop: 4 }}>
-              {formatKoboToNaira(bkg.total_amount)}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
+              <div style={{ fontSize: 15, fontWeight: 700, color: '#16a34a' }}>
+                {formatKoboToNaira(bkg.total_amount)}
+              </div>
+              {bkg.status === 'pending' && (
+                <button
+                  disabled={cancelling === bkg.id}
+                  onClick={() => void handleCancel(bkg.id)}
+                  style={{
+                    padding: '5px 12px', borderRadius: 8, border: '1.5px solid #dc2626',
+                    background: '#fee2e2', color: '#b91c1c', fontWeight: 600, fontSize: 12, cursor: 'pointer',
+                  }}
+                >
+                  {cancelling === bkg.id ? '…' : 'Cancel'}
+                </button>
+              )}
             </div>
           </div>
         ))
