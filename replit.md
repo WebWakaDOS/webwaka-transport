@@ -439,3 +439,44 @@ Added to `MIGRATIONS` array in `src/api/admin.ts`: `idx_routes_operator_id`, `id
 ## Deployment
 - Build: `npm run build:ui` → `dist/`
 - Workers deploy: `wrangler deploy --env production`
+
+## Phase P03-TRANSPORT: Real-Time UX & Guest Access (complete)
+
+### P03-T1: Configurable Reservation TTL + Operator Config API
+- `src/lib/operator-config.ts` — `getOperatorConfig(env, operatorId)` reads from `OPERATOR_CONFIG_KV`; falls back to `DEFAULT_CONFIG` (`reservation_ttl_ms: 30_000`, `online_reservation_ttl_ms: 180_000`).
+- `src/api/seat-inventory.ts` — `POST /reserve` and `POST /reserve-batch` now call `getOperatorConfig()` to get TTL values based on request origin (agent vs. online customer).
+- `src/api/operator-management.ts` — `GET /operator/config` and `PUT /operator/config` endpoints for operators to read/write their config.
+
+### P03-T2: Seat Hold Extension Heartbeat
+- `src/api/seat-inventory.ts` — `POST /trips/:tripId/extend-hold` extends seat reservation TTL up to a 10-minute absolute max cap. Validates hold token from seat metadata.
+
+### P03-T3: Paystack Inline Popup
+- `index.html` — Paystack inline JS loaded via `<script src="https://js.paystack.co/v1/inline.js">`.
+- `.env.example` — `VITE_PAYSTACK_PUBLIC_KEY` documented.
+- `src/components/booking-flow.tsx` — `handlePay()` now checks for `window.PaystackPop` and opens the inline popup iframe with auto-verify `callback`. Falls back to new-tab redirect if popup unavailable. Payment reference format changed to `waka_${nanoid('', 16)}` via booking-portal.ts.
+
+### P03-T4: SMS Booking Confirmation
+- `src/lib/sms.ts` — `sendSms(to, message, env)` convenience wrapper; tries `TERMII_API_KEY` then `SMS_API_KEY`; non-fatal.
+- `src/lib/sweepers.ts` — sweeper now fires SMS on `booking.created` events using customer phone, origin, destination, departure date, seat numbers from enriched event payload.
+- `src/api/booking-portal.ts` — `PATCH /bookings/:id/confirm` now JOINs trips/routes/customers tables and includes `customer_phone`, `origin`, `destination`, `departure_time`, `seat_numbers` in `publishEvent` payload.
+
+### P03-T5: QR E-Ticket Page
+- `src/components/ticket.tsx` — `TicketPage` component: fetches `GET /b/:bookingId/data`, renders passenger/trip info + QRCode canvas via `qrcode` npm package.
+- `src/worker.ts` — `GET /b/:bookingId/data` endpoint (public, before jwtAuthMiddleware): returns confirmed booking JSON joined with trip/route/operator.
+- `src/app.tsx` — `TransportApp` checks `window.location.pathname` for `/b/:bookingId` pattern and renders `TicketPage` directly.
+
+### P03-T6: Guest Booking Flow
+- `src/api/booking-portal.ts` — `publicBookingRouter` exported with two public endpoints:
+  - `POST /api/booking/verify-phone` — generates 6-digit OTP, stores in `SESSIONS_KV` (10-min TTL), sends via `sendSms()`. Returns `dev_otp` in response when no SMS key is configured.
+  - `POST /api/booking/verify-phone/confirm` — validates OTP, deletes from KV on success, issues short-lived (15-min) guest JWT via `generateJWT()`. User ID is `guest_XXXXXXXXXXXXXXXX`.
+- `src/api/booking-portal.ts` `POST /bookings` — detects `user.id.startsWith('guest_')`, auto-creates minimal customer record via `INSERT OR IGNORE`, sets `is_guest = 1`.
+- `src/api/admin.ts` — migration `011_guest_bookings` adds `is_guest INTEGER DEFAULT 0` column to bookings table.
+- `src/worker.ts` — `publicBookingRouter` mounted at `/api/booking` BEFORE `jwtAuthMiddleware`; `TERMII_API_KEY` added to `Env` interface.
+- `src/api/types.ts` — `TERMII_API_KEY` added to shared `Env` interface.
+
+### P03 Key Invariants
+- All SMS calls are non-fatal (`catch(() => {})`) — never block booking flow
+- Guest JWT TTL is 15 minutes (short-lived, single-use session)
+- OTP is consumed (KV deleted) on first valid use — no replay
+- `is_guest` flag stored on bookings for audit; Nigerian phone format validated (`+234` or `0` prefix + 10 digits)
+- Paystack payment reference format: `waka_${16-char-random}` (Paystack-compatible)

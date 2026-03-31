@@ -7,6 +7,7 @@ import { Hono } from 'hono';
 import { requireRole, publishEvent } from '@webwaka/core';
 import type { AppContext, DbOperator, DbRoute, DbVehicle, DbTrip, DbDriver } from './types';
 import { genId, parsePagination, metaResponse, requireFields, applyTenantScope } from './types';
+import { getOperatorConfig, validateOperatorConfig } from '../lib/operator-config.js';
 
 export const operatorManagementRouter = new Hono<AppContext>();
 
@@ -1065,4 +1066,58 @@ operatorManagementRouter.patch('/users/:id/role', requireRole(['SUPER_ADMIN']), 
   } catch {
     return c.json({ success: false, error: 'Failed to update user role' }, 500);
   }
+});
+
+// ============================================================
+// P03-T1: GET /operator/config — read operator runtime config
+// ============================================================
+operatorManagementRouter.get('/config', async (c) => {
+  const user = c.get('user');
+  const operatorId = user?.operatorId ?? '';
+  if (!operatorId) return c.json({ success: false, error: 'Operator context required' }, 400);
+
+  const config = await getOperatorConfig(c.env, operatorId);
+  return c.json({ success: true, data: config });
+});
+
+// ============================================================
+// P03-T1: PUT /operator/config — write operator runtime config
+// TENANT_ADMIN+ required
+// ============================================================
+operatorManagementRouter.put('/config', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+  const user = c.get('user');
+  const operatorId = user?.operatorId ?? '';
+  if (!operatorId) return c.json({ success: false, error: 'Operator context required' }, 400);
+
+  let body: Record<string, unknown>;
+  try {
+    body = await c.req.json<Record<string, unknown>>();
+  } catch {
+    return c.json({ success: false, error: 'Invalid JSON body' }, 400);
+  }
+
+  const validationError = validateOperatorConfig(body);
+  if (validationError) return c.json({ success: false, error: validationError }, 400);
+
+  if (!c.env.TENANT_CONFIG_KV) {
+    return c.json({ success: false, error: 'Config storage not available' }, 503);
+  }
+
+  const db = c.env.DB;
+  const now = Date.now();
+
+  await c.env.TENANT_CONFIG_KV.put(operatorId, JSON.stringify(body));
+
+  try {
+    await publishEvent(db, {
+      event_type: 'operator.config_updated',
+      aggregate_id: operatorId,
+      aggregate_type: 'operator',
+      payload: { operator_id: operatorId, updated_at: now, updated_by: user?.id },
+      tenant_id: operatorId,
+      timestamp: now,
+    });
+  } catch { /* non-fatal */ }
+
+  return c.json({ success: true, data: body });
 });

@@ -12,6 +12,7 @@
  * downstream services can react without polling.
  */
 import type { Env } from '../worker';
+import { sendSms } from './sms.js';
 
 // ============================================================
 // B-005: Abandoned booking sweeper
@@ -229,10 +230,28 @@ async function deliverEvent(evt: Record<string, unknown>, env: Env): Promise<voi
     return;
   }
 
-  // booking:CONFIRMED → push notification (when VAPID is configured)
+  // booking:CONFIRMED / booking.created → SMS confirmation to customer
   if (eventType === 'booking.created' || eventType === 'booking:CONFIRMED') {
-    // TODO(C-001): send push notification via VAPID
-    console.log(`[EventBus] booking:CONFIRMED — push notification not yet wired`);
+    try {
+      const payload = JSON.parse(String(evt['payload'] ?? '{}')) as Record<string, unknown>;
+      const phone = String(payload['customer_phone'] ?? '');
+      const origin = String(payload['origin'] ?? '');
+      const destination = String(payload['destination'] ?? '');
+      const departureDate = payload['departure_date']
+        ? new Date(Number(payload['departure_date'])).toLocaleDateString('en-NG', {
+            weekday: 'short', day: 'numeric', month: 'short',
+          })
+        : '';
+      const seats = String(payload['seat_numbers'] ?? '');
+      const bookingId = String(payload['booking_id'] ?? evt['aggregate_id'] ?? '');
+      const shortId = bookingId.slice(-8).toUpperCase();
+      const message =
+        `WebWaka: Booking confirmed! ${origin} → ${destination}, ${departureDate}, ` +
+        `Seat(s): ${seats}. Ref: ${shortId}. View: https://webwaka.ng/b/${bookingId}`;
+      if (phone) await sendSms(phone, message, env);
+    } catch (err) {
+      console.error('[EventBus] SMS send error:', err instanceof Error ? err.message : err);
+    }
     return;
   }
 

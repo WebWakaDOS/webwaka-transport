@@ -7,6 +7,7 @@ import { Hono } from 'hono';
 import { publishEvent, nanoid } from '@webwaka/core';
 import type { AppContext, DbTrip, DbSeat } from './types';
 import { genId, parsePagination, metaResponse, requireFields, applyTenantScope } from './types';
+import { getOperatorConfig } from '../lib/operator-config.js';
 
 export type { Env } from './types';
 
@@ -142,7 +143,8 @@ seatInventoryRouter.get('/trips/:id/availability', async (c) => {
 });
 
 // ============================================================
-// POST /trips/:id/reserve — atomic seat reservation (30s TTL)
+// POST /trips/:id/reserve — atomic seat reservation (configurable TTL)
+// P03-T1: TTL sourced from operator config (online vs agent)
 // ============================================================
 seatInventoryRouter.post('/trips/:id/reserve', async (c) => {
   const tripId = c.req.param('id');
@@ -153,8 +155,19 @@ seatInventoryRouter.post('/trips/:id/reserve', async (c) => {
   const { seat_id, user_id } = body as { seat_id: string; user_id: string };
   const db = c.env.DB;
   const now = Date.now();
-  const expiresAt = now + 30_000;
-  const token = genId('tok');
+
+  // P03-T1: Look up trip to get operator_id for config
+  const tripForConfig = await db.prepare(
+    `SELECT operator_id FROM trips WHERE id = ? AND deleted_at IS NULL`
+  ).bind(tripId).first<{ operator_id: string }>();
+  const operatorId = tripForConfig?.operator_id ?? '';
+  const opConfig = await getOperatorConfig(c.env, operatorId);
+
+  // Use online TTL if request comes from a web browser (Origin header present)
+  const isOnline = Boolean(c.req.header('Origin'));
+  const ttlMs = isOnline ? opConfig.online_reservation_ttl_ms : opConfig.reservation_ttl_ms;
+  const expiresAt = now + ttlMs;
+  const token = nanoid('tok', 32);
 
   try {
     await db.prepare(
@@ -176,7 +189,7 @@ seatInventoryRouter.post('/trips/:id/reserve', async (c) => {
 
     return c.json({
       success: true,
-      data: { seat_id, trip_id: tripId, token, expires_at: expiresAt, ttl_seconds: 30 },
+      data: { seat_id, trip_id: tripId, token, expires_at: expiresAt, ttl_seconds: Math.round(ttlMs / 1000) },
     }, 201);
   } catch {
     return c.json({ success: false, error: 'Failed to reserve seat' }, 500);
@@ -217,7 +230,16 @@ seatInventoryRouter.post('/trips/:tripId/reserve-batch', async (c) => {
   }
 
   const now = Date.now();
-  const expiresAt = now + 30_000; // 30-second reservation TTL (configurable in P03-T1)
+
+  // P03-T1: Configurable TTL sourced from operator config
+  const tripForBatchConfig = await db.prepare(
+    `SELECT operator_id FROM trips WHERE id = ? AND deleted_at IS NULL`
+  ).bind(tripId).first<{ operator_id: string }>();
+  const batchOperatorId = tripForBatchConfig?.operator_id ?? '';
+  const batchOpConfig = await getOperatorConfig(c.env, batchOperatorId);
+  const batchIsOnline = Boolean(c.req.header('Origin'));
+  const batchTtlMs = batchIsOnline ? batchOpConfig.online_reservation_ttl_ms : batchOpConfig.reservation_ttl_ms;
+  const expiresAt = now + batchTtlMs;
 
   // Expire stale reservations for this trip before checking availability
   await db.prepare(
@@ -321,7 +343,7 @@ seatInventoryRouter.post('/trips/:tripId/reserve-batch', async (c) => {
 
   const responseBody = {
     success: true,
-    data: { tokens, expires_at: expiresAt, ttl_seconds: 30 },
+    data: { tokens, expires_at: expiresAt, ttl_seconds: Math.round(batchTtlMs / 1000) },
   };
 
   // 10. Cache success response for 24 hours for idempotency replay
@@ -330,6 +352,62 @@ seatInventoryRouter.post('/trips/:tripId/reserve-batch', async (c) => {
   }
 
   return c.json(responseBody, 200);
+});
+
+// ============================================================
+// P03-T2: POST /trips/:tripId/extend-hold — extend a seat reservation TTL
+// Called by Paystack popup onClose to keep the seat held while user is
+// still on the payment page. Non-fatal: client ignores failure.
+// ============================================================
+seatInventoryRouter.post('/trips/:tripId/extend-hold', async (c) => {
+  const tripId = c.req.param('tripId');
+  const body = await c.req.json() as Record<string, unknown>;
+  const err = requireFields(body, ['seat_id', 'token']);
+  if (err) return c.json({ success: false, error: err }, 400);
+
+  const { seat_id, token } = body as { seat_id: string; token: string };
+  const db = c.env.DB;
+  const now = Date.now();
+
+  const seat = await db.prepare(
+    `SELECT status, reservation_token, reservation_expires_at FROM seats WHERE id = ? AND trip_id = ?`
+  ).bind(seat_id, tripId).first<{ status: string; reservation_token: string | null; reservation_expires_at: number | null }>();
+
+  if (!seat) return c.json({ success: false, error: 'Seat not found' }, 404);
+
+  if (seat.status !== 'reserved' || seat.reservation_token !== token) {
+    return c.json({ success: false, error: 'invalid_hold', message: 'Hold is invalid or does not belong to you' }, 409);
+  }
+
+  if (seat.reservation_expires_at !== null && seat.reservation_expires_at < now) {
+    return c.json({ success: false, error: 'hold_expired', message: 'Reservation has expired. Please rebook.' }, 410);
+  }
+
+  // Get operator config for TTL extension increment
+  const tripForExtend = await db.prepare(
+    `SELECT operator_id FROM trips WHERE id = ? AND deleted_at IS NULL`
+  ).bind(tripId).first<{ operator_id: string }>();
+  const extendOpConfig = await getOperatorConfig(c.env, tripForExtend?.operator_id ?? '');
+  const extendTtlMs = extendOpConfig.online_reservation_ttl_ms;
+
+  const MAX_HOLD_MS = 10 * 60 * 1000; // 10 minutes absolute maximum
+
+  // Approximate original_reserved_at (when the hold started)
+  const originalReservedAt = (seat.reservation_expires_at ?? now) - extendTtlMs;
+  const new_expires_at = Math.min(
+    now + extendTtlMs,
+    originalReservedAt + MAX_HOLD_MS,
+  );
+
+  if (new_expires_at <= now) {
+    return c.json({ success: false, error: 'max_hold_reached', message: 'Maximum hold time reached.' }, 410);
+  }
+
+  await db.prepare(
+    `UPDATE seats SET reservation_expires_at = ?, updated_at = ? WHERE id = ? AND reservation_token = ?`
+  ).bind(new_expires_at, now, seat_id, token).run();
+
+  return c.json({ success: true, data: { expires_at: new_expires_at } });
 });
 
 // ============================================================

@@ -9,6 +9,7 @@ import { useOnlineStatus, useSyncQueue } from './core/offline/hooks';
 import { AuthProvider, useAuth, type WakaRole } from './core/auth/context';
 import { LoginScreen } from './components/login-screen';
 import { BookingFlow } from './components/booking-flow';
+import { TicketPage } from './components/ticket';
 import { ConflictLog } from './components/conflict-log';
 import { AnalyticsDashboard } from './components/analytics';
 import { DriverView } from './components/driver-view';
@@ -1988,6 +1989,13 @@ function AppContent() {
 // Main export — AuthProvider wraps everything
 // ============================================================
 export function TransportApp() {
+  // P03-T5: Route /b/:bookingId to the public e-ticket page
+  const path = window.location.pathname;
+  const ticketMatch = path.match(/^\/b\/([^/]+)$/);
+  if (ticketMatch && ticketMatch[1]) {
+    return <TicketPage bookingId={ticketMatch[1]} />;
+  }
+
   return (
     <AuthProvider>
       <AppContent />

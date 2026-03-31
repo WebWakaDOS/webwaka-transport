@@ -521,6 +521,13 @@ const MIGRATIONS: Migration[] = [
       `ALTER TABLE routes ADD COLUMN fare_matrix TEXT`,
     ],
   },
+  {
+    name: '011_guest_bookings',
+    statements: [
+      // P03-T6: Add is_guest flag to bookings table for guest JWT flow
+      `ALTER TABLE bookings ADD COLUMN is_guest INTEGER DEFAULT 0`,
+    ],
+  },
 ];
 
 export const adminRouter = new Hono<{ Bindings: AdminEnv }>();

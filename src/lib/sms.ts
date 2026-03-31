@@ -110,11 +110,16 @@ class DevSmsProvider implements SmsProvider {
 // Factory
 // ============================================================
 
-export function buildSmsProvider(env: { SMS_API_KEY?: string }): SmsProvider {
+export function buildSmsProvider(env: { SMS_API_KEY?: string; TERMII_API_KEY?: string }): SmsProvider {
   const key = env.SMS_API_KEY;
 
   if (key?.startsWith('termii:')) {
     return new TermiiProvider(key.slice(7));
+  }
+
+  // Accept bare TERMII_API_KEY as fallback (env.TERMII_API_KEY without prefix)
+  if (!key && env.TERMII_API_KEY) {
+    return new TermiiProvider(env.TERMII_API_KEY);
   }
 
   if (key?.startsWith('at:')) {
@@ -130,4 +135,27 @@ export function buildSmsProvider(env: { SMS_API_KEY?: string }): SmsProvider {
 
   // Unrecognised or missing key — dev/test mode
   return new DevSmsProvider();
+}
+
+// ============================================================
+// sendSms — convenience wrapper (non-fatal by design)
+// Callers must NOT propagate this error; SMS failures must
+// never block the user booking journey.
+// ============================================================
+
+export async function sendSms(
+  to: string,
+  message: string,
+  env: { SMS_API_KEY?: string; TERMII_API_KEY?: string },
+): Promise<void> {
+  if (!to) {
+    console.warn('[sms] sendSms called with empty phone — skipping');
+    return;
+  }
+  const provider = buildSmsProvider(env);
+  try {
+    await provider.send(to, message);
+  } catch (err) {
+    console.error('[sms] Send failed:', err instanceof Error ? err.message : err);
+  }
 }

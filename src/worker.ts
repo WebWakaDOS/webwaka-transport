@@ -29,7 +29,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { seatInventoryRouter } from './api/seat-inventory.js';
 import { agentSalesRouter } from './api/agent-sales.js';
-import { bookingPortalRouter } from './api/booking-portal.js';
+import { bookingPortalRouter, publicBookingRouter } from './api/booking-portal.js';
 import { operatorManagementRouter } from './api/operator-management.js';
 import { adminRouter } from './api/admin.js';
 import { authRouter } from './api/auth.js';
@@ -56,6 +56,7 @@ export interface Env {
   PAYSTACK_SECRET?: string;
   FLUTTERWAVE_SECRET?: string;
   SMS_API_KEY?: string;
+  TERMII_API_KEY?: string;
   VAPID_PRIVATE_KEY?: string;
   VAPID_PUBLIC_KEY?: string;
   OPENROUTER_API_KEY?: string;
@@ -103,6 +104,45 @@ app.get('/health', (c) => {
 // POST /api/auth/otp/verify  — verify code, issue JWT
 // ============================================================
 app.route('/api/auth', authRouter);
+
+// ============================================================
+// P03-T6: Guest booking phone verification — PUBLIC
+// POST /api/booking/verify-phone
+// POST /api/booking/verify-phone/confirm
+// Mounted BEFORE jwtAuthMiddleware so no JWT is required
+// ============================================================
+app.route('/api/booking', publicBookingRouter);
+
+// ============================================================
+// P03-T5: E-ticket data endpoint — PUBLIC (no auth required)
+// GET /b/:bookingId/data — returns booking JSON for ticket page
+// ============================================================
+app.get('/b/:bookingId/data', async (c) => {
+  const bookingId = c.req.param('bookingId');
+  const db = c.env.DB;
+
+  try {
+    const booking = await db.prepare(
+      `SELECT b.id, b.customer_id, b.trip_id, b.seat_ids, b.passenger_names,
+              b.total_amount, b.status, b.payment_status, b.payment_reference,
+              b.confirmed_at, b.created_at,
+              t.departure_time, r.origin, r.destination, o.name as operator_name
+       FROM bookings b
+       JOIN trips t ON t.id = b.trip_id
+       JOIN routes r ON r.id = t.route_id
+       JOIN operators o ON o.id = t.operator_id
+       WHERE b.id = ? AND b.status = 'confirmed' AND b.deleted_at IS NULL`
+    ).bind(bookingId).first();
+
+    if (!booking) {
+      return c.json({ success: false, error: 'Booking not found or not yet confirmed' }, 404);
+    }
+
+    return c.json({ success: true, data: booking });
+  } catch {
+    return c.json({ success: false, error: 'Failed to load booking' }, 500);
+  }
+});
 
 // ============================================================
 // Authentication — JWT verification

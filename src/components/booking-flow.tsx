@@ -270,7 +270,44 @@ function StepConfirm({ trip, selectedSeats, customerId, passengerNames, onSucces
         return;
       }
 
-      // Prod Paystack: open checkout in new tab, show "I've paid" screen
+      // P03-T3: Paystack inline popup (preferred over redirect)
+      // PaystackPop is loaded via the <script> tag in index.html
+      const paystackKey = (import.meta.env.VITE_PAYSTACK_PUBLIC_KEY as string | undefined) ?? '';
+      const paystackPop = (window as unknown as Record<string, unknown>)['PaystackPop'] as {
+        setup: (config: Record<string, unknown>) => { openIframe: () => void };
+      } | undefined;
+
+      if (paystackKey && paystackPop) {
+        // Inline popup — auto-verifies on success, no redirect required
+        setBusy(false);
+        const handler = paystackPop.setup({
+          key: paystackKey,
+          email: payEmail,
+          amount: totalKobo,
+          ref: init.reference,
+          currency: 'NGN',
+          label: `WebWaka — ${trip.origin} to ${trip.destination}`,
+          onClose: () => {
+            setError('Payment cancelled. Try again when ready.');
+          },
+          callback: (response: { reference: string }) => {
+            setBusy(true);
+            api.verifyPayment({ reference: response.reference }).then((verify) => {
+              if (verify.booking_status !== 'confirmed') {
+                setError('Payment not yet confirmed. Please check and try again.');
+              } else {
+                onSuccess({ ...booking, status: 'confirmed', payment_status: 'completed', origin: trip.origin, destination: trip.destination, departure_time: trip.departure_time, operator_name: trip.operator_name });
+              }
+            }).catch(() => {
+              setError('Verification failed. Contact support if payment was deducted.');
+            }).finally(() => setBusy(false));
+          },
+        });
+        handler.openIframe();
+        return;
+      }
+
+      // Fallback: open Paystack checkout in new tab if popup unavailable
       if (init.authorization_url) window.open(init.authorization_url, '_blank', 'noopener,noreferrer');
       setAwaiting({ reference: init.reference, bookingId: booking.id, booking, provider: 'paystack', checkoutUrl: init.authorization_url });
     } catch (e) {

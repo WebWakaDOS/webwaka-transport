@@ -32,9 +32,11 @@
   "homepage": "https://github.com/WebWakaDOS/webwaka-transport#readme",
   "description": "WebWaka Transport Suite — TRN-1 Seat Inventory, TRN-2 Agent Sales, TRN-3 Booking Portal, TRN-4 Operator Management",
   "dependencies": {
+    "@types/qrcode": "^1.5.6",
     "@webwaka/core": "file:packages/core",
     "dexie": "^4.4.1",
     "hono": "^4.12.9",
+    "qrcode": "^1.5.4",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
   },

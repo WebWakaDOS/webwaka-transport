@@ -5,10 +5,11 @@
  * Events: booking.created published to platform Event Bus (D1 outbox) on booking confirmation
  */
 import { Hono } from 'hono';
-import { requireRole } from '@webwaka/core';
+import { requireRole, nanoid, generateJWT } from '@webwaka/core';
 import type { AppContext, DbBooking, DbCustomer } from './types';
 import { genId, parsePagination, metaResponse, requireFields } from './types';
 import { publishEvent } from '../core/events/index';
+import { sendSms } from '../lib/sms.js';
 
 export const bookingPortalRouter = new Hono<AppContext>();
 
@@ -131,8 +132,23 @@ bookingPortalRouter.post('/bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN'
 
   const db = c.env.DB;
   const now = Date.now();
+  const user = c.get('user');
+  const isGuest = user?.id?.startsWith('guest_') ?? false;
 
   try {
+    // P03-T6: Guest booking — create minimal customer record for guest JWT holders
+    if (isGuest) {
+      const guestId = customer_id;
+      const guestName = Array.isArray(passenger_names) && passenger_names.length > 0
+        ? String(passenger_names[0])
+        : 'Guest';
+      const guestPhone = user?.phone ?? '';
+      await db.prepare(
+        `INSERT OR IGNORE INTO customers (id, name, phone, email, ndpr_consent, status, created_at, updated_at)
+         VALUES (?, ?, ?, NULL, 1, 'active', ?, ?)`
+      ).bind(guestId, guestName, guestPhone, now, now).run();
+    }
+
     const customer = await db.prepare(
       `SELECT * FROM customers WHERE id = ? AND ndpr_consent = 1`
     ).bind(customer_id).first<DbCustomer>();
@@ -144,13 +160,14 @@ bookingPortalRouter.post('/bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN'
     if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
 
     const total_amount = trip.base_fare * seat_ids.length;
-    const payment_reference = genId('pay');
+    // P03-T3: Paystack-compatible reference using waka_ prefix + 16-char random
+    const payment_reference = `waka_${nanoid('', 16)}`;
     const id = genId('bkg');
 
     await db.prepare(
-      `INSERT INTO bookings (id, customer_id, trip_id, seat_ids, passenger_names, total_amount, status, payment_status, payment_method, payment_reference, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'pending', 'pending', ?, ?, ?)`
-    ).bind(id, customer_id, trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, payment_method, payment_reference, now).run();
+      `INSERT INTO bookings (id, customer_id, trip_id, seat_ids, passenger_names, total_amount, status, payment_status, payment_method, payment_reference, is_guest, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'pending', 'pending', ?, ?, ?, ?)`
+    ).bind(id, customer_id, trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, payment_method, payment_reference, isGuest ? 1 : 0, now).run();
 
     return c.json({
       success: true,
@@ -219,14 +236,30 @@ bookingPortalRouter.patch('/bookings/:id/confirm', requireRole(['SUPER_ADMIN', '
 
   try {
     const booking = await db.prepare(
-      `SELECT * FROM bookings WHERE id = ?`
-    ).bind(id).first<DbBooking>();
+      `SELECT b.*, r.origin, r.destination, t.departure_time, c.phone as customer_phone, c.name as customer_name
+       FROM bookings b
+       JOIN trips t ON t.id = b.trip_id
+       JOIN routes r ON r.id = t.route_id
+       JOIN customers c ON c.id = b.customer_id
+       WHERE b.id = ?`
+    ).bind(id).first<DbBooking & {
+      origin: string; destination: string; departure_time: number;
+      customer_phone: string | null; customer_name: string | null;
+    }>();
 
     if (!booking) return c.json({ success: false, error: 'Booking not found' }, 404);
     if (booking.status === 'confirmed') return c.json({ success: false, error: 'Already confirmed' }, 409);
     if (booking.status === 'cancelled') return c.json({ success: false, error: 'Booking is cancelled' }, 409);
 
     const seatIds = JSON.parse(booking.seat_ids) as string[];
+
+    // Fetch seat numbers for SMS message
+    const seatPlaceholders = seatIds.map(() => '?').join(', ');
+    const seatsResult = await db.prepare(
+      `SELECT seat_number FROM seats WHERE id IN (${seatPlaceholders})`
+    ).bind(...seatIds).all<{ seat_number: string }>();
+    const seatNumbers = seatsResult.results.map(s => s.seat_number).join(', ');
+
     await db.batch([
       db.prepare(
         `UPDATE bookings SET status = 'confirmed', payment_status = 'completed', confirmed_at = ? WHERE id = ?`
@@ -238,6 +271,7 @@ bookingPortalRouter.patch('/bookings/:id/confirm', requireRole(['SUPER_ADMIN', '
       ),
     ]);
 
+    // P03-T4: enriched payload for SMS confirmation via event bus
     await publishEvent(db, {
       event_type: 'booking.created',
       aggregate_id: id,
@@ -245,8 +279,14 @@ bookingPortalRouter.patch('/bookings/:id/confirm', requireRole(['SUPER_ADMIN', '
       payload: {
         booking_id: id,
         customer_id: booking.customer_id,
+        customer_phone: booking.customer_phone ?? '',
+        customer_name: booking.customer_name ?? '',
         trip_id: booking.trip_id,
+        origin: booking.origin ?? '',
+        destination: booking.destination ?? '',
+        departure_date: booking.departure_time ?? null,
         seat_ids: seatIds,
+        seat_numbers: seatNumbers,
         total_amount: booking.total_amount,
         payment_method: booking.payment_method,
         payment_reference: payment_reference ?? booking.payment_reference,
@@ -441,4 +481,105 @@ bookingPortalRouter.get('/bookings/:id', async (c) => {
   } catch {
     return c.json({ success: false, error: 'Failed to fetch booking' }, 500);
   }
+});
+
+// ============================================================
+// P03-T6: Guest Booking — public phone verification endpoints
+// These routes are mounted BEFORE jwtAuthMiddleware in worker.ts
+// ============================================================
+
+export const publicBookingRouter = new Hono<AppContext>();
+
+const NIGERIAN_PHONE_RE = /^(\+234|0)\d{10}$/;
+
+// POST /api/booking/verify-phone — request OTP for guest booking
+publicBookingRouter.post('/verify-phone', async (c) => {
+  let body: Record<string, unknown>;
+  try { body = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ success: false, error: 'Invalid JSON body' }, 400); }
+
+  const phone = String(body['phone'] ?? '').trim();
+  if (!NIGERIAN_PHONE_RE.test(phone)) {
+    return c.json({ success: false, error: 'Invalid Nigerian phone number format. Use +234XXXXXXXXXX or 0XXXXXXXXXX' }, 400);
+  }
+
+  if (!c.env.SESSIONS_KV) {
+    return c.json({ success: false, error: 'OTP service unavailable' }, 503);
+  }
+
+  const otp = String(Math.floor(100_000 + Math.random() * 900_000));
+  const kvKey = `guest_otp_${phone}`;
+  const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+
+  try {
+    await c.env.SESSIONS_KV.put(kvKey, JSON.stringify({ otp, expires_at: expiresAt }), { expirationTtl: 600 });
+  } catch {
+    return c.json({ success: false, error: 'Failed to store OTP' }, 500);
+  }
+
+  // Non-fatal SMS: never block the guest booking flow
+  await sendSms(phone, `Your WebWaka guest booking OTP is: ${otp}. Valid for 10 minutes.`, c.env).catch(() => {});
+
+  const hasSms = Boolean(c.env.SMS_API_KEY || c.env.TERMII_API_KEY);
+  return c.json({
+    success: true,
+    data: {
+      message: 'OTP sent',
+      ...(hasSms ? {} : { dev_otp: otp }),
+    },
+  });
+});
+
+// POST /api/booking/verify-phone/confirm — verify OTP and issue guest JWT
+publicBookingRouter.post('/verify-phone/confirm', async (c) => {
+  let body: Record<string, unknown>;
+  try { body = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ success: false, error: 'Invalid JSON body' }, 400); }
+
+  const phone = String(body['phone'] ?? '').trim();
+  const otp = String(body['otp'] ?? '').trim();
+  if (!phone || !otp) return c.json({ success: false, error: 'phone and otp are required' }, 400);
+
+  if (!c.env.SESSIONS_KV) {
+    return c.json({ success: false, error: 'OTP service unavailable' }, 503);
+  }
+
+  const kvKey = `guest_otp_${phone}`;
+  let session: { otp: string; expires_at: number } | null = null;
+  try {
+    const raw = await c.env.SESSIONS_KV.get(kvKey);
+    if (raw) session = JSON.parse(raw) as { otp: string; expires_at: number };
+  } catch {
+    return c.json({ success: false, error: 'Session lookup failed' }, 500);
+  }
+
+  if (!session || Date.now() > session.expires_at) {
+    return c.json({ success: false, error: 'OTP expired or not found. Request a new one.' }, 401);
+  }
+
+  if (otp !== session.otp) {
+    return c.json({ success: false, error: 'Incorrect OTP. Check your SMS and try again.' }, 401);
+  }
+
+  // Consume the OTP — delete from KV to prevent reuse
+  await c.env.SESSIONS_KV.delete(kvKey).catch(() => {});
+
+  if (!c.env.JWT_SECRET) {
+    return c.json({ success: false, error: 'Authentication service misconfigured' }, 503);
+  }
+
+  const guestId = nanoid('guest_', 16);
+  const token = await generateJWT(
+    { id: guestId, role: 'CUSTOMER', phone },
+    c.env.JWT_SECRET,
+    15 * 60, // 15 minutes TTL
+  );
+
+  return c.json({
+    success: true,
+    data: {
+      token,
+      user: { id: guestId, phone, role: 'CUSTOMER', is_guest: true },
+    },
+  });
 });
