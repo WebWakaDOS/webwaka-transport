@@ -34,8 +34,12 @@ export interface OfflineTransaction {
   passenger_names: string[];
   total_amount: number; // kobo
   payment_method: 'cash' | 'mobile_money' | 'card';
+  idempotencyKey: string;
+  retry_count: number;
+  error_at: number | undefined;
   created_at: number;
   synced: boolean;
+  synced_at: number | undefined;
 }
 
 export interface CachedTrip {
@@ -163,6 +167,29 @@ class TransportOfflineDB extends Dexie {
         }
       });
     });
+
+    // v3 schema: adds idempotencyKey index to transactions
+    this.version(3).stores({
+      mutations: '++id, entity_type, entity_id, status, next_retry_at, created_at',
+      transactions: '++id, local_id, agent_id, trip_id, synced, idempotencyKey, created_at',
+      trips: 'id, operator_id, origin, destination, departure_time, state, cached_at',
+      seats: 'id, trip_id, status, cached_at',
+      bookings: '++id, local_id, customer_id, trip_id, status, synced',
+      agent_sessions: '++id, agent_id, operator_id, expires_at',
+      conflict_log: '++id, entity_type, entity_id, created_at, resolved',
+      operator_config: 'operator_id, cached_at',
+      ndpr_consent: '++id, customer_id, consent_type, created_at',
+    }).upgrade(tx => {
+      // Backfill idempotencyKey and retry_count for existing transactions
+      return tx.table<OfflineTransaction>('transactions').toCollection().modify(t => {
+        if (!t.idempotencyKey) {
+          t.idempotencyKey = `tx_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        }
+        if (t.retry_count === undefined) t.retry_count = 0;
+        if (t.error_at === undefined) t.error_at = undefined;
+        if (t.synced_at === undefined) t.synced_at = undefined;
+      });
+    });
   }
 }
 
@@ -271,18 +298,58 @@ export async function getUnresolvedConflicts(): Promise<ConflictRecord[]> {
 // Offline Transaction Helpers (TRN-2 Agent POS)
 // ============================================================
 
-export async function saveOfflineTransaction(txn: Omit<OfflineTransaction, 'id'>): Promise<number> {
-  return getOfflineDB().transactions.add(txn);
+type NewOfflineTransaction = Omit<OfflineTransaction, 'id' | 'idempotencyKey' | 'retry_count' | 'error_at' | 'synced_at'> & {
+  idempotencyKey?: string;
+  retry_count?: number;
+  error_at?: number;
+  synced_at?: number;
+};
+
+export async function saveOfflineTransaction(txn: NewOfflineTransaction): Promise<number> {
+  const record: Omit<OfflineTransaction, 'id'> = {
+    ...txn,
+    idempotencyKey: txn.idempotencyKey || `tx_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+    retry_count: txn.retry_count ?? 0,
+    error_at: txn.error_at,
+    synced_at: txn.synced_at,
+  };
+  return getOfflineDB().transactions.add(record);
 }
 
+/** Pending transactions for a specific agent — for the agent POS UI */
 export async function getPendingTransactions(agent_id: string): Promise<OfflineTransaction[]> {
-  return getOfflineDB().transactions.where({ agent_id, synced: false }).toArray();
+  return getOfflineDB().transactions
+    .where({ agent_id, synced: false })
+    .and(t => (t.retry_count ?? 0) < 5)
+    .toArray();
+}
+
+/** All pending transactions regardless of agent — for SyncEngine flush */
+export async function getAllPendingTransactions(): Promise<OfflineTransaction[]> {
+  return getOfflineDB().transactions
+    .where('synced').equals(0)
+    .and(t => (t.retry_count ?? 0) < 5)
+    .toArray();
 }
 
 export async function markTransactionSynced(local_id: string): Promise<void> {
   const db = getOfflineDB();
   const txn = await db.transactions.where('local_id').equals(local_id).first();
-  if (txn?.id !== undefined) await db.transactions.update(txn.id, { synced: true });
+  if (txn?.id !== undefined) {
+    await db.transactions.update(txn.id, { synced: true, synced_at: Date.now() });
+  }
+}
+
+/** Increment retry_count; set error_at when retry_count reaches 5 */
+export async function incrementTransactionRetry(local_id: string): Promise<void> {
+  const db = getOfflineDB();
+  const txn = await db.transactions.where('local_id').equals(local_id).first();
+  if (txn?.id === undefined) return;
+  const newCount = (txn.retry_count ?? 0) + 1;
+  await db.transactions.update(txn.id, {
+    retry_count: newCount,
+    error_at: newCount >= 5 ? Date.now() : txn.error_at,
+  });
 }
 
 // ============================================================

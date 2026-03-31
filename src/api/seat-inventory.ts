@@ -4,6 +4,7 @@
  * Invariants: Nigeria-First (kobo), Offline-First (sync), Multi-tenancy
  */
 import { Hono } from 'hono';
+import { publishEvent } from '@webwaka/core';
 import type { AppContext, DbTrip, DbSeat } from './types';
 import { genId, parsePagination, metaResponse, requireFields, applyTenantScope } from './types';
 
@@ -180,6 +181,154 @@ seatInventoryRouter.post('/trips/:id/reserve', async (c) => {
   } catch {
     return c.json({ success: false, error: 'Failed to reserve seat' }, 500);
   }
+});
+
+// ============================================================
+// POST /trips/:tripId/reserve-batch — atomic multi-seat reservation
+// Idempotent via IDEMPOTENCY_KV. Uses optimistic locking (version).
+// ============================================================
+seatInventoryRouter.post('/trips/:tripId/reserve-batch', async (c) => {
+  const tripId = c.req.param('tripId');
+  const body = await c.req.json() as Record<string, unknown>;
+  const err = requireFields(body, ['seat_ids', 'user_id', 'idempotency_key']);
+  if (err) return c.json({ success: false, error: err }, 400);
+
+  const { seat_ids, user_id, idempotency_key } = body as {
+    seat_ids: unknown; user_id: string; idempotency_key: string;
+  };
+
+  if (!Array.isArray(seat_ids) || seat_ids.length === 0) {
+    return c.json({ success: false, error: 'seat_ids must be a non-empty array' }, 400);
+  }
+  if (seat_ids.length > 10) {
+    return c.json({ success: false, error: 'Maximum 10 seats per batch reservation' }, 400);
+  }
+
+  const db = c.env.DB;
+  const kv = c.env.IDEMPOTENCY_KV;
+  const idempotencyKvKey = `reserve-batch:${idempotency_key}`;
+
+  // 1. Idempotency check — return cached response if this request was already processed
+  if (kv) {
+    const cached = await kv.get(idempotencyKvKey);
+    if (cached) {
+      return c.json(JSON.parse(cached));
+    }
+  }
+
+  const now = Date.now();
+  const expiresAt = now + 30_000; // 30-second reservation TTL (configurable in P03-T1)
+
+  // Expire stale reservations for this trip before checking availability
+  await db.prepare(
+    `UPDATE seats SET status = 'available', reserved_by = NULL, reservation_token = NULL, reservation_expires_at = NULL
+     WHERE trip_id = ? AND status = 'reserved' AND reservation_expires_at < ?`
+  ).bind(tripId, now).run();
+
+  // 2. Read all requested seats in a single query
+  const seatIdList = seat_ids as string[];
+  const placeholders = seatIdList.map(() => '?').join(', ');
+  const seatsResult = await db.prepare(
+    `SELECT id, status, version FROM seats WHERE trip_id = ? AND id IN (${placeholders})`
+  ).bind(tripId, ...seatIdList).all<{ id: string; status: string; version: number }>();
+
+  if (seatsResult.results.length !== seatIdList.length) {
+    return c.json({ success: false, error: 'One or more seats not found for this trip' }, 404);
+  }
+
+  // 3. Check all seats are available
+  const unavailable = seatsResult.results.find(s => s.status !== 'available');
+  if (unavailable) {
+    return c.json({
+      success: false,
+      error: 'seat_unavailable',
+      seat_id: unavailable.id,
+      message: 'One or more seats are not available',
+    }, 409);
+  }
+
+  // 4. Generate reservation tokens for each seat
+  const tokenMap: Record<string, string> = {};
+  for (const seat of seatsResult.results) {
+    tokenMap[seat.id] = genId('tok');
+  }
+
+  // 5. Build D1 batch with optimistic locking (version check prevents double-booking)
+  const updateStmts = seatsResult.results.map(seat =>
+    db.prepare(
+      `UPDATE seats SET status = 'reserved', reserved_by = ?, reservation_token = ?,
+       reservation_expires_at = ?, version = version + 1, updated_at = ?
+       WHERE id = ? AND status = 'available' AND version = ?`
+    ).bind(user_id, tokenMap[seat.id]!, expiresAt, now, seat.id, seat.version)
+  );
+
+  // 6. Execute the batch atomically
+  const batchResults = await db.batch(updateStmts);
+
+  // 7. Check for concurrent conflicts (changes = 0 means another agent grabbed this seat)
+  const failedSeats = seatsResult.results.filter((_, i) => {
+    const res = batchResults[i] as { meta?: { changes?: number } } | undefined;
+    return (res?.meta?.changes ?? 0) === 0;
+  });
+
+  if (failedSeats.length > 0) {
+    // Compensating transaction: release any seats that did succeed
+    const successSeats = seatsResult.results.filter((_, i) => {
+      const res = batchResults[i] as { meta?: { changes?: number } } | undefined;
+      return (res?.meta?.changes ?? 0) > 0;
+    });
+    if (successSeats.length > 0) {
+      await db.batch(
+        successSeats.map(seat =>
+          db.prepare(
+            `UPDATE seats SET status = 'available', reserved_by = NULL, reservation_token = NULL,
+             reservation_expires_at = NULL, updated_at = ?
+             WHERE id = ? AND reservation_token = ?`
+          ).bind(now, seat.id, tokenMap[seat.id]!)
+        )
+      ).catch(() => {});
+    }
+    return c.json({
+      success: false,
+      error: 'concurrent_conflict',
+      message: 'Seat taken by another agent — please retry',
+    }, 409);
+  }
+
+  // 8. Build the token list for the response
+  const tokens = seatsResult.results.map(seat => ({
+    seat_id: seat.id,
+    token: tokenMap[seat.id]!,
+    expires_at: expiresAt,
+  }));
+
+  // 9. Publish platform event (non-fatal — event bus failure must not block booking)
+  const trip = await db.prepare(
+    `SELECT operator_id FROM trips WHERE id = ? AND deleted_at IS NULL`
+  ).bind(tripId).first<{ operator_id: string }>();
+
+  if (trip) {
+    publishEvent(db, {
+      event_type: 'seat.batch_reserved',
+      aggregate_id: tripId,
+      aggregate_type: 'trip',
+      payload: { trip_id: tripId, seat_ids: seatIdList, user_id, tokens },
+      tenant_id: trip.operator_id,
+      timestamp: now,
+    }).catch(() => {});
+  }
+
+  const responseBody = {
+    success: true,
+    data: { tokens, expires_at: expiresAt, ttl_seconds: 30 },
+  };
+
+  // 10. Cache success response for 24 hours for idempotency replay
+  if (kv) {
+    kv.put(idempotencyKvKey, JSON.stringify(responseBody), { expirationTtl: 86_400 }).catch(() => {});
+  }
+
+  return c.json(responseBody, 200);
 });
 
 // ============================================================

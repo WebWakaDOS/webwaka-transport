@@ -16,6 +16,9 @@ import {
   markMutationFailed,
   markMutationAbandoned,
   logConflict,
+  getAllPendingTransactions,
+  markTransactionSynced,
+  incrementTransactionRetry,
 } from './db';
 
 // ============================================================
@@ -133,11 +136,38 @@ export class SyncEngine {
     const result: SyncResult = { synced: 0, failed: 0, conflicts: 0, abandoned: 0 };
 
     try {
+      // Phase 1: flush offline mutations (seat, trip, booking, transaction mutations)
       const mutations = await getPendingMutations();
 
       for (const mutation of mutations) {
         if (mutation.id === undefined) continue;
         await this._processMutation(mutation, result);
+      }
+
+      // Phase 2: flush offline agent transactions (TRN-2 agent POS)
+      const pendingTx = await getAllPendingTransactions();
+
+      for (const tx of pendingTx) {
+        try {
+          const response = await fetch('/api/agent-sales/sync', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${this._authToken ?? ''}`,
+              'X-Idempotency-Key': tx.idempotencyKey,
+            },
+            body: JSON.stringify({ transactions: [tx] }),
+          });
+          if (response.ok || response.status === 409) {
+            await markTransactionSynced(tx.local_id);
+            result.synced++;
+          } else {
+            await incrementTransactionRetry(tx.local_id);
+            result.failed++;
+          }
+        } catch {
+          // Network error — will retry on next flush
+        }
       }
     } finally {
       this._isFlushing = false;

@@ -1,0 +1,89 @@
+You are implementing Phase P02-TRANSPORT of the WebWaka platform.
+Target repo: webwaka-transport
+
+This phase fixes two critical bugs and introduces the foundational DB schema for all future phases. Read webwaka-implementation-plan.md for full context.
+
+Platform invariants you must preserve:
+- All monetary values are stored as kobo (integers). Never use floats for money.
+- All timestamps are Unix milliseconds (integers). Never use ISO strings in DB.
+- Every write endpoint must check for NDPR consent where customer PII is involved.
+- Every API route uses tenant scoping via applyTenantScope or equivalent.
+- Event-driven: every significant state change publishes a platform_event.
+
+=== TASK P02-T1: Wire Offline Agent Transaction Sync to SyncEngine ===
+
+File: src/core/offline/sync.ts
+File: src/core/offline/db.ts
+
+In sync.ts, inside the flush() method, after the existing mutations loop, add a second phase for offline transactions:
+
+const pendingTx = await this.db.getPendingTransactions();
+for (const tx of pendingTx) {
+try {
+const response = await fetch('/api/agent-sales/sync', {
+method: 'POST',
+headers: {
+'Content-Type': 'application/json',
+'Authorization': `Bearer ${this.authToken}`,
+'X-Idempotency-Key': tx.idempotencyKey,
+},
+body: JSON.stringify({ transactions: [tx] }),
+});
+if (response.ok || response.status === 409) {
+await this.db.markTransactionSynced(tx.id);
+} else {
+await this.db.incrementTransactionRetry(tx.id);
+}
+} catch {
+// network error — will retry on next flush
+}
+}
+
+In db.ts:
+1. Add markTransactionSynced(id: string): Promise<void> — sets synced_at = Date.now() on the transaction row.
+2. Add incrementTransactionRetry(id: string): Promise<void> — increments retry_count on the transaction row. If retry_count >= 5, set an error_at timestamp.
+3. Add idempotencyKey field to the transactions Dexie schema. If the transactions table is currently at schema version 1, add a schema upgrade: version 2 adds idempotencyKey with default `tx_${Date.now()}_${Math.random().toString(36).slice(2)}`.
+4. Verify getPendingTransactions() returns transactions where synced_at IS NULL and retry_count < 5.
+
+=== TASK P02-T2: Multi-Seat Atomic Reservation Batch Endpoint ===
+
+File: src/api/seat-inventory.ts
+
+Add this route to the seat inventory Hono router:
+
+POST /api/seat-inventory/trips/:tripId/reserve-batch
+
+Request body: { seat_ids: string[], user_id: string, idempotency_key: string }
+
+Implementation:
+1. Check idempotency key in IDEMPOTENCY_KV. Return cached response if present.
+2. Read all requested seats in one query: SELECT id, status, version FROM seats WHERE trip_id = ? AND id IN ({placeholders}) AND deleted_at IS NULL
+3. If any seat is not 'available', return 409: { error: 'seat_unavailable', seat_id: '{first_unavailable_id}', message: 'One or more seats are not available' }
+4. For each seat, generate reservation token: nanoid('tok', 32) from @webwaka/core.
+5. Compute reservation_expires_at: Date.now() + 30000 (will be made configurable in P03-T1).
+6. Build a D1 batch() of UPDATE statements, one per seat:
+UPDATE seats SET status='reserved', reserved_by=?, reservation_token=?, reservation_expires_at=?, version=version+1, updated_at=?
+WHERE id=? AND status='available' AND version=?
+(include the version for optimistic locking)
+7. Execute the batch. For each result, check meta.changes. If any result has changes=0, the seat was taken between read and write.
+- In that case: run a second batch to release any seats that succeeded (UPDATE seats SET status='available', reserved_by=NULL, reservation_token=NULL, reservation_expires_at=NULL WHERE id=? AND reservation_token=?)
+- Return 409: { error: 'concurrent_conflict', message: 'Seat taken by another agent — please retry' }
+8. Publish platform event: publishEvent(env.DB, { event_type: 'seat.batch_reserved', aggregate_id: tripId, aggregate_type: 'trip', payload: { trip_id: tripId, seat_ids, user_id, tokens }, tenant_id: operatorId })
+9. Cache the success response in IDEMPOTENCY_KV with 24h TTL.
+10. Return 200: { tokens: [ { seat_id, token, expires_at }, ... ] }
+
+=== TASK P02-T3: Schema Migration 002 ===
+
+Create file: migrations/002_phase2_tables.sql
+
+This migration creates all the new tables needed for Phases P02 through P11. Copy the exact SQL from webwaka-implementation-plan.md section "Phase P02-TRANSPORT > P02-T3: Schema Migration for New Tables".
+
+After creating the file:
+1. Register migration 002 in src/api/admin.ts migration runner (look at how migration 001 is registered and follow the same pattern).
+2. Run wrangler d1 execute DB --local --file=migrations/002_phase2_tables.sql to verify zero SQL errors.
+3. Fix any SQL syntax errors until the migration runs cleanly.
+
+Note on ALTER TABLE: Cloudflare D1/SQLite does not support all ALTER TABLE operations. If ADD COLUMN IF NOT EXISTS fails, use a TRY/CATCH or check the D1 docs. Use separate statements for each column addition.
+
+=== DONE ===
+After all three tasks: verify tsc --noEmit passes, run npm run dev:ui and confirm the app still loads without runtime errors.
