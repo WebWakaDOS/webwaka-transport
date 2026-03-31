@@ -6,3 +6,15 @@ id = "YKcfDJWiAIXahvFCx8GEA"
 uri = "file://webwaka-transport-research.md"
 type = "text"
 title = "WebWaka Transport — Deep Research & Enhancement Roadmap"
+
+[[outputs]]
+id = "Iu0TEi9EFL0pmar4tMJzw"
+uri = "file://webwaka-implementation-plan.md"
+type = "text"
+title = "WebWaka — Master Implementation Plan (15 Phases, 3 Repos)"
+
+[[outputs]]
+id = "0rKVscYhKdYiPTveugDzw"
+uri = "file://webwaka-phase-prompts.md"
+type = "text"
+title = "WebWaka — Phase Prompts (Copy-Paste Agent Instructions)"
