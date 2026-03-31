@@ -111,14 +111,14 @@ authRouter.post('/otp/verify', async (c) => {
   const requestId = String(body['request_id']);
   const submittedCode = String(body['code']).trim();
 
-  type OtpSession = { phone: string; code: string; expires_at: number };
+  type OtpSession = { phone: string; code: string; expires_at: number; used?: boolean };
   let session: OtpSession | null = null;
   try {
-    const raw = await c.env.SESSIONS_KV.get(`otp:${requestId}`);
-    if (!raw) {
+    const rawSession = await c.env.SESSIONS_KV.get(`otp:${requestId}`);
+    if (!rawSession) {
       return c.json({ success: false, error: 'OTP expired or not found. Request a new one.' }, 400);
     }
-    session = JSON.parse(raw) as OtpSession;
+    session = JSON.parse(rawSession) as OtpSession;
   } catch (err: unknown) {
     console.error('[auth/otp/verify] KV error:', err);
     return c.json({ success: false, error: 'Session lookup failed' }, 500);
@@ -126,6 +126,11 @@ authRouter.post('/otp/verify', async (c) => {
 
   if (!session) {
     return c.json({ success: false, error: 'Invalid OTP session' }, 400);
+  }
+
+  // Reject replayed OTP — already consumed by a prior successful verify
+  if (session.used === true) {
+    return c.json({ success: false, error: 'OTP already used. Request a new one.' }, 400);
   }
 
   const otpSession: OtpSession = session;
@@ -138,11 +143,16 @@ authRouter.post('/otp/verify', async (c) => {
     return c.json({ success: false, error: 'Incorrect OTP code. Check the SMS and try again.' }, 400);
   }
 
-  // Consume OTP (delete from KV so it can't be reused)
+  // Mark OTP as used BEFORE issuing JWT — prevents reuse even if JWT issuance fails
   try {
-    await c.env.SESSIONS_KV.delete(`otp:${requestId}`);
-  } catch {
-    // Non-fatal — continue even if delete fails
+    await c.env.SESSIONS_KV.put(
+      `otp:${requestId}`,
+      JSON.stringify({ ...otpSession, used: true }),
+      { expirationTtl: 300 }
+    );
+  } catch (err: unknown) {
+    console.error('[auth/otp/verify] Failed to mark OTP used:', err);
+    return c.json({ success: false, error: 'Failed to consume OTP session' }, 500);
   }
 
   const phone = otpSession.phone;
@@ -188,7 +198,11 @@ authRouter.post('/otp/verify', async (c) => {
     return c.json({ success: false, error: 'Failed to load user account' }, 500);
   }
 
-  const secret = c.env.JWT_SECRET ?? 'dev_secret_min_32_chars_placeholder!';
+  if (!c.env.JWT_SECRET) {
+    console.error('[auth/otp/verify] JWT_SECRET is not configured');
+    return c.json({ success: false, error: 'Authentication service misconfigured' }, 503);
+  }
+  const secret = c.env.JWT_SECRET;
   let token: string;
   try {
     token = await generateJWT(

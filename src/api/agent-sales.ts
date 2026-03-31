@@ -13,7 +13,7 @@ export const agentSalesRouter = new Hono<AppContext>();
 // ============================================================
 // GET /agents — list agents
 // ============================================================
-agentSalesRouter.get('/agents', async (c) => {
+agentSalesRouter.get('/agents', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'SUPERVISOR']), async (c) => {
   const q = c.req.query();
   const { status } = q;
   const { limit, offset } = parsePagination(q);
@@ -94,16 +94,40 @@ agentSalesRouter.post('/transactions', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN
   const receiptId = genId('rct');
   const now = Date.now();
 
+  // Verify all seats are still available before recording sale
   try {
-    await db.prepare(
-      `INSERT INTO sales_transactions (id, agent_id, trip_id, seat_ids, passenger_names, total_amount, payment_method, payment_status, sync_status, receipt_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', 'synced', ?, ?)`
-    ).bind(id, agent_id, trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, payment_method, receiptId, now).run();
+    const seatChecks = await Promise.all(
+      seat_ids.map(seatId =>
+        db.prepare(`SELECT id, status, trip_id FROM seats WHERE id = ?`)
+          .bind(seatId).first<{ id: string; status: string; trip_id: string }>()
+      )
+    );
+    for (const seat of seatChecks) {
+      if (!seat || seat.trip_id !== trip_id) return c.json({ success: false, error: 'One or more seats not found for this trip' }, 404);
+      if (seat.status === 'confirmed' || seat.status === 'blocked') {
+        return c.json({ success: false, error: `Seat ${seat.id} is ${seat.status} and cannot be sold` }, 409);
+      }
+    }
+  } catch {
+    return c.json({ success: false, error: 'Failed to verify seat availability' }, 500);
+  }
 
-    await db.prepare(
-      `INSERT INTO receipts (id, transaction_id, agent_id, trip_id, passenger_names, seat_numbers, total_amount, payment_method, issued_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(receiptId, id, agent_id, trip_id, JSON.stringify(passenger_names), JSON.stringify(seat_ids), total_amount, payment_method, now).run();
+  try {
+    await db.batch([
+      db.prepare(
+        `INSERT INTO sales_transactions (id, agent_id, trip_id, seat_ids, passenger_names, total_amount, payment_method, payment_status, sync_status, receipt_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', 'synced', ?, ?)`
+      ).bind(id, agent_id, trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, payment_method, receiptId, now),
+      db.prepare(
+        `INSERT INTO receipts (id, transaction_id, agent_id, trip_id, passenger_names, seat_numbers, total_amount, payment_method, issued_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(receiptId, id, agent_id, trip_id, JSON.stringify(passenger_names), JSON.stringify(seat_ids), total_amount, payment_method, now),
+      ...seat_ids.map(seatId =>
+        db.prepare(
+          `UPDATE seats SET status = ?, confirmed_by = ?, confirmed_at = ?, updated_at = ? WHERE id = ?`
+        ).bind('confirmed', id, now, now, seatId)
+      ),
+    ]);
 
     try {
       await publishEvent(db, {
@@ -157,14 +181,28 @@ agentSalesRouter.get('/transactions', async (c) => {
 });
 
 // ============================================================
-// GET /receipts/:id — get a receipt
+// GET /receipts/:id — get a receipt (tenant-scoped)
 // ============================================================
-agentSalesRouter.get('/receipts/:id', async (c) => {
+agentSalesRouter.get('/receipts/:id', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'SUPERVISOR']), async (c) => {
   const id = c.req.param('id');
   const db = c.env.DB;
+  const jwtUser = c.get('user');
+  const isSuperAdmin = jwtUser?.role === 'SUPER_ADMIN';
+
   try {
     const receipt = await db.prepare(`SELECT * FROM receipts WHERE id = ?`).bind(id).first<DbReceipt>();
     if (!receipt) return c.json({ success: false, error: 'Receipt not found' }, 404);
+
+    // Enforce tenant scope for non-SUPER_ADMIN callers
+    if (!isSuperAdmin && jwtUser?.operatorId) {
+      const agent = await db.prepare(
+        `SELECT operator_id FROM agents WHERE id = ?`
+      ).bind(receipt.agent_id).first<{ operator_id: string }>();
+      if (!agent || agent.operator_id !== jwtUser.operatorId) {
+        return c.json({ success: false, error: 'Receipt not found' }, 404);
+      }
+    }
+
     return c.json({ success: true, data: receipt });
   } catch {
     return c.json({ success: false, error: 'Failed to fetch receipt' }, 500);

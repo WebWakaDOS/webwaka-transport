@@ -42,7 +42,7 @@ type DbBookingPayment = {
   payment_provider: string | null;
 };
 
-/** Confirm a booking + seats atomically. Called after payment verified. */
+/** Confirm a booking + seats atomically via db.batch(). Called after payment verified. */
 async function confirmBookingById(
   db: D1Database,
   booking: DbBookingPayment,
@@ -50,23 +50,24 @@ async function confirmBookingById(
   provider: string,
   now: number
 ): Promise<void> {
-  await db.prepare(
-    `UPDATE bookings
-     SET status = ?,
-         payment_status = ?,
-         payment_reference = ?,
-         payment_provider = ?,
-         paid_at = ?,
-         confirmed_at = ?
-     WHERE id = ?`
-  ).bind('confirmed', 'completed', reference, provider, now, now, booking.id).run();
-
   const seatIds = JSON.parse(booking.seat_ids) as string[];
-  for (const seatId of seatIds) {
-    await db.prepare(
-      `UPDATE seats SET status = ?, confirmed_at = ?, updated_at = ? WHERE id = ?`
-    ).bind('confirmed', now, now, seatId).run();
-  }
+  await db.batch([
+    db.prepare(
+      `UPDATE bookings
+       SET status = ?,
+           payment_status = ?,
+           payment_reference = ?,
+           payment_provider = ?,
+           paid_at = ?,
+           confirmed_at = ?
+       WHERE id = ?`
+    ).bind('confirmed', 'completed', reference, provider, now, now, booking.id),
+    ...seatIds.map(seatId =>
+      db.prepare(
+        `UPDATE seats SET status = ?, confirmed_at = ?, updated_at = ? WHERE id = ?`
+      ).bind('confirmed', now, now, seatId)
+    ),
+  ]);
 }
 
 // ============================================================
@@ -250,10 +251,35 @@ paymentsRouter.post('/verify', async (c) => {
   }
 
   if (verifyData.data.amount !== booking.total_amount) {
-    console.warn(
-      `[payments/verify] Amount mismatch for booking ${booking.id}: ` +
+    console.error(
+      `[payments/verify] FRAUD: Amount mismatch for booking ${booking.id}: ` +
       `expected ${booking.total_amount} kobo, got ${verifyData.data.amount} kobo`
     );
+    try {
+      const evtId = `evt_fraud_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      await db.prepare(
+        `INSERT OR IGNORE INTO platform_events
+         (id, event_type, aggregate_id, aggregate_type, payload, status, created_at)
+         VALUES (?, 'payment:AMOUNT_MISMATCH', ?, 'booking', ?, 'pending', ?)`
+      ).bind(
+        evtId, booking.id,
+        JSON.stringify({
+          booking_id: booking.id,
+          expected_kobo: booking.total_amount,
+          received_kobo: verifyData.data.amount,
+          reference: verifyData.data.reference,
+        }),
+        now
+      ).run();
+    } catch { /* non-fatal — fraud event failure must not swallow the 402 */ }
+    return c.json({
+      success: false,
+      error: 'Payment amount does not match booking total',
+      data: {
+        expected_kobo: booking.total_amount,
+        received_kobo: verifyData.data.amount,
+      },
+    }, 402);
   }
 
   await confirmBookingById(db, booking, verifyData.data.reference, 'paystack', now);

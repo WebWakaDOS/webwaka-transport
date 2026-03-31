@@ -66,6 +66,59 @@ npx tsc --noEmit # TypeScript strict mode check (0 errors)
 - **Cloudflare-First**: D1, KV, Workers Cron, no Vercel/AWS dependencies
 - **Zero Skipping**: No `|| true` in CI, strict TypeScript (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`)
 
+## Phase A: Critical Security + Atomicity Hardening (complete)
+
+### A-001: Payment amount mismatch now returns 402 (BUG-P0-001)
+`src/api/payments.ts` `POST /verify` — previously logged a warning and confirmed the booking anyway. Now:
+- Returns HTTP 402 with `expected_kobo` / `received_kobo` fields
+- Publishes a `payment:AMOUNT_MISMATCH` fraud event to the `platform_events` outbox for alerting
+
+### A-002: Agent sale atomically updates seat status (BUG-P0-002)
+`src/api/agent-sales.ts` `POST /transactions` — seats were never marked after a sale. Now:
+- Pre-checks that each seat exists for the given trip and is not already `confirmed` or `blocked`
+- Uses `db.batch([transactionInsert, receiptInsert, ...seatUpdates])` so the write is atomic
+
+### A-003: Trip + seat creation is now a single atomic batch (BUG-P0-003)
+`src/api/seat-inventory.ts` `POST /trips` — trip row was inserted separately before the seat batch. Now a single `db.batch([tripInsert, ...seatInserts])` call ensures no orphaned trips on partial failure.
+
+### A-004: SyncEngine uses Web Locks API for cross-tab mutual exclusion (BUG-P0-004)
+`src/core/offline/sync.ts` — the old `_isFlushing` flag was per-instance (per browser tab). Two tabs could flush simultaneously, causing duplicate mutations. Now:
+- `flush()` attempts `navigator.locks.request('webwaka-sync-lock', { ifAvailable: true }, ...)` 
+- If another tab holds the lock, the call exits immediately with an empty result
+- Falls back to the per-instance guard in environments without Web Locks (Node, older browsers)
+
+### A-005: OTP one-time-use enforcement (BUG-P1-002)
+`src/api/auth.ts` `POST /otp/verify` — the KV delete was non-fatal (`catch { /* non-fatal */ }`), allowing a second verify call to succeed with the same OTP. Now:
+- On code match, the session is overwritten in KV with `{ ...otpSession, used: true }` **before** JWT issuance
+- If the KV put fails, the request returns 500 (not silently allowed through)
+- Subsequent verify calls for the same `request_id` see `used === true` and return 400
+
+### A-006: JWT_SECRET hardcoded fallback removed (BUG-P1-004)
+`src/api/auth.ts` — removed `?? 'dev_secret_min_32_chars_placeholder!'`. Missing `JWT_SECRET` now returns HTTP 503 `"Authentication service misconfigured"`.
+
+### A-007: Receipt endpoint is tenant-scoped + GET /agents requires auth (BUG-P1-005)
+`src/api/agent-sales.ts`:
+- `GET /agents` now requires `SUPER_ADMIN | TENANT_ADMIN | STAFF | SUPERVISOR` (was unauthenticated)
+- `GET /receipts/:id` now requires the same roles and verifies the receipt's agent belongs to the caller's `operator_id` (SUPER_ADMIN bypasses)
+
+### A-008: Booking confirmation and cancellation are atomic batches (BUG-P1-001)
+`src/api/booking-portal.ts` `PATCH /bookings/:id/confirm` and `PATCH /bookings/:id/cancel`:
+- Both now use `db.batch([bookingUpdate, ...seatUpdates])` — no partial state if a seat update fails
+- Same fix applied to `confirmBookingById` in `src/api/payments.ts`
+
+### A-009: CORS no longer reflects first allowed origin for unknown origins (BUG-P1-007)
+`src/worker.ts` — `origin` callback now returns `undefined` for unlisted origins (previously returned `ALLOWED_ORIGINS[0]`, which means an attacker from any origin received `Access-Control-Allow-Origin: https://webwaka.ng`).
+
+### A-010: Soft-delete + state machine guards (BUG-P2-001, BUG-P2-002)
+- `src/api/seat-inventory.ts` `GET /trips/:id/availability` now checks `trips.deleted_at IS NULL`; returns 404 for soft-deleted trips
+- `src/api/operator-management.ts` `PATCH /trips/:id` rejects updates when trip is `in_transit`, `completed`, or `cancelled` with HTTP 409
+
+### A-011: Lat/lng range validation (BUG-P2-008)
+`src/api/operator-management.ts` `PATCH /trips/:id/location` now validates:
+- latitude ∈ [-90, 90]
+- longitude ∈ [-180, 180]
+Returns HTTP 400 for out-of-range values.
+
 ## Phase 6: Operator Context Hardening + SyncEngine Auth + Agent POS Trip Selector (complete)
 
 ### `src/core/auth/context.tsx` — SyncEngine auth wiring

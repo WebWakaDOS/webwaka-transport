@@ -96,9 +96,37 @@ export class SyncEngine {
 
   /**
    * Flush all PENDING mutations that are due for retry.
-   * Idempotent — safe to call multiple times concurrently (second call is a no-op).
+   * Cross-tab safe via Web Locks API — only one tab flushes at a time.
+   * Falls back to the per-instance _isFlushing guard in environments
+   * that do not support navigator.locks (e.g. Node test environment).
    */
   async flush(): Promise<SyncResult> {
+    // Use Web Locks API for cross-tab mutual exclusion when available
+    if (typeof navigator !== 'undefined' && navigator.locks) {
+      const acquired = await new Promise<SyncResult | null>((resolve) => {
+        navigator.locks.request(
+          'webwaka-sync-lock',
+          { ifAvailable: true },
+          async (lock) => {
+            if (!lock) {
+              // Another tab holds the lock — skip
+              resolve(null);
+              return;
+            }
+            resolve(await this._doFlush());
+          }
+        );
+      });
+      return acquired ?? { synced: 0, failed: 0, conflicts: 0, abandoned: 0 };
+    }
+
+    // Fallback: per-instance guard (SSR / Node / older browsers)
+    if (this._isFlushing) return { synced: 0, failed: 0, conflicts: 0, abandoned: 0 };
+    return this._doFlush();
+  }
+
+  /** Internal flush implementation — must only be called while holding the sync lock. */
+  private async _doFlush(): Promise<SyncResult> {
     if (this._isFlushing) return { synced: 0, failed: 0, conflicts: 0, abandoned: 0 };
     this._isFlushing = true;
 

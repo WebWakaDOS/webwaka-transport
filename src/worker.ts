@@ -64,7 +64,7 @@ const ALLOWED_ORIGINS = [
 ];
 
 app.use('*', cors({
-  origin: (origin) => ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0]!,
+  origin: (origin) => ALLOWED_ORIGINS.includes(origin) ? origin : undefined,
   allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowHeaders: ['Content-Type', 'Authorization', 'X-Tenant-ID', 'x-tenant-id'],
   credentials: true,

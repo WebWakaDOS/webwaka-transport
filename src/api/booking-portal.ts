@@ -226,16 +226,17 @@ bookingPortalRouter.patch('/bookings/:id/confirm', requireRole(['SUPER_ADMIN', '
     if (booking.status === 'confirmed') return c.json({ success: false, error: 'Already confirmed' }, 409);
     if (booking.status === 'cancelled') return c.json({ success: false, error: 'Booking is cancelled' }, 409);
 
-    await db.prepare(
-      `UPDATE bookings SET status = 'confirmed', payment_status = 'completed', confirmed_at = ? WHERE id = ?`
-    ).bind(now, id).run();
-
     const seatIds = JSON.parse(booking.seat_ids) as string[];
-    for (const seatId of seatIds) {
-      await db.prepare(
-        `UPDATE seats SET status = 'confirmed', confirmed_by = ?, confirmed_at = ?, updated_at = ? WHERE id = ?`
-      ).bind(id, now, now, seatId).run();
-    }
+    await db.batch([
+      db.prepare(
+        `UPDATE bookings SET status = 'confirmed', payment_status = 'completed', confirmed_at = ? WHERE id = ?`
+      ).bind(now, id),
+      ...seatIds.map(seatId =>
+        db.prepare(
+          `UPDATE seats SET status = ?, confirmed_by = ?, confirmed_at = ?, updated_at = ? WHERE id = ?`
+        ).bind('confirmed', id, now, now, seatId)
+      ),
+    ]);
 
     await publishEvent(db, {
       event_type: 'booking.created',
@@ -277,16 +278,17 @@ bookingPortalRouter.patch('/bookings/:id/cancel', requireRole(['SUPER_ADMIN', 'T
     if (!booking) return c.json({ success: false, error: 'Booking not found' }, 404);
     if (booking.status === 'cancelled') return c.json({ success: false, error: 'Already cancelled' }, 409);
 
-    await db.prepare(
-      `UPDATE bookings SET status = 'cancelled', cancelled_at = ? WHERE id = ?`
-    ).bind(now, id).run();
-
     const seatIds = JSON.parse(booking.seat_ids) as string[];
-    for (const seatId of seatIds) {
-      await db.prepare(
-        `UPDATE seats SET status = 'available', reserved_by = NULL, reservation_token = NULL, confirmed_by = NULL, updated_at = ? WHERE id = ?`
-      ).bind(now, seatId).run();
-    }
+    await db.batch([
+      db.prepare(
+        `UPDATE bookings SET status = 'cancelled', cancelled_at = ? WHERE id = ?`
+      ).bind(now, id),
+      ...seatIds.map(seatId =>
+        db.prepare(
+          `UPDATE seats SET status = ?, reserved_by = NULL, reservation_token = NULL, confirmed_by = NULL, updated_at = ? WHERE id = ?`
+        ).bind('available', now, seatId)
+      ),
+    ]);
 
     return c.json({ success: true, data: { id, status: 'cancelled', cancelled_at: now } });
   } catch {

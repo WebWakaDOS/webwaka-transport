@@ -18,6 +18,7 @@ function createMockDB() {
     trips: [], seats: [], operators: [], routes: [], vehicles: [],
     agents: [], sales_transactions: [], receipts: [], customers: [],
     bookings: [], trip_state_transitions: [], sync_mutations: [], drivers: [],
+    platform_events: [],
   };
 
   function matchesWhere(row: any, whereClause: string, params: any[]): boolean {
@@ -216,7 +217,8 @@ describe('TRN-1: Seat Inventory API', () => {
   });
 
   it('GET /trips/:id/availability returns seat map', async () => {
-    // Pre-populate seats
+    // Pre-populate trip and seats
+    db._tables.trips.push({ id: 'trp_1', state: 'scheduled', deleted_at: null });
     db._tables.seats.push({
       id: 's1', trip_id: 'trp_1', seat_number: '01', status: 'available',
       created_at: Date.now(), updated_at: Date.now(),
@@ -353,6 +355,9 @@ describe('TRN-2: Agent Sales API', () => {
   });
 
   it('POST /transactions creates a sale in kobo', async () => {
+    // Pre-populate seats so the availability pre-check passes
+    db._tables.seats.push({ id: 's1', trip_id: 'trp_1', status: 'available' });
+    db._tables.seats.push({ id: 's2', trip_id: 'trp_1', status: 'available' });
     const res = await agentSalesRouter.request('/transactions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

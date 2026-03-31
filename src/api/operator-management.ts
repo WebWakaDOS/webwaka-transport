@@ -373,11 +373,20 @@ operatorManagementRouter.patch('/trips/:id', requireRole(['SUPER_ADMIN', 'TENANT
   const db = c.env.DB;
   const now = Date.now();
 
+  const IMMUTABLE_STATES = ['in_transit', 'completed', 'cancelled'];
+
   try {
     const trip = await db.prepare(
       `SELECT * FROM trips WHERE id = ? AND deleted_at IS NULL`
     ).bind(id).first<DbTrip>();
     if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
+
+    if (IMMUTABLE_STATES.includes(trip.state)) {
+      return c.json({
+        success: false,
+        error: `Cannot modify a trip in '${trip.state}' state`,
+      }, 409);
+    }
 
     const { vehicle_id, departure_time, driver_id } = body as {
       vehicle_id?: string; departure_time?: number; driver_id?: string | null;
@@ -566,6 +575,12 @@ operatorManagementRouter.patch('/trips/:id/location', requireRole(['SUPER_ADMIN'
 
   if (typeof latitude !== 'number' || typeof longitude !== 'number') {
     return c.json({ success: false, error: 'latitude and longitude required as numbers' }, 400);
+  }
+  if (latitude < -90 || latitude > 90) {
+    return c.json({ success: false, error: 'latitude must be between -90 and 90' }, 400);
+  }
+  if (longitude < -180 || longitude > 180) {
+    return c.json({ success: false, error: 'longitude must be between -180 and 180' }, 400);
   }
 
   const db = c.env.DB;

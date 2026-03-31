@@ -73,18 +73,21 @@ seatInventoryRouter.post('/trips', async (c) => {
   const now = Date.now();
 
   try {
-    await db.prepare(
-      `INSERT INTO trips (id, operator_id, route_id, vehicle_id, departure_time, state, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?)`
-    ).bind(id, operator_id, route_id, vehicle_id, departure_time, now, now).run();
-
     const seatStmt = db.prepare(
       `INSERT INTO seats (id, trip_id, seat_number, status, version, created_at, updated_at) VALUES (?, ?, ?, 'available', 0, ?, ?)`
     );
-    const seatBatch = Array.from({ length: total_seats }, (_, i) =>
+    const seatInserts = Array.from({ length: total_seats }, (_, i) =>
       seatStmt.bind(`${id}_s${i + 1}`, id, String(i + 1).padStart(2, '0'), now, now)
     );
-    await db.batch(seatBatch);
+
+    // Single atomic batch: trip row + all seat rows together
+    await db.batch([
+      db.prepare(
+        `INSERT INTO trips (id, operator_id, route_id, vehicle_id, departure_time, state, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?)`
+      ).bind(id, operator_id, route_id, vehicle_id, departure_time, now, now),
+      ...seatInserts,
+    ]);
 
     return c.json({ success: true, data: { id, operator_id, route_id, total_seats, state: 'scheduled' } }, 201);
   } catch {
@@ -101,6 +104,11 @@ seatInventoryRouter.get('/trips/:id/availability', async (c) => {
   const now = Date.now();
 
   try {
+    const trip = await db.prepare(
+      `SELECT id FROM trips WHERE id = ? AND deleted_at IS NULL`
+    ).bind(tripId).first<{ id: string }>();
+    if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
+
     await db.prepare(
       `UPDATE seats SET status = 'available', reserved_by = NULL, reservation_token = NULL, reservation_expires_at = NULL
        WHERE trip_id = ? AND status = 'reserved' AND reservation_expires_at < ?`
