@@ -36,6 +36,7 @@
     "@webwaka/core": "file:packages/core",
     "dexie": "^4.4.1",
     "hono": "^4.12.9",
+    "jsqr": "^1.4.0",
     "qrcode": "^1.5.4",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"

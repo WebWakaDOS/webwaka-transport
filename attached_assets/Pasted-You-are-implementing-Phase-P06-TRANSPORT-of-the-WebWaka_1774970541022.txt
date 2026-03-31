@@ -1,0 +1,70 @@
+You are implementing Phase P06-TRANSPORT of the WebWaka platform.
+Target repo: webwaka-transport
+
+This phase completes the Driver Mobile Experience — a full driver-facing view that packages all P05 endpoints into a usable mobile interface. Read webwaka-implementation-plan.md for full context.
+
+=== TASK P06-T1: Complete Driver View ===
+
+File: src/components/driver-view.tsx (extend existing component)
+File: src/app.tsx (ensure DRIVER role routes correctly)
+
+The DriverView must have these five tabs/sections. Build each as a sub-component:
+
+1. MY TRIPS TAB (DriverTripList):
+- Fetches GET /api/operator/trips?driver_id=me
+- Lists trips with state badges (scheduled/boarding/in_transit/completed)
+- Tapping a trip navigates to Trip Detail view
+- Shows departure time, route, vehicle plate, seat count
+
+2. TRIP DETAIL VIEW (DriverTripDetail):
+- Shows full trip info
+- If trip state = 'scheduled': shows "Start Inspection" button → opens inspection form
+- If trip state = 'boarding': shows "Scan Boarding Pass" and "View Manifest" buttons
+- If trip state = 'in_transit': shows GPS share toggle and "Report Delay" button
+- Shows inspection status badge: ✓ Inspected or ⚠ Not Inspected
+
+3. INSPECTION FORM (DriverInspectionForm):
+- Checkbox list: Tires OK, Brakes OK, Lights OK, Fuel Adequate, Emergency Equipment Present
+- Notes text field (optional)
+- Manifest Count number field
+- All checkboxes must be checked before submit button activates
+- On submit: POST /api/operator/trips/:id/inspection
+- On success: navigate back to Trip Detail showing ✓ Inspected badge
+
+4. BOARDING SCAN (DriverBoardingScan):
+- Camera QR scanner using getUserMedia + a lightweight QR decode library (install jsQR: npm install jsqr)
+- Opens camera feed, decodes QR in real time
+- On decode: POST /api/operator/trips/:id/board with { qr_payload: decoded_string }
+- On 200: show green success card with passenger name and seat number for 2 seconds, then re-open scanner
+- On 409 (already boarded): show amber warning card "Already boarded at {time}"
+- On 404 (invalid ticket): show red error card "Invalid ticket for this trip"
+- Shows running counter: "18 / 45 boarded" — updates after each scan
+- Works offline: if network is down, queue the boarding scan in Dexie mutations table for sync
+
+5. GPS SHARE TOGGLE (DriverLocationShare):
+- Toggle button: "Share Location" (off by default)
+- When toggled on: request Geolocation permission (navigator.geolocation.watchPosition)
+- On each position update: POST /api/operator/trips/:id/location
+- Shows current coordinates and last update time
+- When toggled off: clears the watch
+- On geolocation permission denied: shows error "Please enable location access in browser settings"
+
+6. SOS BUTTON (DriverSOS):
+- Prominent red button labeled "🚨 Emergency SOS"
+- Shows a confirmation dialog: "This will alert your operator and emergency contacts. Confirm?" with Cancel / SEND SOS buttons
+- On confirm: POST /api/operator/trips/:id/sos
+- After activation: shows full-screen red "SOS ACTIVE" banner that cannot be dismissed by the driver (only supervisor can clear it)
+- If SOS is already active (from GET /api/operator/trips/:id showing sos_active=1): show the banner immediately on load
+
+7. DELAY REPORT (DriverDelayReport):
+- Dropdown for reason_code (Traffic, Breakdown, Weather, Accident, Fuel, Other)
+- Time picker for estimated_departure_ms
+- Optional details text field
+- Submit calls POST /api/operator/trips/:id/delay
+
+In src/app.tsx: ensure that users with role='DRIVER' are routed to DriverView on login. DRIVER role should not see the operator admin dashboard.
+
+All network calls from the driver view should handle offline gracefully: show a "You are offline — this will sync when connected" message where the action cannot be queued.
+
+=== DONE ===
+Run tsc --noEmit. Test on a mobile-sized viewport. Confirm the QR scanner works in the browser (getUserMedia requires HTTPS — in dev, Replit's proxy handles this). Confirm the GPS share toggle requests permission and calls the location endpoint.

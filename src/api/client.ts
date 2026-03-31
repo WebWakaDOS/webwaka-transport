@@ -154,6 +154,54 @@ export interface Trip {
   available_seats?: number;
 }
 
+export interface TripDetail extends Trip {
+  // P05 fields returned by GET /api/operator/trips/:id
+  current_latitude: number | null;
+  current_longitude: number | null;
+  location_updated_at: number | null;
+  sos_active: number;
+  sos_triggered_at: number | null;
+  sos_triggered_by: string | null;
+  inspection_completed_at: number | null;
+  delay_reason_code: string | null;
+  delay_reported_at: number | null;
+  estimated_departure_ms: number | null;
+}
+
+export interface BoardingStatus {
+  total_confirmed: number;
+  total_boarded: number;
+  remaining: number;
+  last_boarded_at: number | null;
+}
+
+export interface InspectionRecord {
+  id: string;
+  trip_id: string;
+  inspected_by: string;
+  tires_ok: number;
+  brakes_ok: number;
+  lights_ok: number;
+  fuel_ok: number;
+  emergency_equipment_ok: number;
+  manifest_count: number | null;
+  notes: string | null;
+  created_at: number;
+}
+
+export interface DelayInfo {
+  delay_reason_code: string | null;
+  delay_reported_at: number | null;
+  estimated_departure_ms: number | null;
+}
+
+export interface BoardResult {
+  passenger_names: string[];
+  seat_numbers: string;
+  boarded_at: number;
+  message: string;
+}
+
 export interface OperatorStats {
   trips: Record<string, number>;
   today_revenue_kobo: number;
@@ -613,6 +661,65 @@ export class ApiClient {
 
   async markPassengerBoarded(tripId: string, bookingId: string): Promise<void> {
     await this.request('PATCH', `/api/operator/trips/${tripId}/manifest/${bookingId}/board`, {});
+  }
+
+  // ---- P06: Extended Driver API ----
+
+  async getTrip(tripId: string): Promise<TripDetail> {
+    const res = await this.request<{ data: TripDetail }>('GET', `/api/operator/trips/${tripId}`);
+    return res.data;
+  }
+
+  async updateTripLocation(tripId: string, lat: number, lng: number, accuracy?: number): Promise<void> {
+    await this.request('POST', `/api/operator/trips/${tripId}/location`, {
+      latitude: lat, longitude: lng, accuracy_meters: accuracy,
+    });
+  }
+
+  async triggerSOS(tripId: string): Promise<{ message: string }> {
+    return this.request('POST', `/api/operator/trips/${tripId}/sos`, {});
+  }
+
+  async clearSOS(tripId: string): Promise<{ message: string }> {
+    return this.request('POST', `/api/operator/trips/${tripId}/sos/clear`, {});
+  }
+
+  async submitInspection(tripId: string, data: {
+    tires_ok: boolean; brakes_ok: boolean; lights_ok: boolean;
+    fuel_ok: boolean; emergency_equipment_ok: boolean;
+    manifest_count?: number; notes?: string;
+  }): Promise<{ data: InspectionRecord }> {
+    return this.request('POST', `/api/operator/trips/${tripId}/inspection`, data);
+  }
+
+  async getInspection(tripId: string): Promise<InspectionRecord | null> {
+    const res = await this.request<{ data: InspectionRecord | null }>('GET', `/api/operator/trips/${tripId}/inspection`);
+    return res.data;
+  }
+
+  async boardByQR(tripId: string, qrPayload: string): Promise<BoardResult> {
+    const res = await this.request<{ data: BoardResult }>('POST', `/api/operator/trips/${tripId}/board`, { qr_payload: qrPayload });
+    return res.data;
+  }
+
+  async getBoardingStatus(tripId: string): Promise<BoardingStatus> {
+    const res = await this.request<{ data: BoardingStatus }>('GET', `/api/operator/trips/${tripId}/boarding-status`);
+    return res.data;
+  }
+
+  async reportDelay(tripId: string, data: {
+    reason_code: string; estimated_departure_ms: number; reason_details?: string;
+  }): Promise<void> {
+    await this.request('POST', `/api/operator/trips/${tripId}/delay`, data);
+  }
+
+  async getDelay(tripId: string): Promise<DelayInfo | null> {
+    const res = await this.request<{ data: DelayInfo | null }>('GET', `/api/operator/trips/${tripId}/delay`);
+    return res.data;
+  }
+
+  async transitionTripState(tripId: string, toState: string, reason?: string): Promise<void> {
+    await this.request('POST', `/api/operator/trips/${tripId}/transition`, { to_state: toState, reason });
   }
 
   // ---- C-007: AI Natural Language Trip Search ----
