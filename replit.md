@@ -371,6 +371,39 @@ Added to `MIGRATIONS` array in `src/api/admin.ts`: `idx_routes_operator_id`, `id
 - **Schema hardening**: `customers.operator_id NOT NULL` removed (customers are cross-tenant); `bookings` gets `payment_provider`/`paid_at`; `sales_transactions` gets `deleted_at`; `drivers` table added. All handled by migration 005.
 - **`@webwaka/core` resolution**: `packages/core/package.json` exports fixed (`.js` → `.ts`); `vitest.config.ts` has `resolve.alias` pointing to TypeScript source. Was the root cause of all test failures.
 
+## Phase E — Multi-Currency Support (complete)
+
+### E-001: Multi-currency Core (`src/core/i18n/index.ts`)
+- Added `CurrencyCode` type: `'NGN' | 'GHS' | 'KES' | 'UGX' | 'RWF'`
+- Added `CurrencyConfig` interface with `code`, `symbol`, `subunitFactor`, `locale`, `flag`, `name`, `fractionDigits`
+- `CURRENCY_CONFIG` table: NGN `₦` (factor 100, 2dp) · GHS `₵` (factor 100, 2dp) · KES `KSh` (factor 100, 2dp) · UGX `USh` (factor 1, 0dp) · RWF `RWF` (factor 1, 0dp)
+- `formatAmount(subunits, currency?)` — formats stored sub-unit integer for display; defaults to `getCurrency()` when no currency passed
+- `getCurrency() / setCurrency()` — module-level state + `trn_currency` localStorage key; same pattern as language
+- `getSupportedCurrencies()` — returns all 5 `CurrencyConfig` objects (flag, symbol, name, etc.)
+- `formatKoboToNaira` kept as backward-compat alias that always calls `formatAmount(kobo, 'NGN')`
+
+### E-002: Currency Selector UI (`src/app.tsx`)
+- Imported `formatAmount, setCurrency, getCurrency, getSupportedCurrencies, CurrencyCode` from i18n
+- Added `currency` state (`useState<CurrencyCode>(getCurrency())`) to `AppContent`
+- Added `handleCurrencyChange` handler (calls `setCurrency` + updates React state → full re-render)
+- `StatusBar` now accepts `currency` + `onCurrencyChange` props; renders a compact flag+code `<select>` (e.g. `🇳🇬 NGN`) alongside the existing language picker
+- All 13 in-file `formatKoboToNaira` calls replaced with `formatAmount`
+
+### E-003: Currency-aware Components
+- `src/components/analytics.tsx` — all revenue cards and agent breakdown table use `formatAmount`
+- `src/components/booking-flow.tsx` — fare display, total, confirm screen, pay button, ticket amount use `formatAmount`
+- `src/components/driver-view.tsx` — import updated to `formatAmount`
+- Zero prop changes needed: `formatAmount()` reads current currency from module state at render time
+
+### E-004: i18n Multi-currency Tests (24 new tests, now 333 total)
+- 4 tests per currency (NGN, GHS, KES, UGX, RWF) covering symbol, conversion, fraction digits
+- `formatAmount` defaulting to current currency, explicit override
+- `getCurrency / setCurrency` — default NGN, persistence across calls
+- `getSupportedCurrencies` — length 5, all codes present, config shape valid, NGN/GHS/KES=2dp, UGX/RWF=0dp
+
+### E-005: Component Test Mock Updates
+- `analytics.test.tsx` and `driver-view.test.tsx` mocks now export both `formatKoboToNaira` and `formatAmount`
+
 ## Phase D — Flutterwave + React Component Tests (complete)
 
 ### D-001: Flutterwave Payment Integration

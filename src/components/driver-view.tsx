@@ -7,7 +7,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { api, ApiError } from '../api/client';
 import type { Trip, TripManifest, ManifestEntry } from '../api/client';
-import { formatKoboToNaira } from '../core/i18n/index';
+import { formatAmount } from '../core/i18n/index';
 
 // ============================================================
 // Sub-components

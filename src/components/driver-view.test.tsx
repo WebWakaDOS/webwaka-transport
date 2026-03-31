@@ -26,6 +26,7 @@ vi.mock('../api/client', () => ({
 
 vi.mock('../core/i18n/index', () => ({
   formatKoboToNaira: (kobo: number) => `₦${(kobo / 100).toFixed(2)}`,
+  formatAmount: (kobo: number, _currency?: string) => `₦${(kobo / 100).toFixed(2)}`,
   t: (key: string) => key,
 }));
 

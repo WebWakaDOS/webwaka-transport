@@ -4,7 +4,7 @@
  * Invariants: Mobile-First, PWA-First, Offline-First, Nigeria-First (₦), Africa-First (4 languages)
  */
 import React, { Component, useState, useEffect, useCallback } from 'react';
-import { t, setLanguage, getLanguage, getSupportedLanguages, formatKoboToNaira, type Language } from './core/i18n/index';
+import { t, setLanguage, getLanguage, getSupportedLanguages, formatAmount, setCurrency, getCurrency, getSupportedCurrencies, type Language, type CurrencyCode } from './core/i18n/index';
 import { useOnlineStatus, useSyncQueue } from './core/offline/hooks';
 import { AuthProvider, useAuth, type WakaRole } from './core/auth/context';
 import { LoginScreen } from './components/login-screen';
@@ -54,8 +54,10 @@ class ErrorBoundary extends Component<React.PropsWithChildren<{ label: string }>
 // ============================================================
 // Status Bar
 // ============================================================
-function StatusBar({ online, pendingSync, syncing, lang, onLangChange }: {
-  online: boolean; pendingSync: number; syncing: boolean; lang: Language; onLangChange: (l: Language) => void;
+function StatusBar({ online, pendingSync, syncing, lang, onLangChange, currency, onCurrencyChange }: {
+  online: boolean; pendingSync: number; syncing: boolean;
+  lang: Language; onLangChange: (l: Language) => void;
+  currency: CurrencyCode; onCurrencyChange: (c: CurrencyCode) => void;
 }) {
   return (
     <div style={{
@@ -66,15 +68,28 @@ function StatusBar({ online, pendingSync, syncing, lang, onLangChange }: {
       <span>{online ? `● ${t('online')}` : `○ ${t('offline')}`}</span>
       {syncing && <span>↻ {t('syncing') ?? 'Syncing…'}</span>}
       {!syncing && pendingSync > 0 && <span>⟳ {pendingSync} {t('pending_sync')}</span>}
-      <select
-        value={lang}
-        onChange={e => onLangChange(e.target.value as Language)}
-        style={{ background: 'transparent', color: '#fff', border: 'none', fontSize: 11, cursor: 'pointer' }}
-      >
-        {getSupportedLanguages().map(l => (
-          <option key={l.code} value={l.code} style={{ color: '#000' }}>{l.name}</option>
-        ))}
-      </select>
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+        <select
+          value={currency}
+          onChange={e => onCurrencyChange(e.target.value as CurrencyCode)}
+          style={{ background: 'transparent', color: '#fff', border: 'none', fontSize: 11, cursor: 'pointer' }}
+          aria-label="Currency"
+        >
+          {getSupportedCurrencies().map(c => (
+            <option key={c.code} value={c.code} style={{ color: '#000' }}>{c.flag} {c.code}</option>
+          ))}
+        </select>
+        <select
+          value={lang}
+          onChange={e => onLangChange(e.target.value as Language)}
+          style={{ background: 'transparent', color: '#fff', border: 'none', fontSize: 11, cursor: 'pointer' }}
+          aria-label="Language"
+        >
+          {getSupportedLanguages().map(l => (
+            <option key={l.code} value={l.code} style={{ color: '#000' }}>{l.name}</option>
+          ))}
+        </select>
+      </div>
     </div>
   );
 }
@@ -190,7 +205,7 @@ function TripSearchModule() {
               {new Date(trip.departure_time).toLocaleString('en-NG')} · {trip.operator_name}
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8 }}>
-              <span style={{ color: '#16a34a', fontWeight: 700 }}>{formatKoboToNaira(trip.base_fare)}</span>
+              <span style={{ color: '#16a34a', fontWeight: 700 }}>{formatAmount(trip.base_fare)}</span>
               <span style={{ fontSize: 12, color: '#64748b' }}>{trip.available_seats} {t('available_seats')}</span>
             </div>
           </div>
@@ -307,7 +322,7 @@ function AgentPOSModule({ online }: { online: boolean }) {
         <div style={{ ...cardStyle, background: '#f0fdf4', borderColor: '#16a34a', marginBottom: 16, cursor: 'default' }}>
           <div style={{ fontWeight: 700, color: '#16a34a' }}>✓ {t('sale_complete')}</div>
           <div style={{ fontSize: 13, marginTop: 4 }}>
-            {t('fare')}: {formatKoboToNaira(lastReceipt.total_amount)} · {lastReceipt.payment_method}
+            {t('fare')}: {formatAmount(lastReceipt.total_amount)} · {lastReceipt.payment_method}
           </div>
           <div style={{ fontSize: 12, color: '#64748b' }}>Receipt: {lastReceipt.receipt_id}</div>
         </div>
@@ -453,7 +468,7 @@ function OperatorOverview({ onNav }: { onNav: (v: OperatorView) => void }) {
             {stats?.today_revenue_kobo != null && (
               <div style={{ ...cardStyle, borderLeft: '4px solid #16a34a', cursor: 'default', gridColumn: 'span 2' }}>
                 <div style={{ fontSize: 18, fontWeight: 800, color: '#16a34a' }}>
-                  {formatKoboToNaira(stats.today_revenue_kobo)}
+                  {formatAmount(stats.today_revenue_kobo)}
                 </div>
                 <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>Today's Revenue</div>
               </div>
@@ -571,7 +586,7 @@ function RoutesPanel({ onBack }: { onBack: () => void }) {
           <div key={r.id} style={{ ...cardStyle, cursor: 'default' }}>
             <div style={{ fontWeight: 700 }}>{r.origin} → {r.destination}</div>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, alignItems: 'center' }}>
-              <span style={{ color: '#16a34a', fontWeight: 700 }}>{formatKoboToNaira(r.base_fare)}</span>
+              <span style={{ color: '#16a34a', fontWeight: 700 }}>{formatAmount(r.base_fare)}</span>
               <span style={{
                 fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 12,
                 background: r.status === 'active' ? '#dcfce7' : '#f1f5f9',
@@ -854,7 +869,7 @@ function TripsPanel({ onBack }: { onBack: () => void }) {
             >
               <option value="">-- Select Route --</option>
               {routes.map(r => (
-                <option key={r.id} value={r.id}>{r.origin} → {r.destination} · {formatKoboToNaira(r.base_fare)}</option>
+                <option key={r.id} value={r.id}>{r.origin} → {r.destination} · {formatAmount(r.base_fare)}</option>
               ))}
             </select>
             <select
@@ -920,7 +935,7 @@ function TripsPanel({ onBack }: { onBack: () => void }) {
               </div>
               <div style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>
                 {trip.available_seats ?? '—'} available
-                {trip.base_fare != null && ` · ${formatKoboToNaira(trip.base_fare)}`}
+                {trip.base_fare != null && ` · ${formatAmount(trip.base_fare)}`}
               </div>
               {drivers.length > 0 && (
                 <select
@@ -1034,7 +1049,7 @@ function ManifestPanel({ manifest }: { manifest: TripManifest }) {
           ({summary.load_factor}% load)
         </span>
         <span style={{ color: '#16a34a', fontWeight: 700 }}>
-          {formatKoboToNaira(summary.confirmed_revenue_kobo)} collected
+          {formatAmount(summary.confirmed_revenue_kobo)} collected
         </span>
       </div>
       {passengers.length === 0 ? (
@@ -1062,7 +1077,7 @@ function ManifestPanel({ manifest }: { manifest: TripManifest }) {
               )}
             </div>
             <div style={{ fontSize: 11, color: '#64748b', marginTop: 1 }}>
-              {formatKoboToNaira(p.total_amount)} · #{p.booking_id.slice(-8)}
+              {formatAmount(p.total_amount)} · #{p.booking_id.slice(-8)}
             </div>
           </div>
         ))
@@ -1394,15 +1409,15 @@ function ReportsPanel({ onBack }: { onBack: () => void }) {
         <>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 16 }}>
             <div style={{ ...cardStyle, cursor: 'default', borderLeft: '4px solid #16a34a' }}>
-              <div style={{ fontSize: 18, fontWeight: 800, color: '#16a34a' }}>{formatKoboToNaira(report.total_revenue_kobo)}</div>
+              <div style={{ fontSize: 18, fontWeight: 800, color: '#16a34a' }}>{formatAmount(report.total_revenue_kobo)}</div>
               <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>Total Revenue</div>
             </div>
             <div style={{ ...cardStyle, cursor: 'default', borderLeft: '4px solid #2563eb' }}>
-              <div style={{ fontSize: 18, fontWeight: 800, color: '#2563eb' }}>{formatKoboToNaira(report.booking_revenue_kobo)}</div>
+              <div style={{ fontSize: 18, fontWeight: 800, color: '#2563eb' }}>{formatAmount(report.booking_revenue_kobo)}</div>
               <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>Online Bookings</div>
             </div>
             <div style={{ ...cardStyle, cursor: 'default', borderLeft: '4px solid #d97706' }}>
-              <div style={{ fontSize: 18, fontWeight: 800, color: '#d97706' }}>{formatKoboToNaira(report.agent_sales_revenue_kobo)}</div>
+              <div style={{ fontSize: 18, fontWeight: 800, color: '#d97706' }}>{formatAmount(report.agent_sales_revenue_kobo)}</div>
               <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>Agent Sales</div>
             </div>
             <div style={{ ...cardStyle, cursor: 'default', borderLeft: '4px solid #7c3aed' }}>
@@ -1530,7 +1545,7 @@ function MyBookingsModule() {
               )}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
                 <div style={{ fontSize: 15, fontWeight: 700, color: '#16a34a' }}>
-                  {formatKoboToNaira(bkg.total_amount)}
+                  {formatAmount(bkg.total_amount)}
                 </div>
                 {bkg.status === 'pending' && (
                   <button
@@ -1575,7 +1590,7 @@ function MyBookingsModule() {
                         <span style={{ fontWeight: 600 }}>{safeSeatIds.map(s => s.split('_s')[1] ?? s).join(', ')}</span>
                       </>}
                       <span style={{ color: '#64748b' }}>Amount</span>
-                      <span style={{ fontWeight: 600, color: '#16a34a' }}>{formatKoboToNaira(bkg.total_amount)}</span>
+                      <span style={{ fontWeight: 600, color: '#16a34a' }}>{formatAmount(bkg.total_amount)}</span>
                       <span style={{ color: '#64748b' }}>Payment</span>
                       <span style={{ fontWeight: 600 }}>{bkg.payment_status} · {bkg.payment_method}</span>
                       {bkg.payment_reference && <>
@@ -1745,6 +1760,7 @@ function AppContent() {
   const { user, isAuthenticated, isLoading, logout, hasRole } = useAuth();
   const [tab, setTab] = useState<Tab>('search');
   const [lang, setLang] = useState<Language>(getLanguage());
+  const [currency, setCurrencyState] = useState<CurrencyCode>(getCurrency());
   const [conflictCount, setConflictCount] = useState(0);
   const [showConflicts, setShowConflicts] = useState(false);
   const online = useOnlineStatus();
@@ -1812,6 +1828,11 @@ function AppContent() {
     setLang(l);
   };
 
+  const handleCurrencyChange = (c: CurrencyCode) => {
+    setCurrency(c);
+    setCurrencyState(c);
+  };
+
   if (isLoading) {
     return (
       <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'system-ui, sans-serif' }}>
@@ -1853,7 +1874,7 @@ function AppContent() {
 
   return (
     <div data-testid="transport-app" style={{ maxWidth: 430, margin: '0 auto', minHeight: '100vh', display: 'flex', flexDirection: 'column', fontFamily: 'system-ui, sans-serif', background: '#f8fafc' }}>
-      <StatusBar online={online} pendingSync={pendingSync} syncing={isSyncing} lang={lang} onLangChange={handleLangChange} />
+      <StatusBar online={online} pendingSync={pendingSync} syncing={isSyncing} lang={lang} onLangChange={handleLangChange} currency={currency} onCurrencyChange={handleCurrencyChange} />
 
       {/* C-003: Conflict resolution panel (slide-in on badge click) */}
       {showConflicts && hasRole(CONFLICT_ROLES) && (

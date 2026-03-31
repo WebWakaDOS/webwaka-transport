@@ -284,8 +284,68 @@ export function getSupportedLanguages(): Array<{ code: Language; name: string }>
   ];
 }
 
-/** Nigeria-First: format kobo integer as ₦ naira string */
+// ============================================================
+// Multi-Currency — Phase E
+// Supported markets: Nigeria, Ghana, Kenya, Uganda, Rwanda
+// All stored amounts are in the smallest sub-unit × subunitFactor.
+//   NGN: 100 kobo = 1 naira   GHS: 100 pesewa = 1 cedi
+//   KES: 100 cents = 1 shilling
+//   UGX/RWF: no sub-unit (factor 1, fractionDigits 0)
+// ============================================================
+
+export type CurrencyCode = 'NGN' | 'GHS' | 'KES' | 'UGX' | 'RWF';
+
+export interface CurrencyConfig {
+  code: CurrencyCode;
+  symbol: string;
+  subunitFactor: number;
+  locale: string;
+  flag: string;
+  name: string;
+  fractionDigits: number;
+}
+
+const CURRENCY_CONFIG: Record<CurrencyCode, CurrencyConfig> = {
+  NGN: { code: 'NGN', symbol: '₦',    subunitFactor: 100, locale: 'en-NG', flag: '🇳🇬', name: 'Nigerian Naira',    fractionDigits: 2 },
+  GHS: { code: 'GHS', symbol: '₵',    subunitFactor: 100, locale: 'en-GH', flag: '🇬🇭', name: 'Ghanaian Cedi',     fractionDigits: 2 },
+  KES: { code: 'KES', symbol: 'KSh',  subunitFactor: 100, locale: 'en-KE', flag: '🇰🇪', name: 'Kenyan Shilling',   fractionDigits: 2 },
+  UGX: { code: 'UGX', symbol: 'USh',  subunitFactor: 1,   locale: 'en-UG', flag: '🇺🇬', name: 'Ugandan Shilling',  fractionDigits: 0 },
+  RWF: { code: 'RWF', symbol: 'RWF ', subunitFactor: 1,   locale: 'en-RW', flag: '🇷🇼', name: 'Rwandan Franc',     fractionDigits: 0 },
+};
+
+function readStoredCurrency(): CurrencyCode {
+  try { return (localStorage?.getItem('trn_currency') as CurrencyCode) ?? 'NGN'; } catch { return 'NGN'; }
+}
+let currentCurrency: CurrencyCode = readStoredCurrency();
+
+export function setCurrency(currency: CurrencyCode): void {
+  currentCurrency = currency;
+  try { localStorage?.setItem('trn_currency', currency); } catch { /* SSR */ }
+}
+
+export function getCurrency(): CurrencyCode {
+  return currentCurrency;
+}
+
+export function getSupportedCurrencies(): Array<CurrencyConfig> {
+  return Object.values(CURRENCY_CONFIG);
+}
+
+/**
+ * Format a stored sub-unit integer for display in the given (or current) currency.
+ * e.g. formatAmount(500000, 'NGN') → '₦5,000.00'
+ *      formatAmount(10000,  'UGX') → 'USh10,000'
+ */
+export function formatAmount(subunits: number, currency?: CurrencyCode): string {
+  const cfg = CURRENCY_CONFIG[currency ?? currentCurrency];
+  const amount = subunits / cfg.subunitFactor;
+  return `${cfg.symbol}${amount.toLocaleString(cfg.locale, {
+    minimumFractionDigits: cfg.fractionDigits,
+    maximumFractionDigits: cfg.fractionDigits,
+  })}`;
+}
+
+/** Backward-compatible alias — always displays in NGN (kobo → naira). */
 export function formatKoboToNaira(kobo: number): string {
-  const naira = kobo / 100;
-  return `₦${naira.toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return formatAmount(kobo, 'NGN');
 }

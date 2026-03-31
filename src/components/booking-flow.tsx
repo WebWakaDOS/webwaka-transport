@@ -7,7 +7,7 @@ import React, { useState, useCallback } from 'react';
 import { SeatMap } from './seat-map';
 import { api, ApiError } from '../api/client';
 import type { TripSummary, Booking } from '../api/client';
-import { formatKoboToNaira } from '../core/i18n/index';
+import { formatAmount } from '../core/i18n/index';
 import { useAuth } from '../core/auth/context';
 
 type Step = 'seats' | 'customer' | 'confirm' | 'ticket';
@@ -46,7 +46,7 @@ function StepSeats({ trip, onNext, onBack }: {
           </div>
         </div>
         <div style={{ fontWeight: 800, color: '#16a34a', fontSize: 16 }}>
-          {formatKoboToNaira(trip.base_fare)}
+          {formatAmount(trip.base_fare)}
         </div>
       </div>
 
@@ -62,7 +62,7 @@ function StepSeats({ trip, onNext, onBack }: {
               {selectedSeats.length} seat{selectedSeats.length > 1 ? 's' : ''}
             </span>
             <span style={{ fontWeight: 800, color: '#1e40af', fontSize: 15 }}>
-              {formatKoboToNaira(trip.base_fare * selectedSeats.length)}
+              {formatAmount(trip.base_fare * selectedSeats.length)}
             </span>
           </div>
         </div>
@@ -323,7 +323,7 @@ function StepConfirm({ trip, selectedSeats, customerId, passengerNames, onSucces
         </div>
 
         <div style={{ background: '#f8fafc', borderRadius: 10, padding: '12px 14px', fontSize: 13, color: '#475569', marginBottom: 20 }}>
-          <div><strong>Amount:</strong> {formatKoboToNaira(totalKobo)}</div>
+          <div><strong>Amount:</strong> {formatAmount(totalKobo)}</div>
           <div style={{ marginTop: 4, wordBreak: 'break-all' }}>
             <strong>Reference:</strong> <code style={{ fontSize: 11 }}>{awaiting.reference}</code>
           </div>
@@ -373,7 +373,7 @@ function StepConfirm({ trip, selectedSeats, customerId, passengerNames, onSucces
           <div>🚌 {trip.operator_name}</div>
           <div>💺 {selectedSeats.length} seat{selectedSeats.length > 1 ? 's' : ''}</div>
           <div style={{ marginTop: 4, fontSize: 20, fontWeight: 800, color: '#16a34a' }}>
-            {formatKoboToNaira(totalKobo)}
+            {formatAmount(totalKobo)}
           </div>
         </div>
       </div>
@@ -418,7 +418,7 @@ function StepConfirm({ trip, selectedSeats, customerId, passengerNames, onSucces
         disabled={busy}
         style={{ ...primaryBtnStyle, width: '100%', opacity: busy ? 0.6 : 1 }}
       >
-        {busy ? 'Processing…' : `Pay ${formatKoboToNaira(totalKobo)}`}
+        {busy ? 'Processing…' : `Pay ${formatAmount(totalKobo)}`}
       </button>
 
       <p style={{ fontSize: 11, color: '#94a3b8', textAlign: 'center', marginTop: 10 }}>
@@ -471,7 +471,7 @@ function TicketView({ booking, onDone }: { booking: Booking; onDone: () => void 
           <TicketRow
             icon="₦"
             label="Total paid"
-            value={formatKoboToNaira(booking.total_amount)}
+            value={formatAmount(booking.total_amount)}
             highlight
           />
         </div>

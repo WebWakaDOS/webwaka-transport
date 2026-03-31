@@ -5,7 +5,7 @@
  * Invariants: Nigeria-First (₦), Mobile-First, Offline-First (5-min IndexedDB cache)
  */
 import React, { useState, useEffect, useCallback } from 'react';
-import { formatKoboToNaira } from '../core/i18n/index';
+import { formatAmount } from '../core/i18n/index';
 import { api, ApiError } from '../api/client';
 import type { RevenueReport } from '../api/client';
 
@@ -48,7 +48,7 @@ function HorizontalBar({ label, value, max, color }: { label: string; value: num
     <div style={{ marginBottom: 12 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 4 }}>
         <span style={{ color: '#0f172a', fontWeight: 500 }}>{label}</span>
-        <span style={{ color: '#64748b' }}>{formatKoboToNaira(value)}</span>
+        <span style={{ color: '#64748b' }}>{formatAmount(value)}</span>
       </div>
       <div style={{ height: 8, background: '#f1f5f9', borderRadius: 4, overflow: 'hidden' }}>
         <div style={{ width: `${pct}%`, height: '100%', background: color, borderRadius: 4, transition: 'width 0.4s ease' }} />
@@ -224,9 +224,9 @@ export function AnalyticsDashboard() {
         <>
           {/* KPI Cards */}
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
-            <StatCard label="Total Revenue" value={formatKoboToNaira(report.total_revenue_kobo)} />
-            <StatCard label="Booking Revenue" value={formatKoboToNaira(report.booking_revenue_kobo)} sub={`${report.total_bookings} bookings`} />
-            <StatCard label="Agent Sales" value={formatKoboToNaira(report.agent_sales_revenue_kobo)} sub={`${report.total_agent_transactions} transactions`} />
+            <StatCard label="Total Revenue" value={formatAmount(report.total_revenue_kobo)} />
+            <StatCard label="Booking Revenue" value={formatAmount(report.booking_revenue_kobo)} sub={`${report.total_bookings} bookings`} />
+            <StatCard label="Agent Sales" value={formatAmount(report.agent_sales_revenue_kobo)} sub={`${report.total_agent_transactions} transactions`} />
           </div>
 
           {/* Daily Revenue Bar Chart */}
@@ -271,7 +271,7 @@ export function AnalyticsDashboard() {
                   {report.agent_breakdown.map((a, i) => (
                     <tr key={a.agent_id ?? i} style={{ borderBottom: '1px solid #f1f5f9' }}>
                       <td style={{ padding: '8px 8px', color: '#0f172a' }}>{a.agent_name ?? a.agent_id}</td>
-                      <td style={{ padding: '8px 8px', textAlign: 'right', fontWeight: 600 }}>{formatKoboToNaira(a.total_kobo)}</td>
+                      <td style={{ padding: '8px 8px', textAlign: 'right', fontWeight: 600 }}>{formatAmount(a.total_kobo)}</td>
                       <td style={{ padding: '8px 8px', textAlign: 'right', color: '#64748b' }}>{a.transaction_count}</td>
                     </tr>
                   ))}
