@@ -1980,6 +1980,148 @@ describe('Paystack Payments API', () => {
     expect(body.success).toBe(false);
     expect(body.error).toMatch(/cancelled/i);
   });
+
+  // ── Flutterwave ──────────────────────────────────────────────
+
+  it('POST /flutterwave/initiate returns 400 when booking_id is missing', async () => {
+    const res = await paymentsRouter.request('/flutterwave/initiate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }, makeEnv(db));
+    expect(res.status).toBe(400);
+    const body = await res.json() as any;
+    expect(body.success).toBe(false);
+  });
+
+  it('POST /flutterwave/initiate returns 404 for unknown booking', async () => {
+    const res = await paymentsRouter.request('/flutterwave/initiate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ booking_id: 'nonexistent_booking' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(404);
+  });
+
+  it('POST /flutterwave/initiate returns dev_mode=true when FLUTTERWAVE_SECRET is unset', async () => {
+    db._tables.bookings.push({
+      id: 'bkg_fw_dev1', customer_id: 'cus_1', trip_id: 'trp_1',
+      seat_ids: '["seat_10"]', total_amount: 300000, status: 'pending',
+      payment_method: 'flutterwave', payment_reference: '', payment_provider: null,
+      created_at: Date.now(), deleted_at: null, paid_at: null,
+    });
+    const res = await paymentsRouter.request('/flutterwave/initiate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ booking_id: 'bkg_fw_dev1', email: 'test@example.com' }),
+    }, makeEnv(db)); // no FLUTTERWAVE_SECRET in env
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.dev_mode).toBe(true);
+    expect(body.data.tx_ref).toBe('bkg_fw_dev1');
+    expect(body.data.payment_link).toBeNull();
+  });
+
+  it('POST /flutterwave/initiate returns 409 for already confirmed booking', async () => {
+    db._tables.bookings.push({
+      id: 'bkg_fw_conf1', customer_id: 'cus_1', trip_id: 'trp_1',
+      seat_ids: '["seat_11"]', total_amount: 300000, status: 'confirmed',
+      payment_method: 'flutterwave', payment_reference: '', payment_provider: 'flutterwave',
+      created_at: Date.now(), deleted_at: null, paid_at: Date.now(),
+    });
+    const res = await paymentsRouter.request('/flutterwave/initiate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ booking_id: 'bkg_fw_conf1' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(409);
+    const body = await res.json() as any;
+    expect(body.error).toMatch(/already confirmed/i);
+  });
+
+  it('POST /flutterwave/verify returns 400 when neither tx_ref nor booking_id provided', async () => {
+    const res = await paymentsRouter.request('/flutterwave/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }, makeEnv(db));
+    expect(res.status).toBe(400);
+    const body = await res.json() as any;
+    expect(body.success).toBe(false);
+  });
+
+  it('POST /flutterwave/verify returns 404 for unknown booking', async () => {
+    const res = await paymentsRouter.request('/flutterwave/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ booking_id: 'nonexistent_bkg' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(404);
+  });
+
+  it('POST /flutterwave/verify auto-confirms booking in dev mode', async () => {
+    db._tables.bookings.push({
+      id: 'bkg_fw_pend1', customer_id: 'cus_1', trip_id: 'trp_1',
+      seat_ids: '["seat_12"]', total_amount: 400000, status: 'pending',
+      payment_method: 'flutterwave', payment_reference: 'waka_fw_bkg_fw_pend1_123',
+      payment_provider: 'flutterwave',
+      created_at: Date.now(), deleted_at: null, paid_at: null,
+    });
+    db._tables.seats.push({
+      id: 'seat_12', trip_id: 'trp_1', seat_number: 'D3',
+      status: 'reserved', reservation_token: 'tok_fw1',
+      reservation_expires_at: Date.now() + 600000,
+      reserved_by: 'cus_1', confirmed_at: null,
+      created_at: Date.now(), updated_at: Date.now(), deleted_at: null,
+    });
+    const res = await paymentsRouter.request('/flutterwave/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ booking_id: 'bkg_fw_pend1' }),
+    }, makeEnv(db)); // no FLUTTERWAVE_SECRET → dev mode
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.booking_status).toBe('confirmed');
+  });
+
+  it('POST /flutterwave/verify returns already_confirmed for confirmed booking', async () => {
+    db._tables.bookings.push({
+      id: 'bkg_fw_alrdy1', customer_id: 'cus_1', trip_id: 'trp_1',
+      seat_ids: '["seat_13"]', total_amount: 300000, status: 'confirmed',
+      payment_method: 'flutterwave', payment_reference: 'waka_fw_alrdy1',
+      payment_provider: 'flutterwave',
+      created_at: Date.now(), deleted_at: null, paid_at: Date.now(),
+    });
+    const res = await paymentsRouter.request('/flutterwave/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ booking_id: 'bkg_fw_alrdy1' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.status).toBe('already_confirmed');
+  });
+
+  it('POST /flutterwave/verify returns 409 for cancelled booking', async () => {
+    db._tables.bookings.push({
+      id: 'bkg_fw_can1', customer_id: 'cus_1', trip_id: 'trp_1',
+      seat_ids: '["seat_14"]', total_amount: 200000, status: 'cancelled',
+      payment_method: 'flutterwave', payment_reference: '', payment_provider: null,
+      created_at: Date.now(), deleted_at: null, paid_at: null,
+    });
+    const res = await paymentsRouter.request('/flutterwave/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ booking_id: 'bkg_fw_can1' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(409);
+    const body = await res.json() as any;
+    expect(body.success).toBe(false);
+    expect(body.error).toMatch(/cancelled/i);
+  });
 });
 
 // ============================================================

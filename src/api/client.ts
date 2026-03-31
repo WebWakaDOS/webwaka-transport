@@ -399,6 +399,27 @@ export class ApiClient {
     return this.request('POST', '/api/payments/verify', opts);
   }
 
+  // ============================================================
+  // Flutterwave payment integration
+  // ============================================================
+
+  async initiateFlutterwave(bookingId: string, email: string): Promise<{
+    dev_mode: boolean;
+    tx_ref: string;
+    payment_link: string | null;
+    message?: string;
+  }> {
+    return this.request('POST', '/api/payments/flutterwave/initiate', { booking_id: bookingId, email });
+  }
+
+  async verifyFlutterwave(opts: { tx_ref?: string; booking_id?: string }): Promise<{
+    status: string;
+    booking_id: string;
+    booking_status: string;
+  }> {
+    return this.request('POST', '/api/payments/flutterwave/verify', opts);
+  }
+
   async getBookings(params?: { customer_id?: string; status?: string }): Promise<Booking[]> {
     const q = params ? new URLSearchParams(
       Object.fromEntries(Object.entries(params).filter(([, v]) => v))

@@ -371,6 +371,35 @@ Added to `MIGRATIONS` array in `src/api/admin.ts`: `idx_routes_operator_id`, `id
 - **Schema hardening**: `customers.operator_id NOT NULL` removed (customers are cross-tenant); `bookings` gets `payment_provider`/`paid_at`; `sales_transactions` gets `deleted_at`; `drivers` table added. All handled by migration 005.
 - **`@webwaka/core` resolution**: `packages/core/package.json` exports fixed (`.js` → `.ts`); `vitest.config.ts` has `resolve.alias` pointing to TypeScript source. Was the root cause of all test failures.
 
+## Phase D — Flutterwave + React Component Tests (complete)
+
+### D-001: Flutterwave Payment Integration
+`src/api/payments.ts` — Added `POST /api/payments/flutterwave/initiate` and `POST /api/payments/flutterwave/verify` routes. Flutterwave amounts are in Naira (not kobo); conversion handled on both initiate (`Math.ceil(kobo/100)`) and verify (`Math.round(naira*100)`). Dev mode: no `FLUTTERWAVE_SECRET` → auto-confirms without API call (same pattern as Paystack). Fraud detection emits `payment:AMOUNT_MISMATCH` platform event on amount mismatch.
+
+`src/worker.ts` — Added `POST /webhooks/flutterwave` handler. Verifies via `verif-hash` header (Flutterwave's pre-shared string verification). Handles `charge.completed` event → confirms booking + seats atomically.
+
+`src/api/client.ts` — Added `initiateFlutterwave(bookingId, email)` and `verifyFlutterwave(opts)` typed methods.
+
+`src/components/booking-flow.tsx` — Added Flutterwave to `PAYMENT_METHODS`. `AwaitingPayment` type now includes `provider` and `checkoutUrl`. `handlePay` routes to Flutterwave or Paystack based on selection. `handleVerify` uses the correct verify API per provider. Awaiting payment UI shows provider-appropriate icon, color, and label.
+
+### D-002: React Component Tests
+- `vitest.config.browser.ts` — new Vitest config using `happy-dom` environment, `@vitejs/plugin-react` for JSX transform. Run via `npm run test:components`.
+- `src/test-setup.ts` — imports `@testing-library/jest-dom` matchers.
+- 4 component test files with 18 tests total:
+  - `src/components/login-screen.test.tsx` — phone validation, requestOtp call, OTP step transition (5 tests)
+  - `src/components/conflict-log.test.tsx` — conflict rendering, empty state, Accept Server action (4 tests)
+  - `src/components/analytics.test.tsx` — loading state, stat cards, agent breakdown, error state (5 tests)
+  - `src/components/driver-view.test.tsx` — trips list, empty state, manifest loading, board action (4 tests)
+
+### D-003: Playwright E2E Config
+`playwright.config.ts` — Updated `baseURL` default to `http://localhost:5000` (Vite dev server). Added `desktop-chrome` project alongside `mobile-chrome`. Use `PLAYWRIGHT_BASE_URL` env var to override for CI/production.
+
+## Test Commands
+- `npm test` — 309 API/domain/backend tests (Vitest + node env)
+- `npm run test:components` — 18 React component tests (Vitest + happy-dom)
+- `npm run test:e2e` — Playwright E2E (requires running dev server)
+- `npm run test:coverage` — coverage report
+
 ## CI/CD
 `.github/workflows/ci.yml` — test (`npm test -- --run`) → typecheck → deploy-staging (on `staging` branch) → deploy-production + post-deploy migration (on `main` branch). GitHub Actions secrets required: `CLOUDFLARE_API_TOKEN`, `MIGRATION_SECRET`, `WORKER_URL`.
 

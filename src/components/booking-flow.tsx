@@ -14,6 +14,7 @@ type Step = 'seats' | 'customer' | 'confirm' | 'ticket';
 
 const PAYMENT_METHODS = [
   { id: 'paystack', label: 'Card / Paystack', icon: '💳' },
+  { id: 'flutterwave', label: 'Flutterwave', icon: '🌊' },
   { id: 'mobile_money', label: 'Mobile Money', icon: '📱' },
   { id: 'bank_transfer', label: 'Bank Transfer', icon: '🏦' },
 ];
@@ -201,7 +202,13 @@ function StepCustomer({ onNext, onBack }: {
 //   • prod + paystack: opens authorization_url, shows "I've paid" button
 // Phase 2: "I've completed payment" → verifyPayment → ticket
 // ============================================================
-type AwaitingPayment = { reference: string; bookingId: string; booking: Booking };
+type AwaitingPayment = {
+  reference: string;
+  bookingId: string;
+  booking: Booking;
+  provider: 'paystack' | 'flutterwave';
+  checkoutUrl: string | null;
+};
 
 function StepConfirm({ trip, selectedSeats, customerId, passengerNames, onSuccess, onBack }: {
   trip: TripSummary;
@@ -238,31 +245,34 @@ function StepConfirm({ trip, selectedSeats, customerId, passengerNames, onSucces
         ndpr_consent: true,
       });
 
-      const init = await api.initiatePayment(booking.id, payEmail);
-
-      // Dev mode or non-Paystack method: skip redirect, auto-verify immediately
-      if (init.dev_mode || paymentMethod !== 'paystack') {
-        const verify = await api.verifyPayment({ booking_id: booking.id });
-        if (verify.booking_status !== 'confirmed') {
-          throw new Error('Payment verification failed — please try again.');
+      // ── Flutterwave ──
+      if (paymentMethod === 'flutterwave') {
+        const fwInit = await api.initiateFlutterwave(booking.id, payEmail);
+        if (fwInit.dev_mode) {
+          const verify = await api.verifyFlutterwave({ booking_id: booking.id });
+          if (verify.booking_status !== 'confirmed') throw new Error('Payment verification failed — please try again.');
+          onSuccess({ ...booking, status: 'confirmed', payment_status: 'completed', origin: trip.origin, destination: trip.destination, departure_time: trip.departure_time, operator_name: trip.operator_name });
+          return;
         }
-        onSuccess({
-          ...booking,
-          status: 'confirmed',
-          payment_status: 'completed',
-          origin: trip.origin,
-          destination: trip.destination,
-          departure_time: trip.departure_time,
-          operator_name: trip.operator_name,
-        });
+        if (fwInit.payment_link) window.open(fwInit.payment_link, '_blank', 'noopener,noreferrer');
+        setAwaiting({ reference: fwInit.tx_ref, bookingId: booking.id, booking, provider: 'flutterwave', checkoutUrl: fwInit.payment_link });
         return;
       }
 
-      // Prod mode: open Paystack checkout in a new tab, show "I've paid" button
-      if (init.authorization_url) {
-        window.open(init.authorization_url, '_blank', 'noopener,noreferrer');
+      // ── Paystack (default) ──
+      const init = await api.initiatePayment(booking.id, payEmail);
+
+      // Dev mode or non-Paystack fallback method: auto-verify immediately
+      if (init.dev_mode || (paymentMethod !== 'paystack')) {
+        const verify = await api.verifyPayment({ booking_id: booking.id });
+        if (verify.booking_status !== 'confirmed') throw new Error('Payment verification failed — please try again.');
+        onSuccess({ ...booking, status: 'confirmed', payment_status: 'completed', origin: trip.origin, destination: trip.destination, departure_time: trip.departure_time, operator_name: trip.operator_name });
+        return;
       }
-      setAwaiting({ reference: init.reference, bookingId: booking.id, booking });
+
+      // Prod Paystack: open checkout in new tab, show "I've paid" screen
+      if (init.authorization_url) window.open(init.authorization_url, '_blank', 'noopener,noreferrer');
+      setAwaiting({ reference: init.reference, bookingId: booking.id, booking, provider: 'paystack', checkoutUrl: init.authorization_url });
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Booking failed. Please try again.');
     } finally {
@@ -270,25 +280,19 @@ function StepConfirm({ trip, selectedSeats, customerId, passengerNames, onSucces
     }
   };
 
-  /** Phase 2: user returns from Paystack → verify + confirm */
+  /** Phase 2: user returns from payment gateway → verify + confirm */
   const handleVerify = async () => {
     if (!awaiting) return;
     setBusy(true);
     setError('');
     try {
-      const verify = await api.verifyPayment({ reference: awaiting.reference });
+      const verify = awaiting.provider === 'flutterwave'
+        ? await api.verifyFlutterwave({ tx_ref: awaiting.reference })
+        : await api.verifyPayment({ reference: awaiting.reference });
       if (verify.booking_status !== 'confirmed') {
         throw new Error('Payment not yet confirmed. Please complete the payment and try again.');
       }
-      onSuccess({
-        ...awaiting.booking,
-        status: 'confirmed',
-        payment_status: 'completed',
-        origin: trip.origin,
-        destination: trip.destination,
-        departure_time: trip.departure_time,
-        operator_name: trip.operator_name,
-      });
+      onSuccess({ ...awaiting.booking, status: 'confirmed', payment_status: 'completed', origin: trip.origin, destination: trip.destination, departure_time: trip.departure_time, operator_name: trip.operator_name });
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Verification failed. Please try again.');
     } finally {
@@ -298,18 +302,23 @@ function StepConfirm({ trip, selectedSeats, customerId, passengerNames, onSucces
 
   // ── Awaiting payment phase ───────────────────────────────────
   if (awaiting) {
+    const gatewayLabel = awaiting.provider === 'flutterwave' ? 'Flutterwave' : 'Paystack';
+    const gatewayColor = awaiting.provider === 'flutterwave' ? '#f97316' : '#f59e0b';
+    const gatewayTextColor = awaiting.provider === 'flutterwave' ? '#7c2d12' : '#78350f';
+    const gatewayBg = awaiting.provider === 'flutterwave' ? '#fff7ed' : '#fffbeb';
+    const gatewayBorder = awaiting.provider === 'flutterwave' ? '#fed7aa' : '#fde68a';
     return (
       <div style={{ padding: 16 }}>
         <div style={{
           textAlign: 'center', padding: '28px 16px 20px',
-          background: '#fffbeb', borderRadius: 16, border: '2px solid #f59e0b', marginBottom: 20,
+          background: gatewayBg, borderRadius: 16, border: `2px solid ${gatewayBorder}`, marginBottom: 20,
         }}>
-          <div style={{ fontSize: 40, marginBottom: 8 }}>🔐</div>
-          <div style={{ fontSize: 16, fontWeight: 700, color: '#92400e', marginBottom: 6 }}>
-            Complete payment on Paystack
+          <div style={{ fontSize: 40, marginBottom: 8 }}>{awaiting.provider === 'flutterwave' ? '🌊' : '🔐'}</div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: gatewayColor, marginBottom: 6 }}>
+            Complete payment on {gatewayLabel}
           </div>
-          <div style={{ fontSize: 13, color: '#78350f' }}>
-            A Paystack checkout tab was opened. Complete your payment there, then come back here.
+          <div style={{ fontSize: 13, color: gatewayTextColor }}>
+            A {gatewayLabel} checkout tab was opened. Complete your payment there, then come back here.
           </div>
         </div>
 
@@ -334,12 +343,14 @@ function StepConfirm({ trip, selectedSeats, customerId, passengerNames, onSucces
           {busy ? 'Verifying…' : "I've completed payment"}
         </button>
 
-        <button
-          onClick={() => window.open(`https://checkout.paystack.com`, '_blank', 'noopener,noreferrer')}
-          style={{ ...primaryBtnStyle, width: '100%', background: '#fff', color: '#2563eb', border: '1.5px solid #2563eb' }}
-        >
-          Re-open Paystack
-        </button>
+        {awaiting.checkoutUrl && (
+          <button
+            onClick={() => window.open(awaiting.checkoutUrl!, '_blank', 'noopener,noreferrer')}
+            style={{ ...primaryBtnStyle, width: '100%', background: '#fff', color: '#2563eb', border: '1.5px solid #2563eb' }}
+          >
+            Re-open {gatewayLabel}
+          </button>
+        )}
       </div>
     );
   }

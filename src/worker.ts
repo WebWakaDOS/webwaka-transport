@@ -195,6 +195,66 @@ app.post('/webhooks/paystack', async (c) => {
 });
 
 // ============================================================
+// Flutterwave webhook — PUBLIC (verif-hash string verified)
+// POST /webhooks/flutterwave — handles charge.completed → confirm booking
+// Flutterwave sends the FLUTTERWAVE_SECRET value in the `verif-hash` header.
+// ============================================================
+app.post('/webhooks/flutterwave', async (c) => {
+  const verifHash = c.req.header('verif-hash');
+  let rawBody: string;
+  try { rawBody = await c.req.text(); }
+  catch { return c.json({ success: false, error: 'Failed to read body' }, 400); }
+
+  if (!c.env.FLUTTERWAVE_SECRET) {
+    return c.json({ success: false, error: 'Flutterwave not configured' }, 503);
+  }
+
+  if (!verifHash || verifHash !== c.env.FLUTTERWAVE_SECRET) {
+    return c.json({ success: false, error: 'Invalid signature' }, 401);
+  }
+
+  let event: { event: string; data: Record<string, unknown> };
+  try { event = JSON.parse(rawBody) as typeof event; }
+  catch { return c.json({ success: false, error: 'Invalid JSON' }, 400); }
+
+  if (event.event === 'charge.completed') {
+    const data = event.data;
+    const tx_ref = data['tx_ref'] as string | undefined;
+    const status = data['status'] as string | undefined;
+
+    if (tx_ref && status === 'successful') {
+      const db = c.env.DB;
+      const now = Date.now();
+
+      const booking = await db.prepare(
+        `SELECT id, status, seat_ids FROM bookings
+         WHERE (payment_reference = ? OR id = ?) AND deleted_at IS NULL LIMIT 1`
+      ).bind(tx_ref, tx_ref).first<{ id: string; status: string; seat_ids: string }>();
+
+      if (booking && booking.status !== 'confirmed' && booking.status !== 'cancelled') {
+        await db.prepare(
+          `UPDATE bookings
+           SET status = 'confirmed', payment_status = 'completed',
+               payment_provider = 'flutterwave', paid_at = ?, confirmed_at = ?
+           WHERE id = ?`
+        ).bind(now, now, booking.id).run();
+
+        const seatIds = JSON.parse(booking.seat_ids) as string[];
+        for (const seatId of seatIds) {
+          await db.prepare(
+            `UPDATE seats SET status = 'confirmed', confirmed_at = ?, updated_at = ? WHERE id = ?`
+          ).bind(now, now, seatId).run();
+        }
+
+        console.log(`[webhook/flutterwave] charge.completed — confirmed booking ${booking.id}`);
+      }
+    }
+  }
+
+  return c.json({ success: true });
+});
+
+// ============================================================
 // Internal admin — migration runner
 // Mounted at /internal/admin to bypass jwtAuthMiddleware.
 // Protected by MIGRATION_SECRET Bearer token instead.

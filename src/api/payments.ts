@@ -289,3 +289,226 @@ paymentsRouter.post('/verify', async (c) => {
     data: { status: 'confirmed', booking_id: booking.id, booking_status: 'confirmed' },
   });
 });
+
+// ============================================================
+// POST /api/payments/flutterwave/initiate
+// Creates a Flutterwave Standard checkout link.
+// In dev mode (no FLUTTERWAVE_SECRET), returns { dev_mode: true }.
+// Note: Flutterwave amounts are in Naira (not kobo); convert on initiate/verify.
+// ============================================================
+paymentsRouter.post('/flutterwave/initiate', async (c) => {
+  let body: Record<string, unknown>;
+  try { body = await c.req.json() as Record<string, unknown>; }
+  catch { return c.json({ success: false, error: 'Invalid JSON body' }, 400); }
+
+  const { booking_id, email } = body as { booking_id?: string; email?: string };
+  const err = requireFields({ booking_id }, ['booking_id']);
+  if (err) return c.json({ success: false, error: err }, 400);
+
+  const db = c.env.DB;
+  const booking = await db.prepare(
+    `SELECT id, status, total_amount, seat_ids, payment_reference, payment_provider
+     FROM bookings WHERE id = ? AND deleted_at IS NULL`
+  ).bind(booking_id).first<DbBookingPayment>();
+
+  if (!booking) return c.json({ success: false, error: 'Booking not found' }, 404);
+  if (booking.status === 'confirmed') return c.json({ success: false, error: 'Booking already confirmed' }, 409);
+  if (booking.status === 'cancelled') return c.json({ success: false, error: 'Booking is cancelled' }, 409);
+
+  // ── Dev mode ──────────────────────────────────────────────
+  if (!c.env.FLUTTERWAVE_SECRET) {
+    return c.json({
+      success: true,
+      data: {
+        dev_mode: true,
+        tx_ref: booking.id,
+        payment_link: null,
+        message: 'Dev mode — FLUTTERWAVE_SECRET not set. Call /flutterwave/verify to auto-confirm.',
+      },
+    });
+  }
+
+  // ── Prod mode: initialise Flutterwave transaction ──────────
+  const tx_ref = `waka_fw_${booking.id}_${Date.now()}`;
+  const customerEmail = (email && email.includes('@')) ? email : `${booking.id}@pay.webwaka.ng`;
+  const amountNaira = Math.ceil(booking.total_amount / 100); // FW uses Naira, not kobo
+
+  let fwRes: Response;
+  try {
+    fwRes = await fetch('https://api.flutterwave.com/v3/payments', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${c.env.FLUTTERWAVE_SECRET}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        tx_ref,
+        amount: amountNaira,
+        currency: 'NGN',
+        redirect_url: 'https://webwaka.ng/payment/callback',
+        customer: { email: customerEmail },
+        customizations: { title: 'WebWaka Transport', logo: 'https://webwaka.ng/icon.svg' },
+        meta: { booking_id: booking.id, source: 'webwaka-transport' },
+      }),
+    });
+  } catch (err: unknown) {
+    console.error('[payments/flutterwave/initiate] fetch error:', err);
+    return c.json({ success: false, error: 'Payment gateway unreachable' }, 502);
+  }
+
+  if (!fwRes.ok) {
+    const detail = await fwRes.text();
+    console.error('[payments/flutterwave/initiate] Flutterwave error:', detail);
+    return c.json({ success: false, error: 'Payment gateway unavailable' }, 502);
+  }
+
+  const fwData = await fwRes.json() as {
+    status: string;
+    message?: string;
+    data: { link: string };
+  };
+
+  if (fwData.status !== 'success' || !fwData.data?.link) {
+    return c.json({ success: false, error: fwData.message ?? 'Failed to initialize payment' }, 502);
+  }
+
+  await db.prepare(
+    `UPDATE bookings SET payment_reference = ?, payment_provider = 'flutterwave', updated_at = ? WHERE id = ?`
+  ).bind(tx_ref, Date.now(), booking.id).run();
+
+  return c.json({
+    success: true,
+    data: { dev_mode: false, tx_ref, payment_link: fwData.data.link },
+  });
+});
+
+// ============================================================
+// POST /api/payments/flutterwave/verify
+// Verifies a Flutterwave payment and confirms the booking.
+// In dev mode (no FLUTTERWAVE_SECRET), auto-confirms.
+// ============================================================
+paymentsRouter.post('/flutterwave/verify', async (c) => {
+  let body: Record<string, unknown>;
+  try { body = await c.req.json() as Record<string, unknown>; }
+  catch { return c.json({ success: false, error: 'Invalid JSON body' }, 400); }
+
+  const { tx_ref, booking_id } = body as { tx_ref?: string; booking_id?: string };
+  if (!tx_ref && !booking_id) {
+    return c.json({ success: false, error: 'tx_ref or booking_id is required' }, 400);
+  }
+
+  const db = c.env.DB;
+  let booking: DbBookingPayment | null = null;
+
+  if (booking_id) {
+    booking = await db.prepare(
+      `SELECT id, status, total_amount, seat_ids, payment_reference, payment_provider
+       FROM bookings WHERE id = ? AND deleted_at IS NULL LIMIT 1`
+    ).bind(booking_id).first<DbBookingPayment>();
+  }
+  if (!booking && tx_ref) {
+    booking = await db.prepare(
+      `SELECT id, status, total_amount, seat_ids, payment_reference, payment_provider
+       FROM bookings WHERE payment_reference = ? AND deleted_at IS NULL LIMIT 1`
+    ).bind(tx_ref).first<DbBookingPayment>();
+  }
+
+  if (!booking) return c.json({ success: false, error: 'Booking not found' }, 404);
+  if (booking.status === 'cancelled') {
+    return c.json({ success: false, error: 'Booking is cancelled' }, 409);
+  }
+  if (booking.status === 'confirmed') {
+    return c.json({
+      success: true,
+      data: { status: 'already_confirmed', booking_id: booking.id, booking_status: 'confirmed' },
+    });
+  }
+
+  const now = Date.now();
+  const ref = tx_ref ?? booking.payment_reference ?? booking.id;
+
+  // ── Dev mode ──────────────────────────────────────────────
+  if (!c.env.FLUTTERWAVE_SECRET) {
+    await confirmBookingById(db, booking, ref, 'flutterwave_dev', now);
+    return c.json({
+      success: true,
+      data: { status: 'dev_confirmed', booking_id: booking.id, booking_status: 'confirmed' },
+    });
+  }
+
+  // ── Prod mode: verify with Flutterwave ────────────────────
+  let fwRes: Response;
+  try {
+    fwRes = await fetch(
+      `https://api.flutterwave.com/v3/transactions?tx_ref=${encodeURIComponent(ref)}`,
+      { headers: { Authorization: `Bearer ${c.env.FLUTTERWAVE_SECRET}` } }
+    );
+  } catch (err: unknown) {
+    console.error('[payments/flutterwave/verify] fetch error:', err);
+    return c.json({ success: false, error: 'Payment gateway unreachable' }, 502);
+  }
+
+  if (!fwRes.ok) {
+    return c.json({ success: false, error: 'Payment verification failed' }, 502);
+  }
+
+  const fwData = await fwRes.json() as {
+    status: string;
+    data: Array<{ status: string; amount: number; currency: string; tx_ref: string }>;
+  };
+
+  if (fwData.status !== 'success' || !fwData.data?.length) {
+    return c.json({ success: false, error: 'Payment not found in gateway' }, 404);
+  }
+
+  const tx = fwData.data[0];
+  if (!tx) {
+    return c.json({ success: false, error: 'Payment not found in gateway' }, 404);
+  }
+  if (tx.status !== 'successful') {
+    return c.json({
+      success: false,
+      error: 'Payment not yet complete',
+      data: { flutterwave_status: tx.status },
+    }, 402);
+  }
+
+  // FW returns Naira; convert to kobo for fraud check
+  const receivedKobo = Math.round(tx.amount * 100);
+  if (receivedKobo !== booking.total_amount) {
+    console.error(
+      `[payments/flutterwave/verify] FRAUD: Amount mismatch for booking ${booking.id}: ` +
+      `expected ${booking.total_amount} kobo, got ${receivedKobo} kobo`
+    );
+    try {
+      const evtId = `evt_fw_fraud_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      await db.prepare(
+        `INSERT OR IGNORE INTO platform_events
+         (id, event_type, aggregate_id, aggregate_type, payload, status, created_at)
+         VALUES (?, 'payment:AMOUNT_MISMATCH', ?, 'booking', ?, 'pending', ?)`
+      ).bind(
+        evtId, booking.id,
+        JSON.stringify({
+          booking_id: booking.id,
+          expected_kobo: booking.total_amount,
+          received_kobo: receivedKobo,
+          tx_ref: ref,
+          provider: 'flutterwave',
+        }),
+        now
+      ).run();
+    } catch { /* non-fatal */ }
+    return c.json({
+      success: false,
+      error: 'Payment amount does not match booking total',
+      data: { expected_kobo: booking.total_amount, received_kobo: receivedKobo },
+    }, 402);
+  }
+
+  await confirmBookingById(db, booking, ref, 'flutterwave', now);
+
+  return c.json({
+    success: true,
+    data: { status: 'confirmed', booking_id: booking.id, booking_status: 'confirmed' },
+  });
+});
