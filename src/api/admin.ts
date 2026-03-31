@@ -524,8 +524,20 @@ const MIGRATIONS: Migration[] = [
   {
     name: '011_guest_bookings',
     statements: [
-      // P03-T6: Add is_guest flag to bookings table for guest JWT flow
       `ALTER TABLE bookings ADD COLUMN is_guest INTEGER DEFAULT 0`,
+    ],
+  },
+  {
+    name: '012_p05_trip_ops',
+    statements: [
+      // P05-T1: GPS location timestamp
+      `ALTER TABLE trips ADD COLUMN location_updated_at INTEGER`,
+      // P05-T2: SOS triggered_by (cleared_by already exists)
+      `ALTER TABLE trips ADD COLUMN sos_triggered_by TEXT`,
+      // P05-T6: Delay reporting columns
+      `ALTER TABLE trips ADD COLUMN delay_reason_code TEXT`,
+      `ALTER TABLE trips ADD COLUMN delay_reported_at INTEGER`,
+      `ALTER TABLE trips ADD COLUMN estimated_departure_ms INTEGER`,
     ],
   },
 ];

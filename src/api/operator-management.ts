@@ -561,6 +561,20 @@ operatorManagementRouter.post('/trips/:id/transition', requireRole(['SUPER_ADMIN
       }, 422);
     }
 
+    // P05-T5: Inspection gate — check inspection_required_before_boarding config
+    if (trip.state === 'scheduled' && to_state === 'boarding') {
+      try {
+        const config = await getOperatorConfig(c.env, trip.operator_id);
+        if (config.inspection_required_before_boarding && !trip.inspection_completed_at) {
+          return c.json({
+            success: false,
+            error: 'inspection_required',
+            message: 'Pre-trip inspection must be completed before boarding.',
+          }, 422);
+        }
+      } catch { /* non-fatal — if config unavailable, don't block transition */ }
+    }
+
     const transitionId = genId('tst');
     await db.batch([
       db.prepare(`UPDATE trips SET state = ?, updated_at = ? WHERE id = ?`).bind(to_state, now, id),
@@ -586,13 +600,18 @@ operatorManagementRouter.post('/trips/:id/transition', requireRole(['SUPER_ADMIN
   }
 });
 
-operatorManagementRouter.patch('/trips/:id/location', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
+// ============================================================
+// P05-T1: POST /trips/:id/location — GPS location update (DRIVER+)
+// Body: { latitude, longitude, accuracy_meters? }
+// 204 No Content on success
+// ============================================================
+operatorManagementRouter.post('/trips/:id/location', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'DRIVER']), async (c) => {
   const id = c.req.param('id');
   const body = await c.req.json() as Record<string, unknown>;
-  const { latitude, longitude } = body as { latitude?: unknown; longitude?: unknown };
+  const { latitude, longitude, accuracy_meters } = body as { latitude?: unknown; longitude?: unknown; accuracy_meters?: unknown };
 
   if (typeof latitude !== 'number' || typeof longitude !== 'number') {
-    return c.json({ success: false, error: 'latitude and longitude required as numbers' }, 400);
+    return c.json({ success: false, error: 'latitude and longitude are required numbers' }, 400);
   }
   if (latitude < -90 || latitude > 90) {
     return c.json({ success: false, error: 'latitude must be between -90 and 90' }, 400);
@@ -603,15 +622,164 @@ operatorManagementRouter.patch('/trips/:id/location', requireRole(['SUPER_ADMIN'
 
   const db = c.env.DB;
   const now = Date.now();
+  const user = c.get('user');
 
   try {
-    await db.prepare(
-      `UPDATE trips SET current_latitude = ?, current_longitude = ?, updated_at = ? WHERE id = ?`
-    ).bind(latitude, longitude, now, id).run();
+    const trip = await db.prepare(
+      `SELECT id, state, operator_id FROM trips WHERE id = ? AND deleted_at IS NULL`
+    ).bind(id).first<{ id: string; state: string; operator_id: string }>();
+    if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
 
-    return c.json({ success: true, data: { id, latitude, longitude, updated_at: now } });
+    if (trip.state === 'completed' || trip.state === 'cancelled') {
+      return c.json({ success: false, error: 'trip_not_active', message: `Trip is ${trip.state} — location updates not accepted` }, 422);
+    }
+
+    // Tenant scope: only the trip's operator (or SUPER_ADMIN) may update
+    const operatorId = user?.operatorId;
+    if (user?.role !== 'SUPER_ADMIN' && operatorId && trip.operator_id !== operatorId) {
+      return c.json({ success: false, error: 'Forbidden — trip belongs to a different operator' }, 403);
+    }
+
+    await db.prepare(
+      `UPDATE trips SET current_latitude = ?, current_longitude = ?, location_updated_at = ?, updated_at = ? WHERE id = ?`
+    ).bind(latitude, longitude, now, now, id).run();
+
+    try {
+      await publishEvent(db, {
+        event_type: 'trip.location_updated',
+        aggregate_id: id,
+        aggregate_type: 'trip',
+        payload: {
+          trip_id: id,
+          lat: latitude,
+          lng: longitude,
+          accuracy_meters: typeof accuracy_meters === 'number' ? accuracy_meters : null,
+          updated_at: now,
+          updated_by: user?.id,
+        },
+        tenant_id: trip.operator_id,
+        timestamp: now,
+      });
+    } catch { /* non-fatal */ }
+
+    return new Response(null, { status: 204 });
   } catch {
     return c.json({ success: false, error: 'Failed to update trip location' }, 500);
+  }
+});
+
+// ============================================================
+// P05-T2: POST /trips/:id/sos — driver triggers SOS alert
+// DRIVER+ required
+// ============================================================
+operatorManagementRouter.post('/trips/:id/sos', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'DRIVER']), async (c) => {
+  const id = c.req.param('id');
+  const user = c.get('user');
+  const db = c.env.DB;
+  const now = Date.now();
+
+  try {
+    const trip = await db.prepare(
+      `SELECT id, sos_active, operator_id, route_id FROM trips WHERE id = ? AND deleted_at IS NULL`
+    ).bind(id).first<{ id: string; sos_active: number; operator_id: string; route_id: string }>();
+    if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
+
+    if (trip.sos_active === 1) {
+      return c.json({ success: false, error: 'sos_already_active', message: 'SOS is already active on this trip' }, 409);
+    }
+
+    const routeRow = await db.prepare(
+      `SELECT origin, destination FROM routes WHERE id = ?`
+    ).bind(trip.route_id).first<{ origin: string; destination: string }>();
+    const route = routeRow ? `${routeRow.origin} → ${routeRow.destination}` : trip.route_id;
+
+    await db.prepare(
+      `UPDATE trips SET sos_active = 1, sos_triggered_at = ?, sos_triggered_by = ?, updated_at = ? WHERE id = ?`
+    ).bind(now, user?.id ?? 'unknown', now, id).run();
+
+    const config = await getOperatorConfig(c.env, trip.operator_id);
+    const smsTarget = config.emergency_contact_phone;
+
+    // Non-fatal SMS to emergency contact
+    if (smsTarget) {
+      const smsBody = JSON.stringify({
+        api_key: c.env.TERMII_API_KEY ?? c.env.SMS_API_KEY ?? '',
+        to: smsTarget,
+        from: 'WebWaka',
+        sms: `\uD83D\uDEA8 SOS ALERT: Driver triggered emergency on Trip ${id.slice(-8)}, Route ${route}. Time: ${new Date(now).toLocaleString('en-NG', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' })}. Check dispatch dashboard immediately.`,
+        type: 'plain',
+        channel: 'generic',
+      });
+      fetch('https://api.ng.termii.com/api/sms/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: smsBody,
+      }).catch(() => {});
+    }
+
+    try {
+      await publishEvent(db, {
+        event_type: 'trip:SOS_ACTIVATED',
+        aggregate_id: id,
+        aggregate_type: 'trip',
+        payload: {
+          trip_id: id,
+          route,
+          operator_id: trip.operator_id,
+          triggered_by: user?.id ?? 'unknown',
+          triggered_at: now,
+          sos_escalation_email: config.sos_escalation_email,
+          emergency_contact_phone: config.emergency_contact_phone,
+        },
+        tenant_id: trip.operator_id,
+        timestamp: now,
+      });
+    } catch { /* non-fatal */ }
+
+    return c.json({ success: true, message: 'SOS activated. Emergency contacts notified.' });
+  } catch {
+    return c.json({ success: false, error: 'Failed to activate SOS' }, 500);
+  }
+});
+
+// ============================================================
+// P05-T2: POST /trips/:id/sos/clear — supervisor clears SOS
+// SUPERVISOR+ required
+// ============================================================
+operatorManagementRouter.post('/trips/:id/sos/clear', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR']), async (c) => {
+  const id = c.req.param('id');
+  const user = c.get('user');
+  const db = c.env.DB;
+  const now = Date.now();
+
+  try {
+    const trip = await db.prepare(
+      `SELECT id, sos_active, operator_id FROM trips WHERE id = ? AND deleted_at IS NULL`
+    ).bind(id).first<{ id: string; sos_active: number; operator_id: string }>();
+    if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
+
+    if (trip.sos_active === 0) {
+      return c.json({ success: false, error: 'no_active_sos', message: 'No active SOS on this trip' }, 409);
+    }
+
+    await db.prepare(
+      `UPDATE trips SET sos_active = 0, sos_cleared_at = ?, sos_cleared_by = ?, updated_at = ? WHERE id = ?`
+    ).bind(now, user?.id ?? 'unknown', now, id).run();
+
+    try {
+      await publishEvent(db, {
+        event_type: 'trip:SOS_CLEARED',
+        aggregate_id: id,
+        aggregate_type: 'trip',
+        payload: { trip_id: id, cleared_by: user?.id ?? 'unknown', cleared_at: now, operator_id: trip.operator_id },
+        tenant_id: trip.operator_id,
+        timestamp: now,
+      });
+    } catch { /* non-fatal */ }
+
+    return c.json({ success: true, message: 'SOS cleared.' });
+  } catch {
+    return c.json({ success: false, error: 'Failed to clear SOS' }, 500);
   }
 });
 
@@ -633,10 +801,10 @@ operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 
         `SELECT origin, destination, base_fare FROM routes WHERE id = ?`
       ).bind(trip.route_id).first<{ origin: string; destination: string; base_fare: number }>(),
       db.prepare(
-        `SELECT id, customer_id, seat_ids, passenger_names, status, payment_status, total_amount, created_at
+        `SELECT id, customer_id, seat_ids, passenger_names, status, payment_status, payment_method, total_amount, boarded_at, created_at
          FROM bookings WHERE trip_id = ? AND deleted_at IS NULL AND status != 'cancelled'
          ORDER BY created_at ASC`
-      ).bind(id).all<{ id: string; customer_id: string; seat_ids: string; passenger_names: string; status: string; payment_status: string; total_amount: number; created_at: number }>(),
+      ).bind(id).all<{ id: string; customer_id: string; seat_ids: string; passenger_names: string; status: string; payment_status: string; payment_method: string; total_amount: number; boarded_at: number | null; created_at: number }>(),
       db.prepare(
         `SELECT id FROM seats WHERE trip_id = ?`
       ).bind(id).all<{ id: string }>(),
@@ -645,6 +813,12 @@ operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 
             .bind(trip.driver_id).first<{ id: string; name: string; phone: string; license_number: string | null }>()
         : Promise.resolve(null),
     ]);
+
+    // Pre-load seat number lookup for all seats on this trip
+    const allSeats = await db.prepare(
+      `SELECT id, seat_number FROM seats WHERE trip_id = ?`
+    ).bind(id).all<{ id: string; seat_number: string }>();
+    const seatNumberMap = new Map(allSeats.results.map(s => [s.id, s.seat_number]));
 
     // Fetch customer details per booking (small list — boarding manifest scenario)
     const passengers = await Promise.all(
@@ -658,19 +832,27 @@ operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 
           if (customer) { customer_name = customer.name; customer_phone = customer.phone; }
         } catch { /* gracefully skip customer lookup failure */ }
 
-        const seatIds = JSON.parse(bkg.seat_ids) as string[];
-        const passengerNames = JSON.parse(bkg.passenger_names) as string[];
+        let seatIds: string[] = [];
+        let passengerNames: string[] = [];
+        try { seatIds = JSON.parse(bkg.seat_ids) as string[]; } catch { seatIds = []; }
+        try { passengerNames = JSON.parse(bkg.passenger_names) as string[]; } catch { passengerNames = []; }
+
+        const seatNumbers = seatIds.map(sid => seatNumberMap.get(sid) ?? sid).join(', ');
 
         return {
           booking_id: bkg.id,
           customer_name,
           customer_phone,
           seat_ids: seatIds,
+          seat_numbers: seatNumbers,
           passenger_names: passengerNames,
           status: bkg.status,
           payment_status: bkg.payment_status,
+          payment_method: bkg.payment_method,
           total_amount: bkg.total_amount,
+          boarded_at: bkg.boarded_at,
           booked_at: bkg.created_at,
+          qr_payload: `${bkg.id}:${seatIds.join(',')}`,
         };
       })
     );
@@ -678,6 +860,28 @@ operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 
     const confirmedRevenue = bookingsResult.results
       .filter(b => b.payment_status === 'paid' || b.status === 'confirmed')
       .reduce((sum, b) => sum + b.total_amount, 0);
+
+    // P05-T4: CSV content negotiation
+    const acceptHeader = c.req.header('Accept') ?? '';
+    if (acceptHeader.includes('text/csv')) {
+      const tripDate = new Date(trip.departure_time).toISOString().slice(0, 10);
+      const rows = passengers.map(p => {
+        const escapeCsv = (v: string) => `"${String(v).replace(/"/g, '""')}"`;
+        const name = escapeCsv(p.passenger_names.join('; '));
+        const seats = escapeCsv(p.seat_numbers);
+        const boarded = p.boarded_at ? new Date(p.boarded_at).toISOString() : '';
+        const method = escapeCsv(p.payment_method);
+        const ref = escapeCsv(p.booking_id.slice(-8).toUpperCase());
+        return `${seats},${name},${escapeCsv(boarded)},${method},${ref}`;
+      });
+      const csv = `Seat,Passenger Name,Boarded,Payment Method,Booking Ref\n${rows.join('\n')}`;
+      return new Response(csv, {
+        headers: {
+          'Content-Type': 'text/csv; charset=utf-8',
+          'Content-Disposition': `attachment; filename="manifest_${id}_${tripDate}.csv"`,
+        },
+      });
+    }
 
     return c.json({
       success: true,
@@ -697,6 +901,7 @@ operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 
         passengers,
         summary: {
           total_bookings: passengers.length,
+          total_boarded: passengers.filter(p => p.boarded_at !== null).length,
           total_seats: seatsResult.results.length,
           load_factor: seatsResult.results.length > 0
             ? Math.round((passengers.length / seatsResult.results.length) * 100)
@@ -765,6 +970,321 @@ operatorManagementRouter.patch(
     }
   }
 );
+
+// ============================================================
+// P05-T3: POST /trips/:id/board — QR-code digital boarding scan (STAFF+)
+// Body: { qr_payload: "{bookingId}:{seatId1},{seatId2}" }
+// ============================================================
+operatorManagementRouter.post('/trips/:id/board', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'DRIVER']), async (c) => {
+  const tripId = c.req.param('id');
+  const user = c.get('user');
+  const db = c.env.DB;
+  const now = Date.now();
+
+  let body: Record<string, unknown>;
+  try { body = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ success: false, error: 'Invalid JSON body' }, 400); }
+
+  const qrPayload = String(body['qr_payload'] ?? '').trim();
+  if (!qrPayload) return c.json({ success: false, error: 'qr_payload is required' }, 400);
+
+  const colonIdx = qrPayload.indexOf(':');
+  if (colonIdx === -1) {
+    return c.json({ success: false, error: 'invalid_qr', message: 'QR payload must be in format {bookingId}:{seatId1},{seatId2}' }, 400);
+  }
+  const bookingId = qrPayload.slice(0, colonIdx).trim();
+  const seatsStr = qrPayload.slice(colonIdx + 1).trim();
+  if (!bookingId || !seatsStr) {
+    return c.json({ success: false, error: 'invalid_qr', message: 'QR payload parts are empty — expected {bookingId}:{seatIds}' }, 400);
+  }
+
+  try {
+    const row = await db.prepare(
+      `SELECT id, passenger_names, seat_ids, boarded_at, status, trip_id
+       FROM bookings
+       WHERE id = ? AND trip_id = ? AND deleted_at IS NULL`
+    ).bind(bookingId, tripId).first<{
+      id: string; passenger_names: string; seat_ids: string; boarded_at: number | null;
+      status: string; trip_id: string;
+    }>();
+
+    if (!row) return c.json({ success: false, error: 'invalid_ticket', message: 'Ticket not found for this trip.' }, 404);
+    if (row.status !== 'confirmed') {
+      return c.json({ success: false, error: 'booking_not_confirmed', status: row.status, message: `Booking is ${row.status} — cannot board.` }, 422);
+    }
+    if (row.boarded_at !== null) {
+      return c.json({ success: false, error: 'already_boarded', boarded_at: row.boarded_at, message: 'This passenger has already boarded.' }, 409);
+    }
+
+    // Resolve seat numbers from seat_ids JSON array
+    let seatNumbers = seatsStr;
+    try {
+      const parsedSeatIds = JSON.parse(row.seat_ids) as string[];
+      if (parsedSeatIds.length > 0) {
+        const placeholders = parsedSeatIds.map(() => '?').join(',');
+        const seatsResult = await db.prepare(
+          `SELECT seat_number FROM seats WHERE id IN (${placeholders})`
+        ).bind(...parsedSeatIds).all<{ seat_number: string }>();
+        if (seatsResult.results.length > 0) {
+          seatNumbers = seatsResult.results.map(s => s.seat_number).join(', ');
+        }
+      }
+    } catch { /* use seatsStr from QR payload as fallback */ }
+
+    await db.prepare(
+      `UPDATE bookings SET boarded_at = ?, boarded_by = ? WHERE id = ?`
+    ).bind(now, user?.id ?? 'unknown', bookingId).run();
+
+    try {
+      await publishEvent(db, {
+        event_type: 'booking.boarded',
+        aggregate_id: bookingId,
+        aggregate_type: 'booking',
+        payload: { booking_id: bookingId, trip_id: tripId, boarded_at: now, boarded_by: user?.id },
+        timestamp: now,
+      });
+    } catch { /* non-fatal */ }
+
+    let passengerNames: string[] = [];
+    try { passengerNames = JSON.parse(row.passenger_names) as string[]; } catch { passengerNames = []; }
+
+    return c.json({
+      success: true,
+      data: {
+        passenger_names: passengerNames,
+        seat_numbers: seatNumbers,
+        boarded_at: now,
+        message: 'Welcome aboard!',
+      },
+    });
+  } catch {
+    return c.json({ success: false, error: 'Failed to process boarding scan' }, 500);
+  }
+});
+
+// ============================================================
+// P05-T3: GET /trips/:id/boarding-status — boarding progress (STAFF+)
+// ============================================================
+operatorManagementRouter.get('/trips/:id/boarding-status', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'DRIVER']), async (c) => {
+  const tripId = c.req.param('id');
+  const db = c.env.DB;
+
+  try {
+    const row = await db.prepare(
+      `SELECT
+         COUNT(*) as total_confirmed,
+         SUM(CASE WHEN boarded_at IS NOT NULL THEN 1 ELSE 0 END) as total_boarded,
+         MAX(boarded_at) as last_boarded_at
+       FROM bookings
+       WHERE trip_id = ? AND status = 'confirmed' AND deleted_at IS NULL`
+    ).bind(tripId).first<{ total_confirmed: number; total_boarded: number; last_boarded_at: number | null }>();
+
+    const total_confirmed = row?.total_confirmed ?? 0;
+    const total_boarded = row?.total_boarded ?? 0;
+
+    return c.json({
+      success: true,
+      data: {
+        total_confirmed,
+        total_boarded,
+        remaining: total_confirmed - total_boarded,
+        last_boarded_at: row?.last_boarded_at ?? null,
+      },
+    });
+  } catch {
+    return c.json({ success: false, error: 'Failed to fetch boarding status' }, 500);
+  }
+});
+
+// ============================================================
+// P05-T5: POST /trips/:id/inspection — pre-trip inspection checklist (DRIVER+)
+// ============================================================
+operatorManagementRouter.post('/trips/:id/inspection', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'DRIVER']), async (c) => {
+  const tripId = c.req.param('id');
+  const user = c.get('user');
+  const db = c.env.DB;
+  const now = Date.now();
+
+  let body: Record<string, unknown>;
+  try { body = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ success: false, error: 'Invalid JSON body' }, 400); }
+
+  const boolFields = ['tires_ok', 'brakes_ok', 'lights_ok', 'fuel_ok', 'emergency_equipment_ok'] as const;
+  for (const field of boolFields) {
+    if (typeof body[field] !== 'boolean') {
+      return c.json({ success: false, error: `${field} must be a boolean` }, 400);
+    }
+    if (body[field] !== true) {
+      return c.json({
+        success: false, error: 'inspection_failed',
+        failed_item: field,
+        message: `Inspection failed: ${field.replace(/_ok$/, '').replace(/_/g, ' ')} check did not pass. Fix before departure.`,
+      }, 422);
+    }
+  }
+
+  try {
+    const trip = await db.prepare(
+      `SELECT id FROM trips WHERE id = ? AND deleted_at IS NULL`
+    ).bind(tripId).first<{ id: string }>();
+    if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
+
+    const existing = await db.prepare(
+      `SELECT id FROM trip_inspections WHERE trip_id = ?`
+    ).bind(tripId).first<{ id: string }>();
+    if (existing) {
+      return c.json({ success: false, error: 'inspection_exists', message: 'A pre-trip inspection has already been submitted for this trip.' }, 409);
+    }
+
+    const inspId = genId('ins');
+    const manifest_count = typeof body['manifest_count'] === 'number' ? body['manifest_count'] : null;
+    const notes = typeof body['notes'] === 'string' ? body['notes'] : null;
+
+    await db.batch([
+      db.prepare(
+        `INSERT INTO trip_inspections (id, trip_id, inspected_by, tires_ok, brakes_ok, lights_ok, fuel_ok, emergency_equipment_ok, manifest_count, notes, created_at)
+         VALUES (?, ?, ?, 1, 1, 1, 1, 1, ?, ?, ?)`
+      ).bind(inspId, tripId, user?.id ?? 'unknown', manifest_count, notes, now),
+      db.prepare(
+        `UPDATE trips SET inspection_completed_at = ?, updated_at = ? WHERE id = ?`
+      ).bind(now, now, tripId),
+    ]);
+
+    try {
+      await publishEvent(db, {
+        event_type: 'trip.inspection_completed',
+        aggregate_id: tripId,
+        aggregate_type: 'trip',
+        payload: { trip_id: tripId, inspection_id: inspId, inspected_by: user?.id, completed_at: now },
+        timestamp: now,
+      });
+    } catch { /* non-fatal */ }
+
+    return c.json({
+      success: true,
+      data: { id: inspId, trip_id: tripId, inspected_by: user?.id, all_checks_passed: true, manifest_count, notes, created_at: now },
+    });
+  } catch {
+    return c.json({ success: false, error: 'Failed to submit inspection' }, 500);
+  }
+});
+
+// ============================================================
+// P05-T5: GET /trips/:id/inspection — get pre-trip inspection result (STAFF+)
+// ============================================================
+operatorManagementRouter.get('/trips/:id/inspection', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
+  const tripId = c.req.param('id');
+  const db = c.env.DB;
+
+  try {
+    const inspection = await db.prepare(
+      `SELECT * FROM trip_inspections WHERE trip_id = ?`
+    ).bind(tripId).first();
+
+    return c.json({ success: true, data: inspection ?? null });
+  } catch {
+    return c.json({ success: false, error: 'Failed to fetch inspection' }, 500);
+  }
+});
+
+// ============================================================
+// P05-T6: POST /trips/:id/delay — report trip delay with passenger SMS (SUPERVISOR+)
+// ============================================================
+const ALLOWED_REASON_CODES = ['traffic', 'breakdown', 'weather', 'accident', 'fuel', 'other'] as const;
+type DelayReasonCode = typeof ALLOWED_REASON_CODES[number];
+
+operatorManagementRouter.post('/trips/:id/delay', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR']), async (c) => {
+  const tripId = c.req.param('id');
+  const db = c.env.DB;
+  const now = Date.now();
+
+  let body: Record<string, unknown>;
+  try { body = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ success: false, error: 'Invalid JSON body' }, 400); }
+
+  const reason_code = String(body['reason_code'] ?? '') as DelayReasonCode;
+  if (!ALLOWED_REASON_CODES.includes(reason_code)) {
+    return c.json({ success: false, error: `reason_code must be one of: ${ALLOWED_REASON_CODES.join(', ')}` }, 400);
+  }
+
+  const estimated_departure_ms = Number(body['estimated_departure_ms'] ?? 0);
+  if (!estimated_departure_ms || estimated_departure_ms <= now) {
+    return c.json({ success: false, error: 'estimated_departure_ms must be a future unix timestamp in milliseconds' }, 400);
+  }
+
+  const reason_details = typeof body['reason_details'] === 'string' ? body['reason_details'] : null;
+
+  try {
+    const trip = await db.prepare(
+      `SELECT t.id, t.operator_id, t.route_id, t.departure_time, r.origin, r.destination
+       FROM trips t JOIN routes r ON r.id = t.route_id
+       WHERE t.id = ? AND t.deleted_at IS NULL`
+    ).bind(tripId).first<{ id: string; operator_id: string; route_id: string; departure_time: number; origin: string; destination: string }>();
+    if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
+
+    await db.prepare(
+      `UPDATE trips SET delay_reason_code = ?, delay_reported_at = ?, estimated_departure_ms = ?, updated_at = ? WHERE id = ?`
+    ).bind(reason_code, now, estimated_departure_ms, now, tripId).run();
+
+    // Count affected bookings for event payload
+    const countRow = await db.prepare(
+      `SELECT COUNT(*) as cnt FROM bookings WHERE trip_id = ? AND status = 'confirmed' AND deleted_at IS NULL`
+    ).bind(tripId).first<{ cnt: number }>();
+
+    const departureDate = new Date(trip.departure_time).toLocaleDateString('en-NG', {
+      weekday: 'short', day: 'numeric', month: 'short',
+    });
+
+    try {
+      await publishEvent(db, {
+        event_type: 'trip:DELAYED',
+        aggregate_id: tripId,
+        aggregate_type: 'trip',
+        payload: {
+          trip_id: tripId,
+          operator_id: trip.operator_id,
+          origin: trip.origin,
+          destination: trip.destination,
+          departure_date: departureDate,
+          reason_code,
+          reason_details,
+          estimated_departure_ms,
+          affected_booking_count: countRow?.cnt ?? 0,
+        },
+        tenant_id: trip.operator_id,
+        timestamp: now,
+      });
+    } catch { /* non-fatal */ }
+
+    return c.json({
+      success: true,
+      data: { trip_id: tripId, reason_code, reason_details, delay_reported_at: now, estimated_departure_ms, affected_booking_count: countRow?.cnt ?? 0 },
+    });
+  } catch {
+    return c.json({ success: false, error: 'Failed to report delay' }, 500);
+  }
+});
+
+// ============================================================
+// P05-T6: GET /trips/:id/delay — get delay info (STAFF+)
+// ============================================================
+operatorManagementRouter.get('/trips/:id/delay', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
+  const tripId = c.req.param('id');
+  const db = c.env.DB;
+
+  try {
+    const row = await db.prepare(
+      `SELECT delay_reason_code, delay_reported_at, estimated_departure_ms FROM trips WHERE id = ? AND deleted_at IS NULL`
+    ).bind(tripId).first<{ delay_reason_code: string | null; delay_reported_at: number | null; estimated_departure_ms: number | null }>();
+
+    if (!row) return c.json({ success: false, error: 'Trip not found' }, 404);
+    if (!row.delay_reason_code) return c.json({ success: true, data: null });
+
+    return c.json({ success: true, data: row });
+  } catch {
+    return c.json({ success: false, error: 'Failed to fetch delay info' }, 500);
+  }
+});
 
 // ============================================================
 // Driver Management — TRN-4

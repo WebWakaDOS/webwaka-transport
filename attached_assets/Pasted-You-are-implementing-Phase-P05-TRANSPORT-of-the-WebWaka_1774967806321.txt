@@ -1,0 +1,135 @@
+You are implementing Phase P05-TRANSPORT of the WebWaka platform.
+Target repo: webwaka-transport
+
+This phase builds the core trip operations layer: GPS location tracking, SOS system, digital boarding scan, manifest export, pre-trip inspection, and delay reporting. Read webwaka-implementation-plan.md for full context.
+
+=== TASK P05-T1: GPS Location Update Endpoint ===
+File: src/api/operator-management.ts
+
+Add POST /api/operator/trips/:id/location (DRIVER role+):
+- Body: { latitude: number, longitude: number, accuracy_meters?: number }
+- Validate: latitude ∈ [-90, 90], longitude ∈ [-180, 180], both must be numbers
+- SELECT id, state, operator_id FROM trips WHERE id = ? AND deleted_at IS NULL
+- If not found: 404. If state = 'completed' or 'cancelled': 422 { error: 'trip_not_active' }
+- Apply tenant scope (only the trip's operator can update it)
+- UPDATE trips SET current_latitude = ?, current_longitude = ?, location_updated_at = ? WHERE id = ?
+- Publish platform event: trip.location_updated with { trip_id, lat, lng, updated_at }
+- Return 204 No Content
+
+Add location_updated_at INTEGER column to trips in migration 003 (create this file if it doesn't exist).
+
+Extend GET /api/operator/trips/:id response to include current_latitude, current_longitude, location_updated_at.
+Extend GET /api/booking/bookings/:id response to include these same trip location fields (for passenger tracking).
+
+=== TASK P05-T2: SOS Trigger and Clear Endpoints ===
+File: src/api/operator-management.ts
+File: src/lib/sweepers.ts
+
+Add POST /api/operator/trips/:id/sos (DRIVER role+):
+1. SELECT id, sos_active, operator_id, route_id FROM trips WHERE id = ? AND deleted_at IS NULL
+2. If sos_active = 1: return 409 { error: 'sos_already_active' }
+3. UPDATE trips SET sos_active = 1, sos_triggered_at = ?, sos_triggered_by = ? WHERE id = ?
+4. Get operator config: emergency_contact_phone and sos_escalation_email
+5. Send SMS to emergency_contact_phone: "🚨 SOS ALERT: Driver triggered emergency on Trip {tripId}, Route {route}. Time: {time}. Check dispatch dashboard immediately."
+6. Publish platform event: trip:SOS_ACTIVATED with full trip context
+7. Return 200 { message: 'SOS activated. Emergency contacts notified.' }
+
+Add POST /api/operator/trips/:id/sos/clear (SUPERVISOR role+):
+1. SELECT id, sos_active FROM trips WHERE id = ?
+2. If sos_active = 0: return 409 { error: 'no_active_sos' }
+3. UPDATE trips SET sos_active = 0, sos_cleared_at = ?, sos_cleared_by = ? WHERE id = ?
+4. Publish platform event: trip:SOS_CLEARED
+5. Return 200 { message: 'SOS cleared.' }
+
+In drainEventBus() in sweepers.ts, add handler for trip:SOS_ACTIVATED:
+- Log as console.error (critical)
+- Non-fatal email alert if SENDGRID_API_KEY is configured
+- Do NOT suppress — this is the one event type that should never be silently dropped
+
+=== TASK P05-T3: Digital Boarding Scan Endpoint ===
+File: src/api/operator-management.ts
+
+Add POST /api/operator/trips/:id/board (STAFF role+):
+- Body: { qr_payload: string } where qr_payload = "{bookingId}:{seatId1},{seatId2}"
+- Parse qr_payload: const [bookingId, seatsStr] = qr_payload.split(':'); const seatIds = seatsStr.split(',');
+- Validate: both parts must be present and non-empty. Return 400 if malformed.
+- Query:
+SELECT b.id, b.passenger_names, b.boarded_at, b.status, b.trip_id,
+GROUP_CONCAT(s.seat_number) as seat_numbers
+FROM bookings b
+LEFT JOIN seats s ON s.booking_id = b.id
+WHERE b.id = ? AND b.trip_id = ? AND b.deleted_at IS NULL
+GROUP BY b.id
+- If not found: 404 { error: 'invalid_ticket', message: 'Ticket not found for this trip.' }
+- If status != 'confirmed': 422 { error: 'booking_not_confirmed', status: booking.status }
+- If boarded_at IS NOT NULL: 409 { error: 'already_boarded', boarded_at: booking.boarded_at, message: 'This passenger has already boarded.' }
+- UPDATE bookings SET boarded_at = ?, boarded_by = ? WHERE id = ?
+- Publish platform event: booking.boarded
+- Return 200 { passenger_names: [...], seat_numbers: '...', boarded_at: timestamp, message: 'Welcome aboard!' }
+
+Add GET /api/operator/trips/:id/boarding-status (STAFF role+):
+- Returns { total_confirmed: N, total_boarded: N, remaining: N, last_boarded_at: timestamp }
+- Query: SELECT COUNT(*) as total, SUM(CASE WHEN boarded_at IS NOT NULL THEN 1 ELSE 0 END) as boarded, MAX(boarded_at) as last_boarded FROM bookings WHERE trip_id = ? AND status = 'confirmed' AND deleted_at IS NULL
+
+=== TASK P05-T4: Trip Manifest Export ===
+File: src/api/operator-management.ts
+
+Extend GET /api/operator/trips/:id/manifest:
+1. Current response returns basic manifest. Extend it to include for each booking:
+- passenger_names array
+- seat_numbers (comma-separated)
+- boarded_at (null if not yet boarded)
+- payment_method
+- passenger_id_type (if captured, not the hash)
+- booking_id (for QR generation)
+2. Add content negotiation: check Accept header. If 'text/csv':
+- Build CSV string: "Seat,Passenger Name,Boarded,Payment Method,ID Type,Booking Ref\n" + rows
+- Return Response with Content-Type: text/csv and Content-Disposition: attachment; filename=manifest_{tripId}_{date}.csv
+3. Frontend manifest component: add "Export CSV" and "Print Manifest" buttons. Each manifest row should display a QR code (encoded as `{bookingId}:{seatId}`) generated client-side. Add a "Boarded" column with ✓ or ○.
+
+=== TASK P05-T5: Pre-Trip Inspection Checklist ===
+File: src/api/operator-management.ts
+
+Add POST /api/operator/trips/:id/inspection (DRIVER role+):
+- Body: { tires_ok: boolean, brakes_ok: boolean, lights_ok: boolean, fuel_ok: boolean, emergency_equipment_ok: boolean, manifest_count?: number, notes?: string }
+- Validate all boolean fields are true (if any is false, the inspection fails — return 422 with the specific failed item)
+- Check no existing inspection: SELECT id FROM trip_inspections WHERE trip_id = ? — if exists return 409
+- INSERT into trip_inspections
+- UPDATE trips SET inspection_completed_at = ? WHERE id = ?
+- Publish platform event: trip.inspection_completed
+- Return 200 with the inspection record
+
+Add GET /api/operator/trips/:id/inspection (STAFF role+):
+- Returns the inspection record or null
+
+In the trip state transition endpoint (PATCH /api/operator/trips/:id/state), when transitioning from 'scheduled' to 'boarding':
+- Read operator config: inspection_required_before_boarding
+- If true and inspection_completed_at IS NULL on the trip: return 422 { error: 'inspection_required', message: 'Pre-trip inspection must be completed before boarding.' }
+
+=== TASK P05-T6: Delay Reporting with Passenger Notification ===
+File: src/api/operator-management.ts
+File: src/lib/sweepers.ts
+File: migrations/ (003 file)
+
+Add columns to trips in migration 003:
+delay_reason_code TEXT, delay_reported_at INTEGER, estimated_departure_ms INTEGER
+
+Add POST /api/operator/trips/:id/delay (SUPERVISOR role+):
+- Body: { reason_code: 'traffic'|'breakdown'|'weather'|'accident'|'fuel'|'other', reason_details?: string, estimated_departure_ms: number }
+- Validate: reason_code must be one of the allowed values. estimated_departure_ms must be in the future.
+- UPDATE trips SET delay_reason_code = ?, delay_reported_at = ?, estimated_departure_ms = ? WHERE id = ?
+- Get all confirmed bookings with customer phone: SELECT b.id, c.phone as customer_phone FROM bookings b JOIN customers c ON c.id = b.customer_id WHERE b.trip_id = ? AND b.status = 'confirmed' AND b.deleted_at IS NULL
+- Publish platform event: trip:DELAYED with payload { trip_id, reason_code, estimated_departure_ms, affected_booking_count }
+- Return 200 with delay record
+
+In drainEventBus() in sweepers.ts, add handler for trip:DELAYED:
+- Parse payload to get affected_booking_ids (or re-query confirmed bookings for the trip)
+- For each customer phone, send SMS: "WebWaka: Your trip {route} on {date} has been delayed. Reason: {reason}. New est. departure: {time}. We apologize for the inconvenience."
+- Non-fatal: log send failures, do not rethrow
+- Limit SMS batch to 100 per event cycle to avoid rate limits
+
+Add GET /api/operator/trips/:id/delay (STAFF role+):
+- Returns { delay_reason_code, delay_reported_at, estimated_departure_ms } or null
+
+=== DONE ===
+Run tsc --noEmit. Run migration 003 locally. Test all 6 endpoints manually. Confirm SOS SMS sends (mock the Termii call in dev if no key is present — it should log a warning and continue).

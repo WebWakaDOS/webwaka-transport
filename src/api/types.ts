@@ -88,6 +88,16 @@ export interface DbTrip {
   state: string;
   current_latitude: number | null;
   current_longitude: number | null;
+  location_updated_at: number | null;
+  sos_active: number;
+  sos_triggered_at: number | null;
+  sos_triggered_by: string | null;
+  sos_cleared_at: number | null;
+  sos_cleared_by: string | null;
+  inspection_completed_at: number | null;
+  delay_reason_code: string | null;
+  delay_reported_at: number | null;
+  estimated_departure_ms: number | null;
   created_at: number;
   updated_at: number;
   deleted_at: number | null;

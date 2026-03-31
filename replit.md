@@ -284,6 +284,23 @@ Multi-step wizard integrated with `TripSearchModule` in `app.tsx`:
 - `PATCH /api/operator/operators/:id` — update operator name/phone/email/status; 404 for unknown (SUPER_ADMIN only, Phase 11)
 - `POST /api/operator/trips/:id/copy` — duplicate a trip to a new departure_time; preserves route/vehicle/driver/base_fare; fresh seats batch-inserted; 404 for unknown source, 400 if departure_time missing (TRN-4, Phase 12)
 
+### P03-TRANSPORT (complete) — Inline Payments, SMS, QR E-Tickets, Guest Booking
+- Paystack inline popup with `waka_` reference format; `POST /api/booking/payments/initiate` + `/verify`
+- SMS booking confirmation via Termii; enriched publishEvent payload
+- QR e-ticket page at `/b/:bookingId` with WhatsApp share + print CSS
+- Guest booking flow: OTP verify-phone endpoints; migration `011_guest_bookings`
+- Reservation TTL + operator config API; seat hold extension heartbeat (extend-hold endpoint)
+
+### P05-TRANSPORT (complete) — GPS, SOS, Digital Boarding, Manifest Export, Pre-Trip Inspection, Delay Reporting
+- **Migration 012_p05_trip_ops**: adds `location_updated_at`, `sos_triggered_by`, `delay_reason_code`, `delay_reported_at`, `estimated_departure_ms` to trips
+- **P05-T1 GPS**: `POST /api/operator/trips/:id/location` — validates state (not completed/cancelled), tenant scope, updates `location_updated_at`, publishes `trip.location_updated`, returns 204
+- **P05-T2 SOS**: `POST /api/operator/trips/:id/sos` (DRIVER+) — triggers SOS, sends SMS to emergency_contact_phone, publishes `trip:SOS_ACTIVATED`; `POST /api/operator/trips/:id/sos/clear` (SUPERVISOR+)
+- **P05-T3 Digital Boarding**: `POST /api/operator/trips/:id/board` — parses QR payload `{bookingId}:{seatIds}`, validates status/not-boarded, marks boarded_at, publishes `booking.boarded`; `GET /api/operator/trips/:id/boarding-status`
+- **P05-T4 Manifest Export**: Extended `GET /api/operator/trips/:id/manifest` with `boarded_at`, `seat_numbers`, `payment_method`, `qr_payload` per passenger; CSV export via `Accept: text/csv` header
+- **P05-T5 Pre-Trip Inspection**: `POST /api/operator/trips/:id/inspection` (DRIVER+) — validates all 5 boolean checks, inserts into `trip_inspections`, sets `inspection_completed_at`; state transition gate checks `inspection_required_before_boarding` config; `GET /api/operator/trips/:id/inspection`
+- **P05-T6 Delay Reporting**: `POST /api/operator/trips/:id/delay` (SUPERVISOR+) — reason_code enum validation, future timestamp check, publishes `trip:DELAYED`; sweepers bulk-SMS up to 100 affected passengers; `GET /api/operator/trips/:id/delay`
+- **Sweepers**: `trip:SOS_ACTIVATED` handler (console.error + optional SendGrid email, never dropped); `trip:DELAYED` handler (bulk SMS to confirmed passengers, max 100, non-fatal)
+
 ### Hardening applied to all 4 API files
 - All D1 queries wrapped in try/catch with 500 fallback
 - All `as any` body casts replaced with typed `Record<string, unknown>` + `requireFields()`

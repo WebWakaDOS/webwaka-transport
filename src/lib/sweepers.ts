@@ -274,6 +274,89 @@ async function deliverEvent(evt: Record<string, unknown>, env: Env): Promise<voi
     return;
   }
 
+  // P05-T2: trip:SOS_ACTIVATED — critical; never silently drop
+  if (eventType === 'trip:SOS_ACTIVATED') {
+    const payload = JSON.parse(String(evt['payload'] ?? '{}')); // already validated above
+    console.error(
+      `[EventBus] 🚨 SOS ALERT: trip ${payload['trip_id'] ?? evt['aggregate_id']} — ` +
+      `driver=${payload['triggered_by'] ?? 'unknown'}, ` +
+      `route=${payload['route'] ?? 'unknown'}, ` +
+      `at=${new Date(Number(payload['triggered_at'] ?? 0)).toISOString()}`
+    );
+    // Non-fatal email via SendGrid if configured
+    if (env.SENDGRID_API_KEY) {
+      const sosEmail = payload['sos_escalation_email'] as string | undefined;
+      if (sosEmail) {
+        await fetch('https://api.sendgrid.com/v3/mail/send', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${env.SENDGRID_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            personalizations: [{ to: [{ email: sosEmail }] }],
+            from: { email: 'noreply@webwaka.ng', name: 'WebWaka SOS' },
+            subject: `🚨 SOS ALERT — Trip ${payload['trip_id'] ?? evt['aggregate_id']}`,
+            content: [{
+              type: 'text/plain',
+              value: `SOS triggered by driver on trip ${payload['trip_id']}.\nRoute: ${payload['route'] ?? 'unknown'}\nTime: ${new Date(Number(payload['triggered_at'] ?? 0)).toLocaleString('en-NG')}\n\nCheck dispatch dashboard immediately.`,
+            }],
+          }),
+        }).catch((err: unknown) => {
+          console.error('[EventBus] SOS email failed (non-fatal):', err instanceof Error ? err.message : err);
+        });
+      }
+    }
+    return;
+  }
+
+  // P05-T6: trip:DELAYED — bulk SMS to all affected passengers
+  if (eventType === 'trip:DELAYED') {
+    try {
+      const payload = JSON.parse(String(evt['payload'] ?? '{}')) as Record<string, unknown>;
+      const tripId = String(payload['trip_id'] ?? evt['aggregate_id'] ?? '');
+      const reasonCode = String(payload['reason_code'] ?? 'other');
+      const estimatedMs = Number(payload['estimated_departure_ms'] ?? 0);
+      const origin = String(payload['origin'] ?? '');
+      const destination = String(payload['destination'] ?? '');
+      const departureDate = String(payload['departure_date'] ?? '');
+      const estimatedTime = estimatedMs
+        ? new Date(estimatedMs).toLocaleString('en-NG', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true })
+        : 'To be advised';
+
+      // Re-query confirmed bookings to get phones (event payload has count, not phones)
+      const db = env.DB;
+      const bookingsRes = await db.prepare(
+        `SELECT c.phone as customer_phone FROM bookings b
+         JOIN customers c ON c.id = b.customer_id
+         WHERE b.trip_id = ? AND b.status = 'confirmed' AND b.deleted_at IS NULL
+         LIMIT 100`
+      ).bind(tripId).all<{ customer_phone: string }>();
+
+      const phones = bookingsRes.results.map(r => r.customer_phone).filter(p => p && !p.startsWith('NDPR_'));
+      const reason = reasonCode.charAt(0).toUpperCase() + reasonCode.slice(1);
+      const route = origin && destination ? `${origin} → ${destination}` : `trip ${tripId.slice(-8)}`;
+
+      let sent = 0;
+      let failed = 0;
+      for (const phone of phones) {
+        const message =
+          `WebWaka: Your trip ${route} on ${departureDate} has been delayed. ` +
+          `Reason: ${reason}. New est. departure: ${estimatedTime}. We apologize for the inconvenience.`;
+        try {
+          await sendSms(phone, message, env);
+          sent++;
+        } catch {
+          failed++;
+        }
+      }
+      console.log(`[EventBus] trip:DELAYED SMS — sent=${sent}, failed=${failed}, trip=${tripId}`);
+    } catch (err) {
+      console.error('[EventBus] trip:DELAYED handler error (non-fatal):', err instanceof Error ? err.message : err);
+    }
+    return;
+  }
+
   // Default: no-op delivery (consumer not yet wired)
   console.log(`[EventBus] No-op delivery for: ${eventType} — consumer not yet wired`);
 }
