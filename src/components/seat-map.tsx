@@ -37,14 +37,60 @@ export function SeatMap({ tripId, selectedSeats, onToggle, maxSelectable = 4, re
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [refreshKey, setRefreshKey] = useState(0);
+  const [liveConnected, setLiveConnected] = useState(false);
 
+  // P10-T1: SSE live seat feed — fall back to polling if EventSource unavailable
   useEffect(() => {
     setLoading(true);
     setError('');
+
+    // Initial fetch to populate seats immediately
     api.getSeatAvailability(tripId)
       .then(d => setSeats(d.seats))
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false));
+
+    if (typeof EventSource === 'undefined') return;
+
+    const sseUrl = `/api/seat-inventory/trips/${tripId}/live`;
+    let es: EventSource;
+    try {
+      es = new EventSource(sseUrl);
+    } catch {
+      return; // SSE not supported — polling already done above
+    }
+
+    es.addEventListener('open', () => setLiveConnected(true));
+
+    es.addEventListener('message', (evt) => {
+      try {
+        const payload = JSON.parse(evt.data) as {
+          trip_id: string;
+          seats: Record<string, number>;
+          ts: number;
+        };
+        if (payload.trip_id !== tripId) return;
+        // Re-fetch full seat list to get seat_number and reservation details
+        api.getSeatAvailability(tripId)
+          .then(d => setSeats(d.seats))
+          .catch(() => { /* non-fatal — keep showing last known state */ });
+      } catch { /* ignore malformed events */ }
+    });
+
+    es.addEventListener('error', () => {
+      setLiveConnected(false);
+      es.close();
+    });
+
+    es.addEventListener('close', () => {
+      setLiveConnected(false);
+      es.close();
+    });
+
+    return () => {
+      setLiveConnected(false);
+      es.close();
+    };
   }, [tripId, refreshKey]);
 
   if (loading) {
@@ -84,8 +130,8 @@ export function SeatMap({ tripId, selectedSeats, onToggle, maxSelectable = 4, re
 
   return (
     <div>
-      {/* Stats bar */}
-      <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+      {/* Stats bar + live indicator */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
         {LEGEND.map(({ status, label }) => (
           <div key={status} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11 }}>
             <div style={{
@@ -95,6 +141,12 @@ export function SeatMap({ tripId, selectedSeats, onToggle, maxSelectable = 4, re
             <span style={{ color: '#64748b' }}>{label}: {stats[status] ?? 0}</span>
           </div>
         ))}
+        {liveConnected && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 10, color: '#16a34a', fontWeight: 700, marginLeft: 'auto' }}>
+            <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#16a34a', display: 'inline-block' }} />
+            LIVE
+          </div>
+        )}
       </div>
 
       {/* Bus driver indicator */}

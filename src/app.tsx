@@ -11,11 +11,10 @@ import { LoginScreen } from './components/login-screen';
 import { BookingFlow } from './components/booking-flow';
 import { TicketPage } from './components/ticket';
 import { ConflictLog } from './components/conflict-log';
-import { AnalyticsDashboard } from './components/analytics';
 import { DriverView } from './components/driver-view';
 import ReceiptModal, { type ReceiptData } from './components/receipt';
 import { api, ApiError } from './api/client';
-import type { TripSummary, Route, Vehicle, Trip, OperatorStats, Booking, SeatAvailability, TripManifest, ManifestEntry, Driver, Agent, RevenueReport, RouteRevenue, PlatformOperator, OperatorNotification } from './api/client';
+import type { TripSummary, Route, Vehicle, Trip, OperatorStats, Booking, SeatAvailability, TripManifest, ManifestEntry, Driver, Agent, RevenueReport, RouteRevenue, PlatformOperator, OperatorNotification, DispatchDashboard, DispatchTrip, GroupedRevenueReport, RevenueReportItem, PlatformAnalytics } from './api/client';
 import { getConflicts } from './core/offline/db';
 
 // ============================================================
@@ -994,7 +993,7 @@ function NotificationPanel({ notifications, unreadCount, markRead, onClose }: {
 // ============================================================
 // Operator Dashboard Module (TRN-4) — Routes, Vehicles, Trips
 // ============================================================
-type OperatorView = 'overview' | 'routes' | 'vehicles' | 'trips' | 'drivers' | 'agents' | 'reports';
+type OperatorView = 'overview' | 'routes' | 'vehicles' | 'trips' | 'drivers' | 'agents' | 'reports' | 'dispatch';
 
 function OperatorOverview({ onNav }: { onNav: (v: OperatorView) => void }) {
   const [stats, setStats] = useState<OperatorStats | null>(null);
@@ -1058,12 +1057,123 @@ function OperatorOverview({ onNav }: { onNav: (v: OperatorView) => void }) {
               <span style={{ fontSize: 24 }}>👤</span>
               <span style={{ fontSize: 13, fontWeight: 600, marginTop: 4 }}>Manage Agents</span>
             </button>
+            <button onClick={() => onNav('dispatch')} style={{ ...navCardStyle, gridColumn: 'span 2' }}>
+              <span style={{ fontSize: 24 }}>🗺</span>
+              <span style={{ fontSize: 13, fontWeight: 600, marginTop: 4 }}>Dispatcher Dashboard</span>
+            </button>
             <button onClick={() => onNav('reports')} style={{ ...navCardStyle, gridColumn: 'span 2' }}>
               <span style={{ fontSize: 24 }}>📊</span>
               <span style={{ fontSize: 13, fontWeight: 600, marginTop: 4 }}>Revenue Reports</span>
             </button>
           </div>
         </>
+      )}
+    </>
+  );
+}
+
+// ============================================================
+// P10-T2: DispatcherDashboard — active trips with GPS + seats
+// ============================================================
+function DispatcherDashboard({ onBack }: { onBack: () => void }) {
+  const [data, setData] = useState<DispatchDashboard | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      setData(await api.getDispatchDashboard());
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Failed to load dispatch data');
+    } finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const stateColor: Record<string, string> = {
+    scheduled: '#2563eb', boarding: '#d97706', in_transit: '#16a34a',
+  };
+
+  return (
+    <>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+        <button onClick={onBack} style={backBtnStyle}>←</button>
+        <div style={{ flex: 1 }}>
+          <h2 style={{ margin: 0, fontSize: 18 }}>Dispatcher Dashboard</h2>
+          {data && <div style={{ fontSize: 11, color: '#64748b' }}>As of {new Date(data.as_of).toLocaleTimeString('en-NG')}</div>}
+        </div>
+        <button onClick={() => void load()} style={{ background: '#eff6ff', border: 'none', borderRadius: 8, padding: '6px 12px', cursor: 'pointer', fontSize: 12, color: '#2563eb', fontWeight: 600 }}>
+          Refresh
+        </button>
+      </div>
+
+      {loading ? (
+        <p style={{ color: '#94a3b8', textAlign: 'center' }}>Loading…</p>
+      ) : error ? (
+        <div style={{ padding: 14, background: '#fee2e2', borderRadius: 8, color: '#b91c1c', fontSize: 13 }}>{error}</div>
+      ) : !data || data.trips.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: 32, color: '#94a3b8', fontSize: 14 }}>
+          <div style={{ fontSize: 40, marginBottom: 8 }}>🚌</div>
+          No active trips at the moment
+        </div>
+      ) : (
+        data.trips.map((trip: DispatchTrip) => (
+          <div key={trip.id} style={{ ...cardStyle, cursor: 'default', marginBottom: 10, borderLeft: `4px solid ${stateColor[trip.state] ?? '#64748b'}` }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6 }}>
+              <div style={{ fontWeight: 700, fontSize: 15 }}>
+                {trip.origin} → {trip.destination}
+              </div>
+              <span style={{
+                fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 10,
+                background: `${stateColor[trip.state] ?? '#64748b'}22`,
+                color: stateColor[trip.state] ?? '#64748b',
+                textTransform: 'uppercase',
+              }}>
+                {trip.state.replace('_', ' ')}
+              </span>
+            </div>
+
+            <div style={{ fontSize: 12, color: '#475569', marginBottom: 6 }}>
+              🕐 {new Date(trip.departure_time).toLocaleString('en-NG', { timeZone: 'Africa/Lagos', dateStyle: 'short', timeStyle: 'short' })}
+            </div>
+
+            {/* Seat counts */}
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
+              {[
+                { label: 'Avail', val: trip.seats.available, color: '#16a34a' },
+                { label: 'Conf', val: trip.seats.confirmed, color: '#2563eb' },
+                { label: 'Resv', val: trip.seats.reserved, color: '#d97706' },
+                { label: 'Total', val: trip.seats.total, color: '#64748b' },
+              ].map(({ label, val, color }) => (
+                <div key={label} style={{ fontSize: 11, fontWeight: 700, color, background: `${color}11`, padding: '2px 8px', borderRadius: 8 }}>
+                  {label}: {val}
+                </div>
+              ))}
+            </div>
+
+            {/* Driver & vehicle */}
+            <div style={{ display: 'flex', gap: 12, fontSize: 12, color: '#64748b' }}>
+              {trip.driver && (
+                <span>🧑‍✈️ {trip.driver.name} · {trip.driver.phone}</span>
+              )}
+              {trip.vehicle && (
+                <span>🚌 {trip.vehicle.plate_number}{trip.vehicle.model ? ` (${trip.vehicle.model})` : ''}</span>
+              )}
+            </div>
+
+            {trip.location && (
+              <div style={{ marginTop: 4, fontSize: 11, color: '#64748b' }}>
+                📍 {trip.location.latitude.toFixed(4)}, {trip.location.longitude.toFixed(4)}
+              </div>
+            )}
+
+            <div style={{ marginTop: 4, fontSize: 11, color: '#94a3b8' }}>
+              {trip.confirmed_bookings} confirmed booking{trip.confirmed_bookings !== 1 ? 's' : ''} · ID: {trip.id}
+            </div>
+          </div>
+        ))
       )}
     </>
   );
@@ -2060,6 +2170,7 @@ function OperatorDashboardModule() {
       {view === 'drivers' && <DriversPanel onBack={() => setView('overview')} />}
       {view === 'agents' && <AgentsPanel onBack={() => setView('overview')} />}
       {view === 'reports' && <ReportsPanel onBack={() => setView('overview')} />}
+      {view === 'dispatch' && <DispatcherDashboard onBack={() => setView('overview')} />}
 
       {panelOpen && (
         <>
@@ -2346,6 +2457,95 @@ function OperatorsPanel() {
   );
 }
 
+// ============================================================
+// P10-T5: PlatformAnalyticsSection — SUPER_ADMIN only
+// ============================================================
+function PlatformAnalyticsSection() {
+  const [data, setData] = useState<PlatformAnalytics | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    setLoading(true);
+    setError('');
+    api.getPlatformAnalytics()
+      .then(setData)
+      .catch((e: unknown) => setError(e instanceof ApiError ? e.message : 'Failed to load analytics'))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const statCard = (label: string, value: string | number, color = '#1e40af') => (
+    <div style={{ ...cardStyle, cursor: 'default', textAlign: 'center' }}>
+      <div style={{ fontSize: 22, fontWeight: 800, color }}>{value}</div>
+      <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>{label}</div>
+    </div>
+  );
+
+  if (loading) return <p style={{ color: '#94a3b8', textAlign: 'center', padding: 16 }}>Loading platform analytics…</p>;
+  if (error) return <div style={{ padding: 12, background: '#fee2e2', borderRadius: 8, color: '#b91c1c', fontSize: 13, marginBottom: 16 }}>{error}</div>;
+  if (!data) return null;
+
+  return (
+    <div style={{ padding: '0 0 16px' }}>
+      <h3 style={{ margin: '0 0 12px', fontSize: 15, color: '#0f172a' }}>Platform Analytics</h3>
+      <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10 }}>
+        Generated {new Date(data.generated_at).toLocaleString('en-NG', { timeZone: 'Africa/Lagos' })}
+      </div>
+
+      {/* KPI Grid */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 14 }}>
+        {statCard('Operators', data.operators.total, '#7c3aed')}
+        {statCard('Active Operators', data.operators.active, '#16a34a')}
+        {statCard('Total Trips', data.trips.total, '#2563eb')}
+        {statCard('Active Trips', (data.trips.boarding ?? 0) + (data.trips.in_transit ?? 0), '#d97706')}
+        {statCard('Total Bookings', data.bookings.total, '#64748b')}
+        {statCard('Confirmed Bookings', data.bookings.confirmed, '#16a34a')}
+      </div>
+
+      {/* Revenue */}
+      <div style={{ ...cardStyle, cursor: 'default', marginBottom: 14 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Revenue</div>
+        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 800, color: '#16a34a' }}>{formatAmount(data.revenue.total_revenue_kobo)}</div>
+            <div style={{ fontSize: 11, color: '#64748b' }}>All time</div>
+          </div>
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 800, color: '#2563eb' }}>{formatAmount(data.revenue.this_month_revenue_kobo)}</div>
+            <div style={{ fontSize: 11, color: '#64748b' }}>This month</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Top Routes */}
+      {data.top_routes.length > 0 && (
+        <div style={{ ...cardStyle, cursor: 'default', marginBottom: 14 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Top Routes</div>
+          {data.top_routes.map((r, i) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', borderBottom: i < data.top_routes.length - 1 ? '1px solid #f1f5f9' : 'none', fontSize: 13 }}>
+              <span style={{ color: '#374151' }}>{r.origin} → {r.destination}</span>
+              <span style={{ color: '#64748b', fontSize: 12 }}>{r.booking_count} bookings</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Top Operators */}
+      {data.top_operators.length > 0 && (
+        <div style={{ ...cardStyle, cursor: 'default' }}>
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Top Operators</div>
+          {data.top_operators.map((o, i) => (
+            <div key={o.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', borderBottom: i < data.top_operators.length - 1 ? '1px solid #f1f5f9' : 'none', fontSize: 13 }}>
+              <span style={{ color: '#374151' }}>{o.name}</span>
+              <span style={{ color: '#16a34a', fontWeight: 600, fontSize: 12 }}>{formatAmount(o.revenue_kobo)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SuperAdminModule() {
   return (
     <div style={{ padding: 16 }}>
@@ -2364,7 +2564,7 @@ function SuperAdminModule() {
 const STAFF_ROLES: WakaRole[] = ['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR', 'STAFF'];
 const ADMIN_ROLES: WakaRole[] = ['SUPER_ADMIN', 'TENANT_ADMIN'];
 const CONFLICT_ROLES: WakaRole[] = ['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR', 'STAFF'];
-const ANALYTICS_ROLES: WakaRole[] = ['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR'];
+const ANALYTICS_ROLES: WakaRole[] = ['SUPER_ADMIN'];
 
 // ============================================================
 // Main App — inner shell (requires AuthProvider above it)
@@ -2564,9 +2764,20 @@ function AppContent() {
         <ErrorBoundary label="Agent POS">
           {validTab === 'agent' && <AgentPOSModule online={online} />}
         </ErrorBoundary>
-        {/* C-005: Revenue analytics */}
+        {/* P10-T5: Platform analytics (SUPER_ADMIN only) */}
         <ErrorBoundary label="Analytics">
-          {validTab === 'analytics' && <AnalyticsDashboard />}
+          {validTab === 'analytics' && (
+            <div style={{ padding: 16 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 20 }}>
+                <span style={{ fontSize: 22 }}>📊</span>
+                <div>
+                  <div style={{ fontWeight: 800, fontSize: 17 }}>Platform Analytics</div>
+                  <div style={{ fontSize: 11, color: '#64748b' }}>WebWaka OS — Cross-tenant KPIs</div>
+                </div>
+              </div>
+              <PlatformAnalyticsSection />
+            </div>
+          )}
         </ErrorBoundary>
         <ErrorBoundary label="Operator Dashboard">
           {validTab === 'operator' && <OperatorDashboardModule />}

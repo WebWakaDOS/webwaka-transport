@@ -616,5 +616,79 @@ seatInventoryRouter.post('/sync', async (c) => {
   return c.json({ success: true, data: { applied, failed, synced_at: now } });
 });
 
+// ============================================================
+// P10-T1: GET /trips/:id/live — SSE seat availability feed
+// Public: covered by /api/seat-inventory/trips publicRoute prefix
+// Pushes seat count updates every ~30 s; closes after 5 minutes.
+// ============================================================
+
+const SSE_MAX_LIFETIME_MS = 5 * 60 * 1000;
+const SSE_PING_INTERVAL_MS = 30 * 1000;
+
+seatInventoryRouter.get('/trips/:id/live', async (c) => {
+  const tripId = c.req.param('id');
+  const db = c.env.DB;
+  const encoder = new TextEncoder();
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const enqueue = (text: string) => {
+        try { controller.enqueue(encoder.encode(text)); } catch { /* stream closed */ }
+      };
+
+      const trip = await db.prepare(
+        `SELECT id FROM trips WHERE id = ? AND deleted_at IS NULL`
+      ).bind(tripId).first<{ id: string }>();
+
+      if (!trip) {
+        enqueue('event: error\ndata: {"error":"trip_not_found"}\n\n');
+        try { controller.close(); } catch { /* already closed */ }
+        return;
+      }
+
+      const startTime = Date.now();
+      let lastSentState = '';
+
+      while (true) {
+        if (Date.now() - startTime >= SSE_MAX_LIFETIME_MS) {
+          enqueue('event: close\ndata: {"reason":"max_lifetime_reached"}\n\n');
+          try { controller.close(); } catch { /* already closed */ }
+          return;
+        }
+
+        try {
+          const result = await db.prepare(
+            `SELECT status, COUNT(*) as count FROM seats WHERE trip_id = ? GROUP BY status`
+          ).bind(tripId).all<{ status: string; count: number }>();
+
+          const counts: Record<string, number> = {};
+          for (const row of result.results) counts[row.status] = row.count;
+
+          const state = JSON.stringify(counts);
+          if (state !== lastSentState) {
+            lastSentState = state;
+            enqueue(`data: ${JSON.stringify({ trip_id: tripId, seats: counts, ts: Date.now() })}\n\n`);
+          } else {
+            enqueue(`: ping\n\n`);
+          }
+        } catch {
+          try { controller.close(); } catch { /* already closed */ }
+          return;
+        }
+
+        await new Promise<void>(res => setTimeout(res, SSE_PING_INTERVAL_MS));
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'X-Accel-Buffering': 'no',
+    },
+  });
+});
+
 // Keep for backwards compat — other API files re-export from ./types
 export type { DbTrip, DbSeat };

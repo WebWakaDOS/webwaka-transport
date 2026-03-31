@@ -1,0 +1,66 @@
+You are the QA agent for Phase P10-TRANSPORT of the WebWaka platform.
+Target repo: webwaka-transport
+
+Deeply verify P10-TRANSPORT (Real-Time Infrastructure and Analytics). Fix every issue. Do not declare verified until all checks pass.
+
+=== VERIFICATION CHECKLIST ===
+
+--- P10-T1: SSE Seat Availability Feed ---
+1. Confirm GET /api/seat-inventory/trips/:id/live returns Content-Type: text/event-stream.
+2. Confirm the response includes Cache-Control: no-cache and X-Accel-Buffering: no.
+3. Confirm the SSE endpoint uses a ReadableStream / TransformStream (not a regular JSON response).
+4. Confirm it sends data: ... events (not just comments) when seat state changes.
+5. Confirm it sends keep-alive pings (: ping) when there are no changes.
+6. Confirm the maximum connection lifetime is enforced (stream closes after ~5 minutes).
+7. Frontend: confirm an EventSource is opened on the seat selection screen.
+8. Frontend: confirm the onmessage handler updates seat state without a full page re-render.
+9. Frontend: confirm the EventSource is closed (es.close()) when the component unmounts.
+10. Check: is the SSE endpoint public (no auth required)? Per the plan it should be read-only public. Confirm no auth middleware is applied to this specific route.
+11. Check: what if the tripId does not exist? The SSE stream should immediately close or send an error event, not hang indefinitely.
+
+--- P10-T2: Dispatcher Dashboard ---
+1. Confirm GET /api/operator/dispatch exists and requires SUPERVISOR role.
+2. Confirm it returns trips in states: scheduled, boarding, in_transit (not completed or cancelled).
+3. Confirm each trip includes: state, route origin/destination, departure_time, vehicle plate, driver name, confirmed_count, boarded_count, sos_active, current_lat/lng, delay_reason_code, estimated_departure_ms, total_seats.
+4. Confirm tenant scope is applied — only the authenticated operator's trips are returned.
+5. Frontend: confirm the dispatcher dashboard exists and is accessible via a nav link for SUPERVISOR+ roles.
+6. Frontend: confirm trips with sos_active=1 are visually distinct (red border, warning indicator).
+7. Frontend: confirm delayed trips (delay_reason_code IS NOT NULL) are visually distinct (yellow indicator).
+8. Frontend: confirm the dashboard auto-refreshes. Confirm the refresh interval is ≤ 60 seconds.
+9. Frontend: confirm "View Manifest" links work and open the correct trip's manifest.
+
+--- P10-T3: Booking Reminder Sweeper ---
+1. Read sweepBookingReminders in sweepers.ts. Confirm it queries two windows: 23h–25h for 24h reminders, and 105min–135min for 2h reminders.
+2. Confirm reminder_24h_sent_at and reminder_2h_sent_at columns are checked before sending — a booking should never receive the same reminder twice.
+3. Confirm these columns exist on the bookings table (migration 003).
+4. Confirm sendSms is called with a human-readable message including route, time, seat numbers, and ticket URL.
+5. Confirm NDPR-anonymized phone numbers (starting with 'NDPR_') are skipped.
+6. Confirm the sweeper is non-fatal: a failed SMS does not prevent the next booking's reminder from being processed.
+7. Confirm sweepBookingReminders is wired to the minute cron in worker.ts (not just the daily cron).
+8. Check: the sweeper uses a LIMIT clause (50 per run) to prevent processing thousands of reminders in one cron tick. Confirm this limit is present.
+9. Check: what if departure_time has already passed? These bookings should not appear in the reminder queries (the BETWEEN condition naturally excludes past departures). Verify this is correct.
+
+--- P10-T4: Revenue Analytics ---
+1. Confirm GET /api/operator/reports accepts groupby query param with values: route, vehicle, driver.
+2. Confirm the response includes: total_trips, confirmed_seats, fill_rate_pct, gross_revenue_kobo, refunds_kobo, net_revenue_kobo, avg_fare_kobo.
+3. Confirm fill_rate_pct is computed correctly: (confirmed_seats / total_seats) * 100, rounded to 1 decimal.
+4. Confirm net_revenue_kobo = gross_revenue_kobo - refunds_kobo.
+5. Confirm date range filters (from, to) work correctly and default to the current month when not provided.
+6. Confirm tenant scope is applied — TENANT_ADMIN sees only their operator's data.
+7. Confirm SUPER_ADMIN can call with groupby=operator to see cross-tenant aggregates.
+8. Check: what if a route has no completed bookings? It should still appear with zero revenue values (not be omitted from the response).
+
+--- P10-T5: SUPER_ADMIN Analytics ---
+1. Confirm GET /api/internal/admin/analytics exists and requires SUPER_ADMIN role.
+2. Confirm the response includes: operators (total/active/suspended), trips (by state and by period), bookings (by status and by period), revenue (this month and all time), top 10 routes, top 10 operators, event bus health (pending/dead counts).
+3. Confirm a non-SUPER_ADMIN user gets 403.
+4. Confirm no tenant scope is applied (SUPER_ADMIN sees all operators' data).
+5. Frontend: confirm the analytics section is only visible in the navigation for SUPER_ADMIN role users.
+
+--- FINAL CHECKS ---
+1. Run tsc --noEmit — zero errors.
+2. Start the dev server. Open two browser tabs on the seat selection page for the same trip. Confirm both show the seat list.
+3. Grep for any hardcoded 30-second or similar magic numbers in the SSE endpoint — ensure they are well-named constants.
+4. Confirm the sweepBookingReminders function name is spelled consistently between its definition and its call in worker.ts.
+
+Report every issue found and every fix applied.

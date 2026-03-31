@@ -263,6 +263,78 @@ export interface PushSubscriptionData {
   };
 }
 
+// P10-T2: Dispatcher Dashboard
+export interface DispatchVehicle {
+  plate_number: string;
+  model: string | null;
+  total_seats: number | null;
+}
+
+export interface DispatchDriver {
+  id: string;
+  name: string;
+  phone: string;
+}
+
+export interface DispatchLocation {
+  latitude: number;
+  longitude: number;
+  recorded_at: number | null;
+}
+
+export interface DispatchTrip {
+  id: string;
+  state: string;
+  departure_time: number;
+  operator_id: string;
+  origin: string;
+  destination: string;
+  vehicle: DispatchVehicle | null;
+  driver: DispatchDriver | null;
+  location: DispatchLocation | null;
+  seats: { total: number; available: number; confirmed: number; reserved: number };
+  confirmed_bookings: number;
+}
+
+export interface DispatchDashboard {
+  trips: DispatchTrip[];
+  count: number;
+  as_of: number;
+}
+
+// P10-T4: Grouped Revenue Analytics
+export interface RevenueReportItem {
+  group_id: string;
+  group_label: string;
+  total_trips: number;
+  confirmed_seats: number;
+  fill_rate_pct: number;
+  gross_revenue_kobo: number;
+  refunds_kobo: number;
+  net_revenue_kobo: number;
+  avg_fare_kobo: number;
+}
+
+export interface GroupedRevenueReport {
+  groupby: string;
+  from_ms: number;
+  to_ms: number;
+  items: RevenueReportItem[];
+  total_items: number;
+  generated_at: number;
+}
+
+// P10-T5: SUPER_ADMIN Platform Analytics
+export interface PlatformAnalytics {
+  generated_at: number;
+  operators: { total: number; active: number };
+  trips: { total: number; scheduled: number; boarding: number; in_transit: number; completed: number; cancelled: number };
+  bookings: { total: number; confirmed: number; cancelled: number; pending: number };
+  revenue: { total_revenue_kobo: number; this_month_revenue_kobo: number };
+  top_routes: Array<{ origin: string; destination: string; booking_count: number; revenue_kobo: number }>;
+  top_operators: Array<{ id: string; name: string; trip_count: number; revenue_kobo: number }>;
+}
+
 export interface RevenueReport {
   period: { from: number; to: number };
   total_revenue_kobo: number;
@@ -842,6 +914,42 @@ export class ApiClient {
   async getGroupBooking(id: string): Promise<Record<string, unknown>> {
     const res = await this.request('GET', `/api/agent-sales/group-bookings/${id}`);
     return res as Record<string, unknown>;
+  }
+
+  // ---- P10-T2: Dispatcher Dashboard ----
+
+  async getDispatchDashboard(): Promise<DispatchDashboard> {
+    const res = await this.request<{ success: boolean; data: DispatchDashboard }>(
+      'GET', '/api/operator/dispatch'
+    );
+    return res.data;
+  }
+
+  // ---- P10-T4: Grouped Revenue Analytics ----
+
+  async getGroupedRevenueReport(params?: {
+    groupby?: 'route' | 'vehicle' | 'driver' | 'operator';
+    from?: number;
+    to?: number;
+  }): Promise<GroupedRevenueReport> {
+    const q = new URLSearchParams();
+    if (params?.groupby) q.set('groupby', params.groupby);
+    if (params?.from != null) q.set('from', String(params.from));
+    if (params?.to != null) q.set('to', String(params.to));
+    const qs = q.toString() ? `?${q.toString()}` : '';
+    const res = await this.request<{ success: boolean; data: GroupedRevenueReport }>(
+      'GET', `/api/operator/reports${qs}`
+    );
+    return res.data;
+  }
+
+  // ---- P10-T5: SUPER_ADMIN Platform Analytics ----
+
+  async getPlatformAnalytics(): Promise<PlatformAnalytics> {
+    const res = await this.request<{ success: boolean; data: PlatformAnalytics }>(
+      'GET', '/api/internal/admin/analytics'
+    );
+    return res.data;
   }
 }
 

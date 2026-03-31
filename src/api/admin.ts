@@ -596,6 +596,13 @@ const MIGRATIONS: Migration[] = [
       )`,
     ],
   },
+  {
+    name: '016_p10_booking_reminders',
+    statements: [
+      `ALTER TABLE bookings ADD COLUMN reminder_24h_sent_at INTEGER`,
+      `ALTER TABLE bookings ADD COLUMN reminder_2h_sent_at INTEGER`,
+    ],
+  },
 ];
 
 export const adminRouter = new Hono<{ Bindings: AdminEnv }>();

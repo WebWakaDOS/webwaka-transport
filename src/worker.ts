@@ -34,7 +34,7 @@ import { operatorManagementRouter } from './api/operator-management.js';
 import { adminRouter } from './api/admin.js';
 import { authRouter } from './api/auth.js';
 import { paymentsRouter, hmacSha512 } from './api/payments.js';
-import { jwtAuthMiddleware, requireTenantMiddleware } from './middleware/auth.js';
+import { jwtAuthMiddleware, requireTenantMiddleware, requireRole } from './middleware/auth.js';
 import { idempotencyMiddleware } from './middleware/idempotency.js';
 import {
   drainEventBus,
@@ -46,6 +46,7 @@ import {
   sweepVehicleMaintenanceDue,
   sweepVehicleDocumentExpiry,
   sweepDriverDocumentExpiry,
+  sweepBookingReminders,
 } from './lib/sweepers.js';
 import { notificationsRouter } from './api/notifications.js';
 
@@ -322,6 +323,90 @@ app.post('/webhooks/flutterwave', async (c) => {
 });
 
 // ============================================================
+// P10-T5: SUPER_ADMIN Platform Analytics
+// GET /api/internal/admin/analytics — cross-tenant KPIs
+// JWT-protected; SUPER_ADMIN role required; no tenant scope.
+// ============================================================
+app.get('/api/internal/admin/analytics', requireRole(['SUPER_ADMIN']), async (c) => {
+  const db = c.env.DB;
+  const now = Date.now();
+  const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime();
+
+  try {
+    const [operators, trips, bookings, revenue] = await Promise.all([
+      db.prepare(
+        `SELECT COUNT(*) as total,
+                COUNT(CASE WHEN status = 'active' THEN 1 END) as active
+         FROM operators WHERE deleted_at IS NULL`
+      ).first<{ total: number; active: number }>(),
+
+      db.prepare(
+        `SELECT COUNT(*) as total,
+                COUNT(CASE WHEN state = 'scheduled' THEN 1 END) as scheduled,
+                COUNT(CASE WHEN state = 'boarding' THEN 1 END) as boarding,
+                COUNT(CASE WHEN state = 'in_transit' THEN 1 END) as in_transit,
+                COUNT(CASE WHEN state = 'completed' THEN 1 END) as completed,
+                COUNT(CASE WHEN state = 'cancelled' THEN 1 END) as cancelled
+         FROM trips WHERE deleted_at IS NULL`
+      ).first<{ total: number; scheduled: number; boarding: number; in_transit: number; completed: number; cancelled: number }>(),
+
+      db.prepare(
+        `SELECT COUNT(*) as total,
+                COUNT(CASE WHEN status = 'confirmed' THEN 1 END) as confirmed,
+                COUNT(CASE WHEN status = 'cancelled' THEN 1 END) as cancelled,
+                COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending
+         FROM bookings WHERE deleted_at IS NULL`
+      ).first<{ total: number; confirmed: number; cancelled: number; pending: number }>(),
+
+      db.prepare(
+        `SELECT COALESCE(SUM(CASE WHEN status = 'confirmed' THEN total_amount ELSE 0 END), 0) as total_revenue_kobo,
+                COALESCE(SUM(CASE WHEN status = 'confirmed' AND created_at >= ? THEN total_amount ELSE 0 END), 0) as this_month_revenue_kobo
+         FROM bookings WHERE deleted_at IS NULL`
+      ).bind(monthStart).first<{ total_revenue_kobo: number; this_month_revenue_kobo: number }>(),
+    ]);
+
+    const topRoutes = await db.prepare(
+      `SELECT r.origin, r.destination,
+              COUNT(DISTINCT b.id) as booking_count,
+              COALESCE(SUM(CASE WHEN b.status = 'confirmed' THEN b.total_amount ELSE 0 END), 0) as revenue_kobo
+       FROM routes r
+       LEFT JOIN trips t ON t.route_id = r.id AND t.deleted_at IS NULL
+       LEFT JOIN bookings b ON b.trip_id = t.id AND b.deleted_at IS NULL
+       WHERE r.deleted_at IS NULL
+       GROUP BY r.id, r.origin, r.destination
+       ORDER BY booking_count DESC LIMIT 5`
+    ).all<{ origin: string; destination: string; booking_count: number; revenue_kobo: number }>();
+
+    const topOperators = await db.prepare(
+      `SELECT o.id, o.name,
+              COUNT(DISTINCT t.id) as trip_count,
+              COALESCE(SUM(CASE WHEN b.status = 'confirmed' THEN b.total_amount ELSE 0 END), 0) as revenue_kobo
+       FROM operators o
+       LEFT JOIN trips t ON t.operator_id = o.id AND t.deleted_at IS NULL
+       LEFT JOIN bookings b ON b.trip_id = t.id AND b.deleted_at IS NULL
+       WHERE o.deleted_at IS NULL AND o.status = 'active'
+       GROUP BY o.id, o.name
+       ORDER BY revenue_kobo DESC LIMIT 5`
+    ).all<{ id: string; name: string; trip_count: number; revenue_kobo: number }>();
+
+    return c.json({
+      success: true,
+      data: {
+        generated_at: now,
+        operators: operators ?? { total: 0, active: 0 },
+        trips: trips ?? { total: 0, scheduled: 0, boarding: 0, in_transit: 0, completed: 0, cancelled: 0 },
+        bookings: bookings ?? { total: 0, confirmed: 0, cancelled: 0, pending: 0 },
+        revenue: revenue ?? { total_revenue_kobo: 0, this_month_revenue_kobo: 0 },
+        top_routes: topRoutes.results,
+        top_operators: topOperators.results,
+      },
+    });
+  } catch {
+    return c.json({ success: false, error: 'Failed to fetch platform analytics' }, 500);
+  }
+});
+
+// ============================================================
 // Internal admin — migration runner
 // Mounted at /internal/admin to bypass jwtAuthMiddleware.
 // Protected by MIGRATION_SECRET Bearer token instead.
@@ -374,6 +459,7 @@ export async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionC
     sweepExpiredReservations(env),
     sweepAbandonedBookings(env),
     sweepExpiredWaitlistNotifications(env),
+    sweepBookingReminders(env),
   ]));
 
   // Run daily sweepers only at midnight UTC (C-002)

@@ -2161,3 +2161,255 @@ operatorManagementRouter.post('/notifications/:eventId/read', requireRole(['SUPE
     return c.json({ success: false, error: 'Failed to mark notification as read' }, 500);
   }
 });
+
+// ============================================================
+// P10-T2: GET /dispatch — Dispatcher Dashboard
+// SUPERVISOR+ only: returns active trips with driver, vehicle,
+// GPS location, seat counts, and manifest summary.
+// ============================================================
+operatorManagementRouter.get('/dispatch', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR']), async (c) => {
+  const db = c.env.DB;
+  const user = c.get('user');
+  const operatorId = user?.operatorId ?? null;
+
+  try {
+    let query = `
+      SELECT
+        t.id, t.state, t.departure_time, t.operator_id,
+        r.origin, r.destination,
+        v.plate_number, v.model, v.total_seats,
+        d.id as driver_id, d.name as driver_name, d.phone as driver_phone,
+        tl.latitude, tl.longitude, tl.recorded_at as location_recorded_at,
+        COUNT(DISTINCT s.id) as total_seat_count,
+        COUNT(DISTINCT CASE WHEN s.status = 'available' THEN s.id END) as available_seats,
+        COUNT(DISTINCT CASE WHEN s.status = 'confirmed' THEN s.id END) as confirmed_seats,
+        COUNT(DISTINCT CASE WHEN s.status = 'reserved' THEN s.id END) as reserved_seats,
+        COUNT(DISTINCT CASE WHEN b.status = 'confirmed' THEN b.id END) as confirmed_bookings
+      FROM trips t
+      JOIN routes r ON r.id = t.route_id
+      LEFT JOIN vehicles v ON v.id = t.vehicle_id AND v.deleted_at IS NULL
+      LEFT JOIN drivers d ON d.id = t.driver_id AND d.deleted_at IS NULL
+      LEFT JOIN trip_locations tl ON tl.trip_id = t.id
+      LEFT JOIN seats s ON s.trip_id = t.id
+      LEFT JOIN bookings b ON b.trip_id = t.id AND b.deleted_at IS NULL
+      WHERE t.deleted_at IS NULL
+        AND t.state IN ('scheduled', 'boarding', 'in_transit')`;
+
+    const params: unknown[] = [];
+    if (user?.role !== 'SUPER_ADMIN' && operatorId) {
+      query += ` AND t.operator_id = ?`;
+      params.push(operatorId);
+    }
+    query += ` GROUP BY t.id ORDER BY t.departure_time ASC LIMIT 100`;
+
+    const result = await db.prepare(query).bind(...params).all<{
+      id: string; state: string; departure_time: number; operator_id: string;
+      origin: string; destination: string;
+      plate_number: string | null; model: string | null; total_seats: number | null;
+      driver_id: string | null; driver_name: string | null; driver_phone: string | null;
+      latitude: number | null; longitude: number | null; location_recorded_at: number | null;
+      total_seat_count: number; available_seats: number; confirmed_seats: number;
+      reserved_seats: number; confirmed_bookings: number;
+    }>();
+
+    const trips = result.results.map(t => ({
+      id: t.id,
+      state: t.state,
+      departure_time: t.departure_time,
+      operator_id: t.operator_id,
+      origin: t.origin,
+      destination: t.destination,
+      vehicle: t.plate_number ? {
+        plate_number: t.plate_number,
+        model: t.model,
+        total_seats: t.total_seats,
+      } : null,
+      driver: t.driver_id ? {
+        id: t.driver_id,
+        name: t.driver_name,
+        phone: t.driver_phone,
+      } : null,
+      location: t.latitude !== null ? {
+        latitude: t.latitude,
+        longitude: t.longitude,
+        recorded_at: t.location_recorded_at,
+      } : null,
+      seats: {
+        total: t.total_seat_count,
+        available: t.available_seats,
+        confirmed: t.confirmed_seats,
+        reserved: t.reserved_seats,
+      },
+      confirmed_bookings: t.confirmed_bookings,
+    }));
+
+    return c.json({ success: true, data: { trips, count: trips.length, as_of: Date.now() } });
+  } catch (err: unknown) {
+    console.error('[Dispatch] Error:', err instanceof Error ? err.message : String(err));
+    return c.json({ success: false, error: 'Failed to fetch dispatch dashboard' }, 500);
+  }
+});
+
+// ============================================================
+// P10-T4: GET /reports — Grouped Revenue Analytics
+// Supports: groupby=route|vehicle|driver|operator(SUPER_ADMIN)
+// Date range: from/to as Unix ms; defaults to current month.
+// Returns per-group: total_trips, confirmed_seats, fill_rate_pct,
+//   gross_revenue_kobo, refunds_kobo, net_revenue_kobo, avg_fare_kobo
+// ============================================================
+operatorManagementRouter.get('/reports', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR']), async (c) => {
+  const db = c.env.DB;
+  const user = c.get('user');
+  const operatorId = user?.operatorId ?? null;
+  const q = c.req.query();
+
+  const now = Date.now();
+  const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime();
+  const fromMs = q['from'] ? parseInt(q['from'], 10) : monthStart;
+  const toMs = q['to'] ? parseInt(q['to'], 10) : now;
+  const groupby = q['groupby'] ?? 'route';
+
+  const VALID_GROUPBY = ['route', 'vehicle', 'driver', 'operator'];
+  if (!VALID_GROUPBY.includes(groupby)) {
+    return c.json({ success: false, error: `groupby must be one of: ${VALID_GROUPBY.join(', ')}` }, 400);
+  }
+  if (groupby === 'operator' && user?.role !== 'SUPER_ADMIN') {
+    return c.json({ success: false, error: 'groupby=operator requires SUPER_ADMIN role' }, 403);
+  }
+
+  try {
+    let rows: Array<{
+      group_id: string; group_label: string;
+      total_trips: number; total_capacity: number; confirmed_seats: number;
+      gross_revenue_kobo: number; refunds_kobo: number;
+    }>;
+
+    if (groupby === 'route') {
+      let sql = `
+        SELECT
+          r.id as group_id,
+          (r.origin || ' → ' || r.destination) as group_label,
+          COUNT(DISTINCT t.id) as total_trips,
+          COALESCE(SUM(COALESCE(v.total_seats, 0)), 0) as total_capacity,
+          COUNT(DISTINCT CASE WHEN s.status = 'confirmed' THEN s.id END) as confirmed_seats,
+          COALESCE(SUM(CASE WHEN b.status = 'confirmed' AND b.deleted_at IS NULL THEN b.total_amount ELSE 0 END), 0) as gross_revenue_kobo,
+          COALESCE(SUM(CASE WHEN b.deleted_at IS NULL THEN COALESCE(b.refund_amount_kobo, 0) ELSE 0 END), 0) as refunds_kobo
+        FROM routes r
+        LEFT JOIN trips t ON t.route_id = r.id AND t.deleted_at IS NULL
+          AND t.departure_time BETWEEN ? AND ?
+        LEFT JOIN vehicles v ON v.id = t.vehicle_id AND v.deleted_at IS NULL
+        LEFT JOIN seats s ON s.trip_id = t.id
+        LEFT JOIN bookings b ON b.trip_id = t.id
+        WHERE r.deleted_at IS NULL`;
+      const params: unknown[] = [fromMs, toMs];
+      if (user?.role !== 'SUPER_ADMIN' && operatorId) { sql += ` AND r.operator_id = ?`; params.push(operatorId); }
+      sql += ` GROUP BY r.id, r.origin, r.destination ORDER BY gross_revenue_kobo DESC LIMIT 50`;
+      const res = await db.prepare(sql).bind(...params).all<typeof rows[0]>();
+      rows = res.results;
+
+    } else if (groupby === 'vehicle') {
+      let sql = `
+        SELECT
+          v.id as group_id,
+          (v.plate_number || ' (' || COALESCE(v.model, 'Unknown') || ')') as group_label,
+          COUNT(DISTINCT t.id) as total_trips,
+          COALESCE(SUM(COALESCE(v.total_seats, 0)), 0) as total_capacity,
+          COUNT(DISTINCT CASE WHEN s.status = 'confirmed' THEN s.id END) as confirmed_seats,
+          COALESCE(SUM(CASE WHEN b.status = 'confirmed' AND b.deleted_at IS NULL THEN b.total_amount ELSE 0 END), 0) as gross_revenue_kobo,
+          COALESCE(SUM(CASE WHEN b.deleted_at IS NULL THEN COALESCE(b.refund_amount_kobo, 0) ELSE 0 END), 0) as refunds_kobo
+        FROM vehicles v
+        LEFT JOIN trips t ON t.vehicle_id = v.id AND t.deleted_at IS NULL
+          AND t.departure_time BETWEEN ? AND ?
+        LEFT JOIN seats s ON s.trip_id = t.id
+        LEFT JOIN bookings b ON b.trip_id = t.id
+        WHERE v.deleted_at IS NULL`;
+      const params: unknown[] = [fromMs, toMs];
+      if (user?.role !== 'SUPER_ADMIN' && operatorId) { sql += ` AND v.operator_id = ?`; params.push(operatorId); }
+      sql += ` GROUP BY v.id, v.plate_number, v.model ORDER BY gross_revenue_kobo DESC LIMIT 50`;
+      const res = await db.prepare(sql).bind(...params).all<typeof rows[0]>();
+      rows = res.results;
+
+    } else if (groupby === 'driver') {
+      let sql = `
+        SELECT
+          d.id as group_id,
+          d.name as group_label,
+          COUNT(DISTINCT t.id) as total_trips,
+          COALESCE(SUM(COALESCE(v.total_seats, 0)), 0) as total_capacity,
+          COUNT(DISTINCT CASE WHEN s.status = 'confirmed' THEN s.id END) as confirmed_seats,
+          COALESCE(SUM(CASE WHEN b.status = 'confirmed' AND b.deleted_at IS NULL THEN b.total_amount ELSE 0 END), 0) as gross_revenue_kobo,
+          COALESCE(SUM(CASE WHEN b.deleted_at IS NULL THEN COALESCE(b.refund_amount_kobo, 0) ELSE 0 END), 0) as refunds_kobo
+        FROM drivers d
+        LEFT JOIN trips t ON t.driver_id = d.id AND t.deleted_at IS NULL
+          AND t.departure_time BETWEEN ? AND ?
+        LEFT JOIN vehicles v ON v.id = t.vehicle_id AND v.deleted_at IS NULL
+        LEFT JOIN seats s ON s.trip_id = t.id
+        LEFT JOIN bookings b ON b.trip_id = t.id
+        WHERE d.deleted_at IS NULL`;
+      const params: unknown[] = [fromMs, toMs];
+      if (user?.role !== 'SUPER_ADMIN' && operatorId) { sql += ` AND d.operator_id = ?`; params.push(operatorId); }
+      sql += ` GROUP BY d.id, d.name ORDER BY gross_revenue_kobo DESC LIMIT 50`;
+      const res = await db.prepare(sql).bind(...params).all<typeof rows[0]>();
+      rows = res.results;
+
+    } else {
+      // groupby=operator (SUPER_ADMIN only — already checked above)
+      const res = await db.prepare(`
+        SELECT
+          o.id as group_id,
+          o.name as group_label,
+          COUNT(DISTINCT t.id) as total_trips,
+          COALESCE(SUM(COALESCE(v.total_seats, 0)), 0) as total_capacity,
+          COUNT(DISTINCT CASE WHEN s.status = 'confirmed' THEN s.id END) as confirmed_seats,
+          COALESCE(SUM(CASE WHEN b.status = 'confirmed' AND b.deleted_at IS NULL THEN b.total_amount ELSE 0 END), 0) as gross_revenue_kobo,
+          COALESCE(SUM(CASE WHEN b.deleted_at IS NULL THEN COALESCE(b.refund_amount_kobo, 0) ELSE 0 END), 0) as refunds_kobo
+        FROM operators o
+        LEFT JOIN trips t ON t.operator_id = o.id AND t.deleted_at IS NULL
+          AND t.departure_time BETWEEN ? AND ?
+        LEFT JOIN vehicles v ON v.id = t.vehicle_id AND v.deleted_at IS NULL
+        LEFT JOIN seats s ON s.trip_id = t.id
+        LEFT JOIN bookings b ON b.trip_id = t.id
+        WHERE o.deleted_at IS NULL AND o.status = 'active'
+        GROUP BY o.id, o.name
+        ORDER BY gross_revenue_kobo DESC LIMIT 50
+      `).bind(fromMs, toMs).all<typeof rows[0]>();
+      rows = res.results;
+    }
+
+    const data = rows.map(r => {
+      const netRev = r.gross_revenue_kobo - r.refunds_kobo;
+      const fillRate = r.total_capacity > 0
+        ? Math.round((r.confirmed_seats / r.total_capacity) * 1000) / 10
+        : 0;
+      const avgFare = r.total_trips > 0
+        ? Math.round(r.gross_revenue_kobo / r.total_trips)
+        : 0;
+      return {
+        group_id: r.group_id,
+        group_label: r.group_label,
+        total_trips: r.total_trips,
+        confirmed_seats: r.confirmed_seats,
+        fill_rate_pct: fillRate,
+        gross_revenue_kobo: r.gross_revenue_kobo,
+        refunds_kobo: r.refunds_kobo,
+        net_revenue_kobo: netRev,
+        avg_fare_kobo: avgFare,
+      };
+    });
+
+    return c.json({
+      success: true,
+      data: {
+        groupby,
+        from_ms: fromMs,
+        to_ms: toMs,
+        items: data,
+        total_items: data.length,
+        generated_at: Date.now(),
+      },
+    });
+  } catch (err: unknown) {
+    console.error('[Reports] Error:', err instanceof Error ? err.message : String(err));
+    return c.json({ success: false, error: 'Failed to generate revenue report' }, 500);
+  }
+});

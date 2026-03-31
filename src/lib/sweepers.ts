@@ -668,6 +668,97 @@ export async function sweepDriverDocumentExpiry(env: Env): Promise<void> {
   }
 }
 
+// ============================================================
+// P10-T3: sweepBookingReminders — every-minute cron
+// Sends SMS reminders to confirmed bookings:
+//   - 24h reminder: departure_time between now+23h and now+25h
+//   -  2h reminder: departure_time between now+105min and now+135min
+// Idempotent: reminder_24h_sent_at / reminder_2h_sent_at guard duplicates.
+// NDPR: skips phones starting with 'NDPR_' or ndpr_consent=0.
+// ============================================================
+export async function sweepBookingReminders(env: Env): Promise<void> {
+  const db = env.DB;
+  const now = Date.now();
+  const h23 = now + 23 * 60 * 60 * 1000;
+  const h25 = now + 25 * 60 * 60 * 1000;
+  const m105 = now + 105 * 60 * 1000;
+  const m135 = now + 135 * 60 * 1000;
+
+  try {
+    const due24h = await db.prepare(
+      `SELECT b.id, b.seat_ids,
+              c.phone, c.name as customer_name, c.ndpr_consent,
+              t.departure_time, r.origin, r.destination
+       FROM bookings b
+       JOIN customers c ON c.id = b.customer_id
+       JOIN trips t ON t.id = b.trip_id
+       JOIN routes r ON r.id = t.route_id
+       WHERE b.status = 'confirmed'
+         AND b.deleted_at IS NULL
+         AND t.departure_time BETWEEN ? AND ?
+         AND b.reminder_24h_sent_at IS NULL
+       LIMIT 50`
+    ).bind(h23, h25).all<{
+      id: string; seat_ids: string;
+      phone: string; customer_name: string; ndpr_consent: number;
+      departure_time: number; origin: string; destination: string;
+    }>();
+
+    for (const booking of due24h.results) {
+      try {
+        if (!booking.ndpr_consent || booking.phone.startsWith('NDPR_')) continue;
+        const depTime = new Date(booking.departure_time).toLocaleString('en-NG', {
+          timeZone: 'Africa/Lagos', dateStyle: 'medium', timeStyle: 'short',
+        });
+        const seatCount = (() => {
+          try { return (JSON.parse(booking.seat_ids) as string[]).length; } catch { return 1; }
+        })();
+        const msg = `WebWaka: Reminder — your trip ${booking.origin} → ${booking.destination} departs in ~24 hours (${depTime}). ${seatCount} seat(s) reserved. Safe travels!`;
+        await sendSms(env, booking.phone, msg);
+        await db.prepare(`UPDATE bookings SET reminder_24h_sent_at = ? WHERE id = ?`).bind(now, booking.id).run();
+      } catch { /* skip individual — non-fatal */ }
+    }
+
+    const due2h = await db.prepare(
+      `SELECT b.id, b.seat_ids,
+              c.phone, c.name as customer_name, c.ndpr_consent,
+              t.departure_time, r.origin, r.destination
+       FROM bookings b
+       JOIN customers c ON c.id = b.customer_id
+       JOIN trips t ON t.id = b.trip_id
+       JOIN routes r ON r.id = t.route_id
+       WHERE b.status = 'confirmed'
+         AND b.deleted_at IS NULL
+         AND t.departure_time BETWEEN ? AND ?
+         AND b.reminder_2h_sent_at IS NULL
+       LIMIT 50`
+    ).bind(m105, m135).all<{
+      id: string; seat_ids: string;
+      phone: string; customer_name: string; ndpr_consent: number;
+      departure_time: number; origin: string; destination: string;
+    }>();
+
+    for (const booking of due2h.results) {
+      try {
+        if (!booking.ndpr_consent || booking.phone.startsWith('NDPR_')) continue;
+        const depTime = new Date(booking.departure_time).toLocaleString('en-NG', {
+          timeZone: 'Africa/Lagos', timeStyle: 'short',
+        });
+        const msg = `WebWaka: Departing soon! ${booking.origin} → ${booking.destination} departs at ${depTime} (~2 hours). Please proceed to boarding. Safe travels!`;
+        await sendSms(env, booking.phone, msg);
+        await db.prepare(`UPDATE bookings SET reminder_2h_sent_at = ? WHERE id = ?`).bind(now, booking.id).run();
+      } catch { /* skip individual — non-fatal */ }
+    }
+
+    const total = due24h.results.length + due2h.results.length;
+    if (total > 0) {
+      console.log(`[BookingReminders] ${due24h.results.length} 24h + ${due2h.results.length} 2h reminders sent`);
+    }
+  } catch (err: unknown) {
+    console.error(`[BookingReminders] Error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 async function deliverToConsumer(endpointUrl: string, evt: Record<string, unknown>): Promise<void> {
   const response = await fetch(endpointUrl, {
     method: 'POST',
