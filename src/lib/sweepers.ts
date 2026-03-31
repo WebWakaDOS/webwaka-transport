@@ -248,7 +248,8 @@ async function deliverEvent(evt: Record<string, unknown>, env: Env): Promise<voi
       const message =
         `WebWaka: Booking confirmed! ${origin} → ${destination}, ${departureDate}, ` +
         `Seat(s): ${seats}. Ref: ${shortId}. View: https://webwaka.ng/b/${bookingId}`;
-      if (phone) await sendSms(phone, message, env);
+      // NDPR guard: skip SMS if phone is anonymized or empty
+      if (phone && !phone.startsWith('NDPR_')) await sendSms(phone, message, env);
     } catch (err) {
       console.error('[EventBus] SMS send error:', err instanceof Error ? err.message : err);
     }

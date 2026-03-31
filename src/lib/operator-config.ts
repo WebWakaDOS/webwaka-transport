@@ -74,6 +74,41 @@ export function validateOperatorConfig(body: Record<string, unknown>): string | 
     }
   }
 
+  // Range validation — reject zero, negative, and unreasonably large values
+  const ttl = body['reservation_ttl_ms'] as number;
+  if (!Number.isInteger(ttl) || ttl <= 0) {
+    return `reservation_ttl_ms must be a positive integer (ms), got ${ttl}`;
+  }
+  if (ttl > 30 * 60 * 1000) {
+    return `reservation_ttl_ms cannot exceed 30 minutes (1800000 ms)`;
+  }
+
+  const onlineTtl = body['online_reservation_ttl_ms'] as number;
+  if (!Number.isInteger(onlineTtl) || onlineTtl <= 0) {
+    return `online_reservation_ttl_ms must be a positive integer (ms), got ${onlineTtl}`;
+  }
+  if (onlineTtl > 60 * 60 * 1000) {
+    return `online_reservation_ttl_ms cannot exceed 60 minutes (3600000 ms)`;
+  }
+
+  const abandonMs = body['abandonment_window_ms'] as number;
+  if (!Number.isInteger(abandonMs) || abandonMs <= 0) {
+    return `abandonment_window_ms must be a positive integer (ms), got ${abandonMs}`;
+  }
+
+  const surge = body['surge_multiplier_cap'] as number;
+  if (typeof surge !== 'number' || surge <= 0) {
+    return `surge_multiplier_cap must be a positive number, got ${surge}`;
+  }
+  if (surge > 5.0) {
+    return `surge_multiplier_cap cannot exceed 5.0 (got ${surge}) — prevents runaway pricing`;
+  }
+
+  const boarding = body['boarding_window_minutes'] as number;
+  if (!Number.isInteger(boarding) || boarding <= 0 || boarding > 240) {
+    return `boarding_window_minutes must be a positive integer between 1 and 240`;
+  }
+
   const policy = body['cancellation_policy'] as Record<string, unknown> | undefined;
   if (!policy || typeof policy !== 'object') {
     return `Field 'cancellation_policy' must be an object`;

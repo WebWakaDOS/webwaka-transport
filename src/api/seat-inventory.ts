@@ -373,12 +373,19 @@ seatInventoryRouter.post('/trips/:tripId/extend-hold', async (c) => {
     `SELECT status, reservation_token, reservation_expires_at FROM seats WHERE id = ? AND trip_id = ?`
   ).bind(seat_id, tripId).first<{ status: string; reservation_token: string | null; reservation_expires_at: number | null }>();
 
-  if (!seat) return c.json({ success: false, error: 'Seat not found' }, 404);
+  if (!seat) return c.json({ success: false, error: 'Seat not found for this trip' }, 404);
 
-  if (seat.status !== 'reserved' || seat.reservation_token !== token) {
-    return c.json({ success: false, error: 'invalid_hold', message: 'Hold is invalid or does not belong to you' }, 409);
+  // Check token FIRST so we can distinguish expired vs invalid
+  if (seat.reservation_token !== token) {
+    return c.json({ success: false, error: 'invalid_hold', message: 'Hold token does not match. Not your reservation.' }, 409);
   }
 
+  // Token matches but seat was swept (status no longer reserved) — 410 Gone
+  if (seat.status !== 'reserved') {
+    return c.json({ success: false, error: 'hold_expired', message: 'Reservation has expired and seat was released. Please rebook.' }, 410);
+  }
+
+  // Seat is still reserved but TTL has lapsed — 410 Gone
   if (seat.reservation_expires_at !== null && seat.reservation_expires_at < now) {
     return c.json({ success: false, error: 'hold_expired', message: 'Reservation has expired. Please rebook.' }, 410);
   }

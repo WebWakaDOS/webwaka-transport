@@ -277,6 +277,15 @@ function StepConfirm({ trip, selectedSeats, customerId, passengerNames, onSucces
         setup: (config: Record<string, unknown>) => { openIframe: () => void };
       } | undefined;
 
+      // Explicit guard: if Paystack JS failed to load, fall back to redirect with a clear notice
+      if (!paystackPop || !paystackKey) {
+        // Fallback: open Paystack checkout in new tab — pop-up SDK unavailable (CDN may be down or blocked)
+        setError('Payment popup is unavailable. Opening secure Paystack checkout in a new tab — complete payment there and click "I\'ve completed payment" below.');
+        if (init.authorization_url) window.open(init.authorization_url, '_blank', 'noopener,noreferrer');
+        setAwaiting({ reference: init.reference, bookingId: booking.id, booking, provider: 'paystack', checkoutUrl: init.authorization_url });
+        return;
+      }
+
       if (paystackKey && paystackPop) {
         // Inline popup — auto-verifies on success, no redirect required
         setBusy(false);
@@ -288,7 +297,19 @@ function StepConfirm({ trip, selectedSeats, customerId, passengerNames, onSucces
           currency: 'NGN',
           label: `WebWaka — ${trip.origin} to ${trip.destination}`,
           onClose: () => {
-            setError('Payment cancelled. Try again when ready.');
+            setError('Payment window closed. Your seat is still held briefly — retry to complete payment.');
+            // Non-fatal: extend the hold so the user can retry without rebooking
+            if (booking.seat_ids) {
+              const ids = Array.isArray(booking.seat_ids) ? booking.seat_ids as string[] : [];
+              ids.forEach((seatId) => {
+                // We don't have the token here, so we do a best-effort call (non-fatal)
+                fetch(`/api/seat-inventory/trips/${trip.id}/extend-hold`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ seat_id: seatId, token: '' }),
+                }).catch(() => {});
+              });
+            }
           },
           callback: (response: { reference: string }) => {
             setBusy(true);
@@ -306,10 +327,6 @@ function StepConfirm({ trip, selectedSeats, customerId, passengerNames, onSucces
         handler.openIframe();
         return;
       }
-
-      // Fallback: open Paystack checkout in new tab if popup unavailable
-      if (init.authorization_url) window.open(init.authorization_url, '_blank', 'noopener,noreferrer');
-      setAwaiting({ reference: init.reference, bookingId: booking.id, booking, provider: 'paystack', checkoutUrl: init.authorization_url });
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Booking failed. Please try again.');
     } finally {

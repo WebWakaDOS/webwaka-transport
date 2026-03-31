@@ -132,13 +132,35 @@ app.get('/b/:bookingId/data', async (c) => {
        JOIN routes r ON r.id = t.route_id
        JOIN operators o ON o.id = t.operator_id
        WHERE b.id = ? AND b.status = 'confirmed' AND b.deleted_at IS NULL`
-    ).bind(bookingId).first();
+    ).bind(bookingId).first<{
+      id: string; seat_ids: string; passenger_names: string;
+      origin: string; destination: string; departure_time: number;
+      operator_name: string; total_amount: number; status: string;
+      payment_status: string; payment_reference: string;
+      confirmed_at: number | null; created_at: number;
+      customer_id: string; trip_id: string;
+    }>();
 
     if (!booking) {
       return c.json({ success: false, error: 'Booking not found or not yet confirmed' }, 404);
     }
 
-    return c.json({ success: true, data: booking });
+    // Fetch seat numbers so the ticket page can display them
+    let seat_numbers: string[] = [];
+    try {
+      const seatIds = JSON.parse(booking.seat_ids) as string[];
+      if (seatIds.length > 0) {
+        const placeholders = seatIds.map(() => '?').join(', ');
+        const seatsRes = await db.prepare(
+          `SELECT seat_number FROM seats WHERE id IN (${placeholders})`
+        ).bind(...seatIds).all<{ seat_number: string }>();
+        seat_numbers = seatsRes.results.map(s => s.seat_number);
+      }
+    } catch {
+      // non-fatal — ticket still works without seat_numbers
+    }
+
+    return c.json({ success: true, data: { ...booking, seat_numbers } });
   } catch {
     return c.json({ success: false, error: 'Failed to load booking' }, 500);
   }

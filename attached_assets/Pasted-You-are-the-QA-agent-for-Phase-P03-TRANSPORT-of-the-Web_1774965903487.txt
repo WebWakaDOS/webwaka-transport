@@ -1,0 +1,77 @@
+You are the QA agent for Phase P03-TRANSPORT of the WebWaka platform.
+Target repo: webwaka-transport
+
+Deeply verify P03-TRANSPORT. Fix every issue. Do not declare verified until all checks pass.
+
+=== VERIFICATION CHECKLIST ===
+
+--- P03-T1: Configurable Reservation TTL ---
+1. Locate the getOperatorConfig helper. Confirm it reads from TENANT_CONFIG_KV, parses JSON, and merges with DEFAULT_OPERATOR_CONFIG (so missing fields always get defaults, never undefined).
+2. Confirm GET /api/operator/config exists and returns the full config with defaults applied.
+3. Confirm PUT /api/operator/config validates the submitted body. Check: what happens if someone submits reservation_ttl_ms: -1? Should be rejected (must be positive integer). What if surge_multiplier_cap: 100? Should be capped at a reasonable max. Verify validation exists.
+4. Confirm PUT writes to TENANT_CONFIG_KV and publishes a platform event.
+5. In the reserve endpoint, confirm it reads the TTL from the operator config (not a hardcoded 30000).
+6. Confirm Origin header detection works: if Origin header is present, uses online_reservation_ttl_ms; if absent, uses reservation_ttl_ms.
+7. Check that getOperatorConfig is consistent — used the same way in both the single-seat reserve and reserve-batch endpoints.
+
+--- P03-T2: Seat Hold Extension ---
+1. Locate POST /api/seat-inventory/trips/:tripId/extend-hold.
+2. Verify it checks that the token matches (not just that the seat is reserved — any agent with the right token should be able to extend).
+3. Verify it returns 410 Gone when the seat is already expired (not 409, not 404).
+4. Verify the max hold cap is enforced: no hold can exceed 10 minutes from its creation.
+5. Check: what happens if the seat_id or token is missing from the body? Should return 400. Confirm it does.
+6. Check: what happens if the seat does not belong to the specified tripId? Should return 404. Confirm it does.
+
+--- P03-T3: Paystack Inline Popup SDK ---
+1. Open index.html. Confirm the Paystack inline SDK script tag is present in the <head>: <script src="https://js.paystack.co/v1/inline.js"></script>.
+2. Find the booking payment component. Confirm window.PaystackPop.setup is called (not a redirect to a Paystack URL).
+3. Verify the onSuccess callback calls PATCH /api/booking/bookings/:id/confirm with the transaction reference.
+4. Verify the onClose callback calls the extend-hold endpoint to preserve the seat.
+5. Check: is VITE_PAYSTACK_PUBLIC_KEY correctly referenced from import.meta.env? Confirm it is not hardcoded.
+6. Confirm .env.example has VITE_PAYSTACK_PUBLIC_KEY=your_paystack_public_key_here or similar.
+7. Check: what happens if the Paystack script fails to load (CDN down)? The page should not crash. Verify there is a guard: if (!window.PaystackPop) — show a fallback message.
+
+--- P03-T4: SMS Booking Confirmation ---
+1. Read src/lib/sms.ts. Confirm sendSms is a complete implementation calling the Termii API (not a stub/placeholder).
+2. Verify the Termii API URL is correct: https://api.ng.termii.com/api/sms/send.
+3. Confirm sendSms is non-fatal: a failed Termii API call logs an error but does not throw (so a failed SMS cannot prevent a booking from being confirmed).
+4. Read drainEventBus() in src/lib/sweepers.ts. Find the booking.created / booking:CONFIRMED handler. Confirm it:
+a. Parses the event payload as JSON
+b. Reads customer_phone from the payload
+c. Builds a human-readable SMS message with route, date, seats, booking reference, and ticket URL
+d. Calls sendSms with the phone and message
+e. Does not throw on SMS failure
+5. Confirm the publishEvent call in booking-portal.ts for booking creation includes customer_phone, origin, destination, departure_date, seat_numbers in the payload. If any of these are missing, the SMS will be incomplete — fix the payload.
+6. Check: what if customer_phone is empty or NDPR-anonymized ('NDPR_...')? The code should skip the SMS gracefully. Confirm there is a guard: if (phone && !phone.startsWith('NDPR_')).
+
+--- P03-T5: E-Ticket Page with QR ---
+1. Confirm GET /b/:bookingId route exists and is public (no auth required).
+2. Confirm it returns 404 for bookings with status != 'confirmed'.
+3. Confirm it returns the booking details including: origin, destination, departure_time, operator_name, passenger_names, seat_numbers, booking_id.
+4. Confirm src/pages/ticket.tsx (or equivalent) exists and is registered in the React router.
+5. Confirm the QR code library is installed (check package.json for qrcode or similar).
+6. Confirm the QR encodes the correct data: `{bookingId}:{seatIds_comma_separated}`.
+7. Confirm the "Share via WhatsApp" button uses wa.me/?text= and not the WhatsApp Business API.
+8. Load the e-ticket page in the dev server. Confirm it renders without errors in the browser console.
+9. Check: does the e-ticket page work without authentication? Navigate to /b/someId directly without a JWT cookie and confirm no 401 redirect.
+10. Check @media print: confirm there are print-specific CSS rules that hide navigation and make the receipt layout compact.
+
+--- P03-T6: Guest Booking ---
+1. Confirm POST /api/booking/verify-phone exists and is public.
+2. Confirm it validates Nigerian phone format before sending OTP.
+3. Confirm OTP is stored in SESSIONS_KV with key guest_otp_{phone} and has a TTL (not stored indefinitely).
+4. Confirm POST /api/booking/verify-phone/confirm returns a JWT on correct OTP, and 401 on wrong OTP.
+5. Confirm the guest JWT has a short TTL (15 minutes or less).
+6. Confirm POST /api/booking/bookings accepts guest JWTs (same auth middleware path).
+7. Confirm that when a guest user books, a customer record is created with the guest phone and is_guest = 1.
+8. Confirm is_guest column exists on the bookings table (check migration 002 or 003).
+9. Check: NDPR consent is still enforced for guest bookings (ndpr_consent: true must be in the body).
+
+--- FINAL CHECKS ---
+1. Run tsc --noEmit — zero errors.
+2. Start the dev server. Open the app. Confirm no console errors on load.
+3. Navigate to /b/test — confirm a 404 or "booking not found" message (not a crash).
+4. Grep for TODO or FIXME in all files touched in this phase — resolve or document every one.
+
+Report every issue found and every fix applied.
+```
