@@ -239,6 +239,17 @@ export interface AgentBreakdown {
   transaction_count: number;
 }
 
+export interface OperatorNotification {
+  id: string;
+  event_type: string;
+  aggregate_id: string;
+  aggregate_type: string;
+  payload: Record<string, unknown>;
+  created_at: number;
+  read_at: number | null;
+  is_read: boolean;
+}
+
 export interface DailyRevenue {
   date_ms: number;
   total_kobo: number;
@@ -686,6 +697,19 @@ export class ApiClient {
 
   async updateOperator(id: string, body: { name?: string; phone?: string; email?: string; status?: string }): Promise<void> {
     await this.request('PATCH', `/api/operator/operators/${id}`, body);
+  }
+
+  // ---- P09-T3: Operator Notification Center ----
+
+  async getOperatorNotifications(): Promise<{ notifications: OperatorNotification[]; unread_count: number }> {
+    const res = await this.request<{ data: { notifications: OperatorNotification[]; unread_count: number } }>(
+      'GET', '/api/operator/notifications'
+    );
+    return res.data;
+  }
+
+  async markNotificationRead(eventId: string): Promise<void> {
+    await this.request('POST', `/api/operator/notifications/${eventId}/read`, {});
   }
 
   // ---- C-001: Web Push Notifications ----

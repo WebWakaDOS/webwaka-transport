@@ -1,0 +1,90 @@
+You are implementing Phase P09-TRANSPORT of the WebWaka platform.
+Target repo: webwaka-transport
+
+This phase builds fleet and compliance management, and the operator notification center. Read webwaka-implementation-plan.md for full context.
+
+=== TASK P09-T1: Vehicle Maintenance Tracking ===
+File: src/api/operator-management.ts
+File: src/lib/sweepers.ts
+
+Add POST /api/operator/vehicles/:id/maintenance (TENANT_ADMIN+):
+- Body: { service_type: string, service_date_ms: number, next_service_due_ms?: number, notes?: string }
+- INSERT into vehicle_maintenance_records
+- If next_service_due_ms < Date.now() + 7*86400*1000: immediately publish vehicle.maintenance_due_soon event
+- Return the created record
+
+Add GET /api/operator/vehicles/:id/maintenance:
+- Returns maintenance records ordered by service_date DESC, limit 20
+
+Add POST /api/operator/vehicles/:id/documents (TENANT_ADMIN+):
+- Body: { doc_type: 'roadworthiness'|'insurance'|'frsc_approval'|'nafdac', doc_number?, issued_at_ms?, expires_at_ms: number }
+- INSERT into vehicle_documents
+- Return created document
+
+Add GET /api/operator/vehicles/:id/documents:
+- Returns all documents for the vehicle with expiry status: 'valid'|'expiring_soon'|'expired'
+(expired = expires_at < now; expiring_soon = expires_at < now + 30*86400*1000)
+
+Add sweepVehicleMaintenanceDue(env) to sweepers.ts:
+- Daily: SELECT v.id, v.plate_number, o.id as operator_id, v.next_service_due_ms FROM vehicles v JOIN operators o ON o.id = v.operator_id WHERE v.next_service_due_ms < ? AND v.deleted_at IS NULL (cutoff = now + 7*86400*1000)
+- For each: publish vehicle.maintenance_due_soon event
+
+Add sweepVehicleDocumentExpiry(env) to sweepers.ts:
+- Daily: SELECT vd.*, v.plate_number, o.id as operator_id FROM vehicle_documents vd JOIN vehicles v ON v.id = vd.vehicle_id JOIN operators o ON o.id = v.operator_id WHERE vd.expires_at < ? (cutoff = now + 30*86400*1000)
+- For each: publish vehicle.document_expiring event
+
+Wire both sweepers to the daily cron in worker.ts.
+
+In driver assignment (PATCH /api/operator/trips/:id where vehicle_id is being set):
+- Check: SELECT id FROM vehicle_documents WHERE vehicle_id = ? AND doc_type = 'roadworthiness' AND expires_at < ? (now) — if expired, return 422 { error: 'vehicle_compliance_expired', doc_type: 'roadworthiness' }
+
+=== TASK P09-T2: Driver Document Management ===
+File: src/api/operator-management.ts
+File: src/lib/sweepers.ts
+
+Add POST /api/operator/drivers/:id/documents (TENANT_ADMIN+):
+- Body: { doc_type: 'drivers_license'|'frsc_cert'|'medical_cert', doc_number?: string, license_category?: string, issued_at_ms?: number, expires_at_ms: number }
+- INSERT into driver_documents
+- Return created document
+
+Add GET /api/operator/drivers/:id/documents:
+- Returns all documents with expiry status (same as vehicle documents)
+
+Add sweepDriverDocumentExpiry(env) to sweepers.ts (daily):
+- SELECT dd.*, d.name, o.id as operator_id FROM driver_documents dd JOIN drivers d ON d.id = dd.driver_id JOIN operators o ON o.id = d.operator_id WHERE dd.expires_at < ? (now + 30*86400*1000)
+- Publish driver.document_expiring for each
+
+Wire to daily cron.
+
+In driver assignment to a trip:
+- Check: SELECT id FROM driver_documents WHERE driver_id = ? AND doc_type = 'drivers_license' AND expires_at < ? (now)
+- If expired: return 422 { error: 'driver_license_expired', doc_type: 'drivers_license' }
+
+=== TASK P09-T3: Operator Notification Center ===
+File: src/api/operator-management.ts
+Frontend: operator dashboard notification panel
+
+Add GET /api/operator/notifications (TENANT_ADMIN+):
+- Query platform_events where tenant_id = operator_id AND created_at > Date.now() - 7*86400*1000
+- Filter to actionable types: trip:SOS_ACTIVATED, agent.reconciliation_filed, vehicle.maintenance_due_soon, vehicle.document_expiring, driver.document_expiring, booking:ABANDONED, payment:AMOUNT_MISMATCH, trip:DELAYED, booking:REFUNDED
+- Sort by created_at DESC, limit 50
+- For each event, add a read_at field: check notification_reads table (create this table: { event_id, user_id, read_at })
+- Return { notifications: [...events with read_at], unread_count: N }
+
+Add POST /api/operator/notifications/:eventId/read (TENANT_ADMIN+):
+- INSERT OR IGNORE into notification_reads { event_id, user_id: authenticatedUserId, read_at: now }
+- Return 200
+
+Frontend notification panel:
+- Show a badge on the operator dashboard header with the unread_count
+- Badge is red for SOS events, yellow for compliance events, blue for others
+- Click opens a slide-in panel listing notifications with timestamps and action links
+- SOS notifications show as a persistent red banner at the top of the dashboard that cannot be closed until the SOS is cleared (check trips with sos_active=1 on dashboard load)
+- Auto-refresh notifications every 30 seconds via polling
+
+Create notification_reads table in migration 003:
+CREATE TABLE IF NOT EXISTS notification_reads (event_id TEXT NOT NULL, user_id TEXT NOT NULL, read_at INTEGER NOT NULL, PRIMARY KEY (event_id, user_id));
+
+=== DONE ===
+Run tsc --noEmit. Run migration 003. Test vehicle document expiry check blocking a trip assignment. Test notification badge shows unread count.
+```

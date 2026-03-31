@@ -15,7 +15,7 @@ import { AnalyticsDashboard } from './components/analytics';
 import { DriverView } from './components/driver-view';
 import ReceiptModal, { type ReceiptData } from './components/receipt';
 import { api, ApiError } from './api/client';
-import type { TripSummary, Route, Vehicle, Trip, OperatorStats, Booking, SeatAvailability, TripManifest, ManifestEntry, Driver, Agent, RevenueReport, RouteRevenue, PlatformOperator } from './api/client';
+import type { TripSummary, Route, Vehicle, Trip, OperatorStats, Booking, SeatAvailability, TripManifest, ManifestEntry, Driver, Agent, RevenueReport, RouteRevenue, PlatformOperator, OperatorNotification } from './api/client';
 import { getConflicts } from './core/offline/db';
 
 // ============================================================
@@ -864,6 +864,129 @@ function AgentPOSModule({ online }: { online: boolean }) {
           onClose={() => setReceiptModal(null)}
         />
       )}
+    </div>
+  );
+}
+
+// ============================================================
+// P09-T3: Operator Notification Panel — badge + slide-in drawer
+// ============================================================
+const SOS_EVENT_TYPES = ['trip:SOS_ACTIVATED'];
+const COMPLIANCE_EVENT_TYPES = ['vehicle.maintenance_due_soon', 'vehicle.document_expiring', 'driver.document_expiring'];
+
+function notificationColor(eventType: string): string {
+  if (SOS_EVENT_TYPES.includes(eventType)) return '#dc2626';
+  if (COMPLIANCE_EVENT_TYPES.includes(eventType)) return '#d97706';
+  return '#2563eb';
+}
+
+function notificationLabel(n: OperatorNotification): string {
+  const labels: Record<string, string> = {
+    'trip:SOS_ACTIVATED': 'SOS Alert',
+    'agent.reconciliation_filed': 'Reconciliation Filed',
+    'vehicle.maintenance_due_soon': 'Maintenance Due',
+    'vehicle.document_expiring': 'Vehicle Doc Expiring',
+    'driver.document_expiring': 'Driver Doc Expiring',
+    'booking:ABANDONED': 'Abandoned Booking',
+    'payment:AMOUNT_MISMATCH': 'Payment Mismatch',
+    'trip:DELAYED': 'Trip Delayed',
+    'booking:REFUNDED': 'Booking Refunded',
+  };
+  return labels[n.event_type] ?? n.event_type;
+}
+
+function useOperatorNotifications() {
+  const [notifications, setNotifications] = useState<OperatorNotification[]>([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+
+  const refresh = useCallback(() => {
+    api.getOperatorNotifications()
+      .then(res => {
+        setNotifications(res.notifications);
+        setUnreadCount(res.unread_count);
+      })
+      .catch(() => {/* silently ignore if operator role not active */});
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    const id = setInterval(refresh, 30_000);
+    return () => clearInterval(id);
+  }, [refresh]);
+
+  const markRead = useCallback(async (eventId: string) => {
+    await api.markNotificationRead(eventId).catch(() => {});
+    setNotifications(prev => prev.map(n => n.id === eventId ? { ...n, is_read: true, read_at: Date.now() } : n));
+    setUnreadCount(prev => Math.max(0, prev - 1));
+  }, []);
+
+  return { notifications, unreadCount, markRead, refresh };
+}
+
+function NotificationPanel({ notifications, unreadCount, markRead, onClose }: {
+  notifications: OperatorNotification[];
+  unreadCount: number;
+  markRead: (id: string) => Promise<void>;
+  onClose: () => void;
+}) {
+  const sosCounts = notifications.filter(n => SOS_EVENT_TYPES.includes(n.event_type) && !n.is_read).length;
+
+  return (
+    <div style={{
+      position: 'fixed', top: 0, right: 0, bottom: 0, width: 320, maxWidth: '92vw',
+      background: '#fff', boxShadow: '-4px 0 24px rgba(0,0,0,0.15)', zIndex: 9999,
+      display: 'flex', flexDirection: 'column', overflowY: 'hidden',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 16px', borderBottom: '1px solid #e2e8f0' }}>
+        <div>
+          <span style={{ fontWeight: 700, fontSize: 16 }}>Notifications</span>
+          {unreadCount > 0 && (
+            <span style={{ marginLeft: 8, background: '#dc2626', color: '#fff', borderRadius: 10, padding: '1px 7px', fontSize: 11, fontWeight: 700 }}>
+              {unreadCount}
+            </span>
+          )}
+        </div>
+        <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: '#64748b' }}>✕</button>
+      </div>
+
+      {sosCounts > 0 && (
+        <div style={{ background: '#dc2626', color: '#fff', padding: '10px 16px', fontSize: 13, fontWeight: 600 }}>
+          ⚠ {sosCounts} active SOS alert{sosCounts > 1 ? 's' : ''} — respond immediately
+        </div>
+      )}
+
+      <div style={{ overflowY: 'auto', flex: 1 }}>
+        {notifications.length === 0 ? (
+          <p style={{ textAlign: 'center', color: '#94a3b8', padding: 24, fontSize: 14 }}>No notifications in the last 7 days</p>
+        ) : notifications.map(n => (
+          <div
+            key={n.id}
+            onClick={() => { if (!n.is_read) void markRead(n.id); }}
+            style={{
+              padding: '12px 16px', borderBottom: '1px solid #f1f5f9', cursor: n.is_read ? 'default' : 'pointer',
+              background: n.is_read ? '#fff' : '#f8fafc',
+              borderLeft: `4px solid ${notificationColor(n.event_type)}`,
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+              <span style={{ fontWeight: n.is_read ? 400 : 700, fontSize: 13, color: notificationColor(n.event_type) }}>
+                {notificationLabel(n)}
+              </span>
+              {!n.is_read && (
+                <span style={{ width: 8, height: 8, borderRadius: '50%', background: notificationColor(n.event_type), display: 'inline-block', marginTop: 3, flexShrink: 0 }} />
+              )}
+            </div>
+            <div style={{ fontSize: 11, color: '#64748b', marginTop: 3 }}>
+              {new Date(n.created_at).toLocaleString()}
+            </div>
+            {n.aggregate_id && (
+              <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>
+                ID: {n.aggregate_id}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1890,9 +2013,46 @@ function ReportsPanel({ onBack }: { onBack: () => void }) {
 
 function OperatorDashboardModule() {
   const [view, setView] = useState<OperatorView>('overview');
+  const [panelOpen, setPanelOpen] = useState(false);
+  const { notifications, unreadCount, markRead } = useOperatorNotifications();
+
+  const sosActive = notifications.some(n => SOS_EVENT_TYPES.includes(n.event_type) && !n.is_read);
 
   return (
     <div style={{ padding: 16 }}>
+      {/* SOS persistent banner — only cleared when SOS notifications are read */}
+      {sosActive && (
+        <div style={{
+          background: '#dc2626', color: '#fff', padding: '10px 14px', borderRadius: 8,
+          marginBottom: 12, fontWeight: 700, fontSize: 13, display: 'flex', alignItems: 'center', gap: 8,
+        }}>
+          <span>⚠ ACTIVE SOS ALERT — trip in distress. Check notifications for details.</span>
+        </div>
+      )}
+
+      {/* Notification badge button */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+        <button
+          onClick={() => setPanelOpen(true)}
+          style={{
+            position: 'relative', background: '#fff', border: '1px solid #e2e8f0',
+            borderRadius: 20, padding: '6px 14px', cursor: 'pointer', fontSize: 13,
+            display: 'flex', alignItems: 'center', gap: 6, boxShadow: '0 1px 4px rgba(0,0,0,0.08)',
+          }}
+        >
+          🔔
+          {unreadCount > 0 && (
+            <span style={{
+              position: 'absolute', top: -4, right: -4,
+              background: '#dc2626', color: '#fff', borderRadius: 10,
+              padding: '1px 6px', fontSize: 10, fontWeight: 700, minWidth: 16, textAlign: 'center',
+            }}>
+              {unreadCount}
+            </span>
+          )}
+        </button>
+      </div>
+
       {view === 'overview' && <OperatorOverview onNav={setView} />}
       {view === 'routes' && <RoutesPanel onBack={() => setView('overview')} />}
       {view === 'vehicles' && <VehiclesPanel onBack={() => setView('overview')} />}
@@ -1900,6 +2060,21 @@ function OperatorDashboardModule() {
       {view === 'drivers' && <DriversPanel onBack={() => setView('overview')} />}
       {view === 'agents' && <AgentsPanel onBack={() => setView('overview')} />}
       {view === 'reports' && <ReportsPanel onBack={() => setView('overview')} />}
+
+      {panelOpen && (
+        <>
+          <div
+            onClick={() => setPanelOpen(false)}
+            style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 9998 }}
+          />
+          <NotificationPanel
+            notifications={notifications}
+            unreadCount={unreadCount}
+            markRead={markRead}
+            onClose={() => setPanelOpen(false)}
+          />
+        </>
+      )}
     </div>
   );
 }

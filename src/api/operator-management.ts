@@ -543,6 +543,26 @@ operatorManagementRouter.patch('/trips/:id', requireRole(['SUPER_ADMIN', 'TENANT
       vehicle_id?: string; departure_time?: number; driver_id?: string | null;
     };
 
+    // P09-T1: Block assignment if vehicle roadworthiness certificate is expired
+    if (vehicle_id) {
+      const expiredRW = await db.prepare(
+        `SELECT id FROM vehicle_documents WHERE vehicle_id = ? AND doc_type = 'roadworthiness' AND expires_at < ?`
+      ).bind(vehicle_id, now).first<{ id: string }>();
+      if (expiredRW) {
+        return c.json({ success: false, error: 'vehicle_compliance_expired', doc_type: 'roadworthiness' }, 422);
+      }
+    }
+
+    // P09-T2: Block assignment if driver's licence is expired
+    if (driver_id) {
+      const expiredLic = await db.prepare(
+        `SELECT id FROM driver_documents WHERE driver_id = ? AND doc_type = 'drivers_license' AND expires_at < ?`
+      ).bind(driver_id, now).first<{ id: string }>();
+      if (expiredLic) {
+        return c.json({ success: false, error: 'driver_license_expired', doc_type: 'drivers_license' }, 422);
+      }
+    }
+
     await db.prepare(
       `UPDATE trips
        SET vehicle_id = COALESCE(?, vehicle_id),
@@ -1812,4 +1832,271 @@ operatorManagementRouter.put('/config', requireRole(['SUPER_ADMIN', 'TENANT_ADMI
   } catch { /* non-fatal */ }
 
   return c.json({ success: true, data: body });
+});
+
+// ============================================================
+// P09-T1: POST /vehicles/:id/maintenance — log a maintenance record
+// ============================================================
+operatorManagementRouter.post('/vehicles/:id/maintenance', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+  const vehicleId = c.req.param('id');
+  let body: Record<string, unknown>;
+  try { body = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ success: false, error: 'Invalid JSON body' }, 400); }
+
+  const err = requireFields(body, ['service_type', 'service_date_ms']);
+  if (err) return c.json({ success: false, error: err }, 400);
+
+  const { service_type, service_date_ms, next_service_due_ms, notes } = body as {
+    service_type: string; service_date_ms: number;
+    next_service_due_ms?: number; notes?: string;
+  };
+
+  const db = c.env.DB;
+  const now = Date.now();
+
+  const vehicle = await db.prepare(
+    `SELECT id, operator_id, plate_number FROM vehicles WHERE id = ? AND deleted_at IS NULL`
+  ).bind(vehicleId).first<{ id: string; operator_id: string; plate_number: string }>();
+  if (!vehicle) return c.json({ success: false, error: 'Vehicle not found' }, 404);
+
+  const user = c.get('user');
+  const id = genId('mnt');
+  await db.prepare(
+    `INSERT INTO vehicle_maintenance_records (id, vehicle_id, operator_id, service_type, service_date, next_service_due, notes, created_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(id, vehicleId, vehicle.operator_id, service_type, service_date_ms, next_service_due_ms ?? null, notes ?? null, user?.id ?? 'system', now).run();
+
+  // Immediately notify if next service is due within 7 days
+  if (next_service_due_ms && next_service_due_ms < now + 7 * 86_400_000) {
+    try {
+      await publishEvent(db, {
+        event_type: 'vehicle.maintenance_due_soon',
+        aggregate_id: vehicleId,
+        aggregate_type: 'vehicle',
+        payload: { vehicle_id: vehicleId, plate_number: vehicle.plate_number, operator_id: vehicle.operator_id, next_service_due_ms },
+        tenant_id: vehicle.operator_id,
+        timestamp: now,
+      });
+    } catch { /* non-fatal */ }
+  }
+
+  return c.json({
+    success: true,
+    data: { id, vehicle_id: vehicleId, operator_id: vehicle.operator_id, service_type, service_date_ms, next_service_due_ms: next_service_due_ms ?? null, notes: notes ?? null, created_at: now },
+  }, 201);
+});
+
+// ============================================================
+// P09-T1: GET /vehicles/:id/maintenance — list maintenance records
+// ============================================================
+operatorManagementRouter.get('/vehicles/:id/maintenance', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
+  const vehicleId = c.req.param('id');
+  const db = c.env.DB;
+  try {
+    const records = await db.prepare(
+      `SELECT * FROM vehicle_maintenance_records WHERE vehicle_id = ? ORDER BY service_date DESC LIMIT 20`
+    ).bind(vehicleId).all();
+    return c.json({ success: true, data: records.results });
+  } catch {
+    return c.json({ success: false, error: 'Failed to fetch maintenance records' }, 500);
+  }
+});
+
+// ============================================================
+// P09-T1: POST /vehicles/:id/documents — upload a compliance document
+// ============================================================
+operatorManagementRouter.post('/vehicles/:id/documents', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+  const vehicleId = c.req.param('id');
+  let body: Record<string, unknown>;
+  try { body = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ success: false, error: 'Invalid JSON body' }, 400); }
+
+  const err = requireFields(body, ['doc_type', 'expires_at_ms']);
+  if (err) return c.json({ success: false, error: err }, 400);
+
+  const VALID_DOC_TYPES = ['roadworthiness', 'insurance', 'frsc_approval', 'nafdac'];
+  const { doc_type, doc_number, issued_at_ms, expires_at_ms } = body as {
+    doc_type: string; doc_number?: string; issued_at_ms?: number; expires_at_ms: number;
+  };
+  if (!VALID_DOC_TYPES.includes(doc_type)) {
+    return c.json({ success: false, error: `doc_type must be one of: ${VALID_DOC_TYPES.join(', ')}` }, 400);
+  }
+
+  const db = c.env.DB;
+  const now = Date.now();
+
+  const vehicle = await db.prepare(
+    `SELECT id, operator_id FROM vehicles WHERE id = ? AND deleted_at IS NULL`
+  ).bind(vehicleId).first<{ id: string; operator_id: string }>();
+  if (!vehicle) return c.json({ success: false, error: 'Vehicle not found' }, 404);
+
+  const id = genId('vdc');
+  await db.prepare(
+    `INSERT INTO vehicle_documents (id, vehicle_id, operator_id, doc_type, doc_number, issued_at, expires_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(id, vehicleId, vehicle.operator_id, doc_type, doc_number ?? null, issued_at_ms ?? null, expires_at_ms, now).run();
+
+  return c.json({
+    success: true,
+    data: { id, vehicle_id: vehicleId, operator_id: vehicle.operator_id, doc_type, doc_number: doc_number ?? null, issued_at_ms: issued_at_ms ?? null, expires_at_ms, created_at: now },
+  }, 201);
+});
+
+// ============================================================
+// P09-T1: GET /vehicles/:id/documents — list compliance documents with expiry status
+// ============================================================
+operatorManagementRouter.get('/vehicles/:id/documents', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
+  const vehicleId = c.req.param('id');
+  const db = c.env.DB;
+  const now = Date.now();
+  const soonCutoff = now + 30 * 86_400_000;
+  try {
+    const rows = await db.prepare(
+      `SELECT * FROM vehicle_documents WHERE vehicle_id = ? ORDER BY expires_at ASC`
+    ).bind(vehicleId).all<{ id: string; expires_at: number; [k: string]: unknown }>();
+    const data = rows.results.map(doc => ({
+      ...doc,
+      expiry_status: doc.expires_at < now ? 'expired' : doc.expires_at < soonCutoff ? 'expiring_soon' : 'valid',
+    }));
+    return c.json({ success: true, data });
+  } catch {
+    return c.json({ success: false, error: 'Failed to fetch vehicle documents' }, 500);
+  }
+});
+
+// ============================================================
+// P09-T2: POST /drivers/:id/documents — upload a driver compliance document
+// ============================================================
+operatorManagementRouter.post('/drivers/:id/documents', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+  const driverId = c.req.param('id');
+  let body: Record<string, unknown>;
+  try { body = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ success: false, error: 'Invalid JSON body' }, 400); }
+
+  const err = requireFields(body, ['doc_type', 'expires_at_ms']);
+  if (err) return c.json({ success: false, error: err }, 400);
+
+  const VALID_DRIVER_DOC_TYPES = ['drivers_license', 'frsc_cert', 'medical_cert'];
+  const { doc_type, doc_number, license_category, issued_at_ms, expires_at_ms } = body as {
+    doc_type: string; doc_number?: string; license_category?: string;
+    issued_at_ms?: number; expires_at_ms: number;
+  };
+  if (!VALID_DRIVER_DOC_TYPES.includes(doc_type)) {
+    return c.json({ success: false, error: `doc_type must be one of: ${VALID_DRIVER_DOC_TYPES.join(', ')}` }, 400);
+  }
+
+  const db = c.env.DB;
+  const now = Date.now();
+
+  const driver = await db.prepare(
+    `SELECT id, operator_id FROM drivers WHERE id = ? AND deleted_at IS NULL`
+  ).bind(driverId).first<{ id: string; operator_id: string }>();
+  if (!driver) return c.json({ success: false, error: 'Driver not found' }, 404);
+
+  const id = genId('ddc');
+  await db.prepare(
+    `INSERT INTO driver_documents (id, driver_id, operator_id, doc_type, doc_number, license_category, issued_at, expires_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(id, driverId, driver.operator_id, doc_type, doc_number ?? null, license_category ?? null, issued_at_ms ?? null, expires_at_ms, now).run();
+
+  return c.json({
+    success: true,
+    data: { id, driver_id: driverId, operator_id: driver.operator_id, doc_type, doc_number: doc_number ?? null, license_category: license_category ?? null, issued_at_ms: issued_at_ms ?? null, expires_at_ms, created_at: now },
+  }, 201);
+});
+
+// ============================================================
+// P09-T2: GET /drivers/:id/documents — list driver compliance documents with expiry status
+// ============================================================
+operatorManagementRouter.get('/drivers/:id/documents', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
+  const driverId = c.req.param('id');
+  const db = c.env.DB;
+  const now = Date.now();
+  const soonCutoff = now + 30 * 86_400_000;
+  try {
+    const rows = await db.prepare(
+      `SELECT * FROM driver_documents WHERE driver_id = ? ORDER BY expires_at ASC`
+    ).bind(driverId).all<{ id: string; expires_at: number; [k: string]: unknown }>();
+    const data = rows.results.map(doc => ({
+      ...doc,
+      expiry_status: doc.expires_at < now ? 'expired' : doc.expires_at < soonCutoff ? 'expiring_soon' : 'valid',
+    }));
+    return c.json({ success: true, data });
+  } catch {
+    return c.json({ success: false, error: 'Failed to fetch driver documents' }, 500);
+  }
+});
+
+// ============================================================
+// P09-T3: GET /notifications — operator notification center (last 7 days, actionable types)
+// ============================================================
+const NOTIFICATION_EVENT_TYPES = [
+  'trip:SOS_ACTIVATED',
+  'agent.reconciliation_filed',
+  'vehicle.maintenance_due_soon',
+  'vehicle.document_expiring',
+  'driver.document_expiring',
+  'booking:ABANDONED',
+  'payment:AMOUNT_MISMATCH',
+  'trip:DELAYED',
+  'booking:REFUNDED',
+];
+
+operatorManagementRouter.get('/notifications', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+  const db = c.env.DB;
+  const user = c.get('user');
+  const operatorId = user?.operatorId ?? '';
+  if (!operatorId) return c.json({ success: false, error: 'Operator context required' }, 400);
+
+  const now = Date.now();
+  const since = now - 7 * 86_400_000;
+  const typePlaceholders = NOTIFICATION_EVENT_TYPES.map(() => '?').join(',');
+
+  try {
+    const events = await db.prepare(
+      `SELECT pe.id, pe.event_type, pe.aggregate_id, pe.aggregate_type, pe.payload, pe.created_at,
+              nr.read_at
+       FROM platform_events pe
+       LEFT JOIN notification_reads nr ON nr.event_id = pe.id AND nr.user_id = ?
+       WHERE pe.tenant_id = ?
+         AND pe.created_at > ?
+         AND pe.event_type IN (${typePlaceholders})
+       ORDER BY pe.created_at DESC
+       LIMIT 50`
+    ).bind(user?.id ?? '', operatorId, since, ...NOTIFICATION_EVENT_TYPES).all<{
+      id: string; event_type: string; aggregate_id: string; aggregate_type: string;
+      payload: string; created_at: number; read_at: number | null;
+    }>();
+
+    const notifications = events.results.map(e => ({
+      ...e,
+      payload: (() => { try { return JSON.parse(e.payload) as unknown; } catch { return e.payload; } })(),
+      is_read: e.read_at !== null,
+    }));
+
+    const unread_count = notifications.filter(n => !n.is_read).length;
+
+    return c.json({ success: true, data: { notifications, unread_count } });
+  } catch {
+    return c.json({ success: false, error: 'Failed to fetch notifications' }, 500);
+  }
+});
+
+// ============================================================
+// P09-T3: POST /notifications/:eventId/read — mark a notification as read
+// ============================================================
+operatorManagementRouter.post('/notifications/:eventId/read', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+  const eventId = c.req.param('eventId');
+  const db = c.env.DB;
+  const user = c.get('user');
+  const now = Date.now();
+
+  try {
+    await db.prepare(
+      `INSERT OR IGNORE INTO notification_reads (event_id, user_id, read_at) VALUES (?, ?, ?)`
+    ).bind(eventId, user?.id ?? '', now).run();
+    return c.json({ success: true, data: { event_id: eventId, read_at: now } });
+  } catch {
+    return c.json({ success: false, error: 'Failed to mark notification as read' }, 500);
+  }
 });

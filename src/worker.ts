@@ -43,6 +43,9 @@ import {
   sweepExpiredPII,
   purgeExpiredFinancialData,
   sweepExpiredWaitlistNotifications,
+  sweepVehicleMaintenanceDue,
+  sweepVehicleDocumentExpiry,
+  sweepDriverDocumentExpiry,
 } from './lib/sweepers.js';
 import { notificationsRouter } from './api/notifications.js';
 
@@ -373,11 +376,15 @@ export async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionC
     sweepExpiredWaitlistNotifications(env),
   ]));
 
-  // Run daily NDPR sweepers only at midnight UTC (C-002)
+  // Run daily sweepers only at midnight UTC (C-002)
   const scheduledHour = new Date(event.scheduledTime).getUTCHours();
   if (scheduledHour === 0) {
     ctx.waitUntil(sweepExpiredPII(env));
     ctx.waitUntil(purgeExpiredFinancialData(env));
+    // P09: Fleet & driver compliance sweepers
+    ctx.waitUntil(sweepVehicleMaintenanceDue(env));
+    ctx.waitUntil(sweepVehicleDocumentExpiry(env));
+    ctx.waitUntil(sweepDriverDocumentExpiry(env));
   }
 }
 

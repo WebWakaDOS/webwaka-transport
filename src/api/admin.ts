@@ -584,6 +584,18 @@ const MIGRATIONS: Migration[] = [
       `CREATE INDEX IF NOT EXISTS idx_group_bookings_agent ON group_bookings(agent_id)`,
     ],
   },
+  {
+    name: '015_p09_compliance',
+    statements: [
+      // P09-T3: Notification read-receipts (composite PK prevents duplicate reads)
+      `CREATE TABLE IF NOT EXISTS notification_reads (
+        event_id TEXT NOT NULL,
+        user_id  TEXT NOT NULL,
+        read_at  INTEGER NOT NULL,
+        PRIMARY KEY (event_id, user_id)
+      )`,
+    ],
+  },
 ];
 
 export const adminRouter = new Hono<{ Bindings: AdminEnv }>();

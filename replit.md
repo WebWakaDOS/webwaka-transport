@@ -13,8 +13,15 @@ WebWaka Transport is the Transportation & Mobility vertical suite (Part 10.3) of
 - **T1 Seat Templates**: PUT /vehicles/:id/template; trip creation uses template to generate class-aware seats; GET /trips/:id/availability returns seat_layout + seat_class per seat
 - **T2 Fare Matrix**: PUT /routes/:id/fare-matrix (multipliers 1.0–5.0 per class + time_multipliers); GET /trips/search returns effective_fare_by_class; POST /bookings validates total_amount_kobo ±2% tolerance
 - **T3 Cancellation + Refunds**: PATCH /bookings/:id/cancel computes refund from operator cancellation policy (full/half/no refund); initiates Paystack automated refund or flags manual_refund_required for cash; publishes booking.refunded event
-- **T4 Waiting List**: POST/GET/DELETE /trips/:id/waitlist; sweepExpiredWaitlistNotifications in cron advances queue with SMS on cancellation; 30-min hold window
-- **T5 Group Bookings**: POST /group-bookings (STAFF+), GET /group-bookings/:id, PATCH /group-bookings/:id/cancel with refund policy; Agent POS includes Group Booking sub-tab UI with seat selector, class, leader info, confirmation display
+- **T4 Waiting List**: POST/GET/DELETE /trips/:id/waitlist; sweepExpiredWaitlistNotifications in cron; 10-min hold window; rejects join if seats available
+- **T5 Group Bookings**: POST /api/agent-sales/group-bookings (STAFF+, seat_ids [2-50], atomic batch: booking+group_bookings+sales_transaction+receipt+seats, QR code, 422 on insufficient seats); GET /group-bookings/:id; PATCH /group-bookings/:id/cancel with refund policy on booking-portal router; Agent POS Group Booking sub-tab
+
+## P09-TRANSPORT Fleet & Compliance Features (complete)
+- **T1 Vehicle Maintenance**: POST/GET /api/operator/vehicles/:id/maintenance — logs service records (vehicle_maintenance_records), immediate vehicle.maintenance_due_soon event if due ≤7 days
+- **T1 Vehicle Documents**: POST/GET /api/operator/vehicles/:id/documents — roadworthiness/insurance/frsc_approval/nafdac; GET returns expiry_status (valid/expiring_soon/expired); PATCH /trips/:id blocks assignment if roadworthiness expired (422 vehicle_compliance_expired)
+- **T2 Driver Documents**: POST/GET /api/operator/drivers/:id/documents — drivers_license/frsc_cert/medical_cert; PATCH /trips/:id blocks assignment if drivers_license expired (422 driver_license_expired)
+- **T3 Notification Center**: GET/POST /api/operator/notifications + /read; filters 9 actionable event types, 7-day window, unread_count; notification_reads table (migration 015); frontend: 🔔 badge with count, slide-in drawer colored by severity, persistent red SOS banner, 30-second auto-refresh
+- **Sweepers**: sweepVehicleMaintenanceDue (daily, ≤7d), sweepVehicleDocumentExpiry (daily, ≤30d), sweepDriverDocumentExpiry (daily, ≤30d) — all wired to midnight cron in worker.ts
 
 ## Tech Stack
 - **Frontend**: React 19 + TypeScript + Vite (PWA, mobile-first, port 5000)

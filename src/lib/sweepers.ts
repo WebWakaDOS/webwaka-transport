@@ -548,6 +548,126 @@ export async function sweepExpiredWaitlistNotifications(env: Env): Promise<void>
   }
 }
 
+// ============================================================
+// P09-T1: sweepVehicleMaintenanceDue — daily
+// Publish vehicle.maintenance_due_soon for vehicles with service due in ≤ 7 days
+// ============================================================
+export async function sweepVehicleMaintenanceDue(env: Env): Promise<void> {
+  const db = env.DB;
+  const now = Date.now();
+  const cutoff = now + 7 * 86_400_000;
+
+  try {
+    // Use the most recent maintenance record per vehicle to determine next service due
+    const records = await db.prepare(
+      `SELECT vmr.vehicle_id, vmr.next_service_due, v.plate_number, vmr.operator_id
+       FROM vehicle_maintenance_records vmr
+       JOIN vehicles v ON v.id = vmr.vehicle_id
+       WHERE vmr.next_service_due IS NOT NULL
+         AND vmr.next_service_due < ?
+         AND v.deleted_at IS NULL
+       GROUP BY vmr.vehicle_id
+       HAVING vmr.next_service_due = MAX(vmr.next_service_due)`
+    ).bind(cutoff).all<{ vehicle_id: string; next_service_due: number; plate_number: string; operator_id: string }>();
+
+    for (const r of records.results) {
+      try {
+        await db.prepare(
+          `INSERT INTO platform_events (id, event_type, aggregate_id, aggregate_type, payload, tenant_id, created_at)
+           VALUES (?, 'vehicle.maintenance_due_soon', ?, 'vehicle', ?, ?, ?)`
+        ).bind(
+          `evt_mnt_${r.vehicle_id}_${now}`,
+          r.vehicle_id,
+          JSON.stringify({ vehicle_id: r.vehicle_id, plate_number: r.plate_number, operator_id: r.operator_id, next_service_due_ms: r.next_service_due }),
+          r.operator_id,
+          now,
+        ).run();
+      } catch { /* skip individual failures */ }
+    }
+    console.log(`[VehicleMaintenanceSweeper] Checked ${records.results.length} vehicles`);
+  } catch (err: unknown) {
+    console.error(`[VehicleMaintenanceSweeper] Error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+// ============================================================
+// P09-T1: sweepVehicleDocumentExpiry — daily
+// Publish vehicle.document_expiring for documents expiring in ≤ 30 days
+// ============================================================
+export async function sweepVehicleDocumentExpiry(env: Env): Promise<void> {
+  const db = env.DB;
+  const now = Date.now();
+  const cutoff = now + 30 * 86_400_000;
+
+  try {
+    const docs = await db.prepare(
+      `SELECT vd.id, vd.vehicle_id, vd.doc_type, vd.expires_at,
+              v.plate_number, o.id AS operator_id
+       FROM vehicle_documents vd
+       JOIN vehicles v ON v.id = vd.vehicle_id
+       JOIN operators o ON o.id = v.operator_id
+       WHERE vd.expires_at < ?`
+    ).bind(cutoff).all<{ id: string; vehicle_id: string; doc_type: string; expires_at: number; plate_number: string; operator_id: string }>();
+
+    for (const doc of docs.results) {
+      try {
+        await db.prepare(
+          `INSERT INTO platform_events (id, event_type, aggregate_id, aggregate_type, payload, tenant_id, created_at)
+           VALUES (?, 'vehicle.document_expiring', ?, 'vehicle_document', ?, ?, ?)`
+        ).bind(
+          `evt_vdc_${doc.id}_${now}`,
+          doc.vehicle_id,
+          JSON.stringify({ doc_id: doc.id, vehicle_id: doc.vehicle_id, doc_type: doc.doc_type, expires_at: doc.expires_at, plate_number: doc.plate_number, operator_id: doc.operator_id }),
+          doc.operator_id,
+          now,
+        ).run();
+      } catch { /* skip individual failures */ }
+    }
+    console.log(`[VehicleDocSweeper] Checked ${docs.results.length} documents`);
+  } catch (err: unknown) {
+    console.error(`[VehicleDocSweeper] Error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+// ============================================================
+// P09-T2: sweepDriverDocumentExpiry — daily
+// Publish driver.document_expiring for documents expiring in ≤ 30 days
+// ============================================================
+export async function sweepDriverDocumentExpiry(env: Env): Promise<void> {
+  const db = env.DB;
+  const now = Date.now();
+  const cutoff = now + 30 * 86_400_000;
+
+  try {
+    const docs = await db.prepare(
+      `SELECT dd.id, dd.driver_id, dd.doc_type, dd.expires_at,
+              d.name AS driver_name, o.id AS operator_id
+       FROM driver_documents dd
+       JOIN drivers d ON d.id = dd.driver_id
+       JOIN operators o ON o.id = d.operator_id
+       WHERE dd.expires_at < ?`
+    ).bind(cutoff).all<{ id: string; driver_id: string; doc_type: string; expires_at: number; driver_name: string; operator_id: string }>();
+
+    for (const doc of docs.results) {
+      try {
+        await db.prepare(
+          `INSERT INTO platform_events (id, event_type, aggregate_id, aggregate_type, payload, tenant_id, created_at)
+           VALUES (?, 'driver.document_expiring', ?, 'driver_document', ?, ?, ?)`
+        ).bind(
+          `evt_ddc_${doc.id}_${now}`,
+          doc.driver_id,
+          JSON.stringify({ doc_id: doc.id, driver_id: doc.driver_id, doc_type: doc.doc_type, expires_at: doc.expires_at, driver_name: doc.driver_name, operator_id: doc.operator_id }),
+          doc.operator_id,
+          now,
+        ).run();
+      } catch { /* skip individual failures */ }
+    }
+    console.log(`[DriverDocSweeper] Checked ${docs.results.length} documents`);
+  } catch (err: unknown) {
+    console.error(`[DriverDocSweeper] Error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 async function deliverToConsumer(endpointUrl: string, evt: Record<string, unknown>): Promise<void> {
   const response = await fetch(endpointUrl, {
     method: 'POST',
