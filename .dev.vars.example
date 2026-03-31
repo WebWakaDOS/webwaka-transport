@@ -29,10 +29,13 @@ FLUTTERWAVE_SECRET=FLWSECK_TEST-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 # MESSAGING
 # ============================================================
 
-# Africa's Talking / Termii / Twilio — SMS OTP
-# SMS_PROVIDER = termii | africastalking | twilio
-SMS_PROVIDER=termii
-SMS_API_KEY=your-sms-api-key-here
+# SMS OTP — Termii (Nigeria primary) or Africa's Talking (fallback)
+# Format: termii:<api_key>           → uses Termii (ng.termii.com)
+#         at:<username>:<api_key>    → uses Africa's Talking
+#         <unset>                    → dev mode: OTP printed to logs, dev_code echoed in response
+# Get Termii key from: https://termii.com/account/api
+# Get AT key from: https://account.africastalking.com
+SMS_API_KEY=termii:your-termii-api-key-here
 
 # ============================================================
 # PUSH NOTIFICATIONS

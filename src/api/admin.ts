@@ -277,6 +277,21 @@ const MIGRATIONS: Migration[] = [
       `ALTER TABLE bookings ADD COLUMN paid_at INTEGER`,
     ],
   },
+  {
+    name: '006_performance_indexes',
+    statements: [
+      `CREATE INDEX IF NOT EXISTS idx_routes_operator_id ON routes(operator_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_vehicles_operator_id ON vehicles(operator_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_seats_operator_trip ON seats(operator_id, trip_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_bookings_payment_ref ON bookings(payment_reference)`,
+      `CREATE INDEX IF NOT EXISTS idx_bookings_customer_id ON bookings(customer_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_bookings_trip_id ON bookings(trip_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_transactions_agent_id ON sales_transactions(agent_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_transactions_trip_id ON sales_transactions(trip_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_platform_events_status ON platform_events(status, created_at)`,
+      `CREATE INDEX IF NOT EXISTS idx_trips_operator_departure ON trips(operator_id, departure_time)`,
+    ],
+  },
 ];
 
 export const adminRouter = new Hono<{ Bindings: AdminEnv }>();

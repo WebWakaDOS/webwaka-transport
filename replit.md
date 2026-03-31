@@ -322,9 +322,34 @@ Uses `schema_migrations` tracking table. Authentication: `Authorization: Bearer 
 `GET /internal/admin/migrations/status` — lists applied/pending migrations.
 
 ## Scheduled Cron Handler
-`scheduled()` in `worker.ts` runs every minute:
-1. `drainEventBus()` — processes pending `platform_events` outbox
-2. `sweepExpiredReservations()` — releases expired seat reservations (30s TTL)
+`scheduled()` in `worker.ts` runs every minute. All sweeper logic extracted to `src/lib/sweepers.ts`:
+1. `drainEventBus(env)` — processes pending `platform_events` outbox; routes events to consumers; retries up to 3×; marks dead after 3 failures.
+2. `sweepExpiredReservations(env)` — releases expired seat reservations (30s TTL); publishes `seat.reservation_expired` events.
+3. `sweepAbandonedBookings(env)` — cancels bookings where `status='pending'` AND `payment_status='pending'` for > 30 minutes; releases seats back to `available`; publishes `booking:ABANDONED` events.
+
+Event consumers wired in `deliverEvent()`:
+- `seat:RESERVED` / `seat.reservation_expired` → `SEAT_CACHE_KV.delete(seat_id)` (cache invalidation)
+- `booking:CONFIRMED` → push notification stub (C-001 pending)
+- `booking:ABANDONED` → log (SMS notification C-001 pending)
+- `parcel.*` → forwarded to `https://logistics.webwaka.app/api/internal/events`
+- `payment:AMOUNT_MISMATCH` → console fraud alert
+
+## Phase B — Infrastructure & Security Hardening (complete)
+
+### B-001: SMS OTP Integration
+`src/lib/sms.ts` — `SmsProvider` interface + factory `buildSmsProvider(env)`. Key format: `termii:<api_key>` (Termii Nigeria primary), `at:<username>:<api_key>` (Africa's Talking fallback), unset → dev mode (logs OTP, echoes `dev_code`). Wired into `src/api/auth.ts` `POST /api/auth/otp/request` — SMS send is non-fatal (OTP stored in KV regardless).
+
+### B-002: Idempotency Key System
+`src/middleware/idempotency.ts` — Hono middleware mounted on all `/api/*` routes. Reads `X-Idempotency-Key` header. Checks `IDEMPOTENCY_KV` — returns cached response on replay; caches 2xx responses for 24h. Non-fatal when `IDEMPOTENCY_KV` not bound (gradual rollout). `src/core/offline/sync.ts` `_fetchWithAuth()` now attaches `X-Idempotency-Key: <mutation.id>` header on all sync requests. `IDEMPOTENCY_KV` added to `Env` interface in `src/api/types.ts` and `src/worker.ts`.
+
+### B-003: Migration 006 — 10 Performance Indexes
+Added to `MIGRATIONS` array in `src/api/admin.ts`: `idx_routes_operator_id`, `idx_vehicles_operator_id`, `idx_seats_operator_trip`, `idx_bookings_payment_ref`, `idx_bookings_customer_id`, `idx_bookings_trip_id`, `idx_transactions_agent_id`, `idx_transactions_trip_id`, `idx_platform_events_status`, `idx_trips_operator_departure`.
+
+### B-004: KV Namespace Provisioning + CI Guard
+`wrangler.toml` — `IDEMPOTENCY_KV` namespace added to both staging and production environments with `placeholder-idempotency-*` IDs. `scripts/provision-kv.sh` updated to also provision `IDEMPOTENCY_KV`. `.github/workflows/ci.yml` — removed `|| true` from TypeScript checks; added warning step for placeholder KV IDs; added production-blocking check that fails deploy if `placeholder` strings found in `[env.production]` config; added staging migration post-deploy step.
+
+### B-005: Abandoned Booking Sweeper + Event Bus Consumers
+`src/lib/sweepers.ts` — extracted `drainEventBus`, `sweepExpiredReservations` from `worker.ts`; added `sweepAbandonedBookings`. All three wired into `scheduled()` cron via `Promise.all`. CORS `allowHeaders` updated to include `X-Idempotency-Key`.
 
 ## Security Hardening (Production Audit — complete)
 - **SEC-001 (CORS)**: `worker.ts` CORS changed from wildcard `*` to domain allowlist: `webwaka-transport-ui.pages.dev`, `webwaka.ng`, `www.webwaka.ng`, `localhost:5000/5173`, `127.0.0.1:5000`.

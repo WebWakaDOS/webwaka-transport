@@ -24,11 +24,15 @@ jobs:
       - name: Run unit tests
         run: npm test -- --run
 
-      - name: TypeScript typecheck (worker)
-        run: npx tsc --noEmit --project tsconfig.json || true
+      - name: TypeScript typecheck
+        run: npx tsc --noEmit
 
-      - name: TypeScript typecheck (frontend)
-        run: npx tsc --noEmit --project tsconfig.app.json || true
+      - name: Check for placeholder KV IDs (warn on non-production branches)
+        run: |
+          if grep -q "placeholder" wrangler.toml; then
+            echo "WARNING: wrangler.toml contains placeholder KV IDs."
+            echo "Run: bash scripts/provision-kv.sh to provision real namespaces."
+          fi
 
   deploy-staging:
     name: Deploy to Staging
@@ -52,6 +56,16 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: npx wrangler deploy --env staging
 
+      - name: Run post-deploy migrations (staging)
+        env:
+          MIGRATION_SECRET: ${{ secrets.MIGRATION_SECRET }}
+          WORKER_URL_STAGING: ${{ secrets.WORKER_URL_STAGING }}
+        run: |
+          curl -f -X POST "$WORKER_URL_STAGING/api/admin/migrations/run" \
+            -H "Authorization: Bearer $MIGRATION_SECRET" \
+            -H "Content-Type: application/json" \
+            --retry 3 --retry-delay 5
+
   deploy-production:
     name: Deploy to Production
     runs-on: ubuntu-latest
@@ -69,6 +83,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Fail if placeholder KV IDs in production config
+        run: |
+          PROD_SECTION=$(awk '/\[env\.production\]/,/^(\[|$)/' wrangler.toml)
+          if echo "$PROD_SECTION" | grep -q "placeholder"; then
+            echo "ERROR: Production wrangler.toml contains placeholder KV IDs."
+            echo "Run: bash scripts/provision-kv.sh --env production"
+            exit 1
+          fi
+
       - name: Build frontend
         run: npm run build
 
@@ -77,7 +100,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: npx wrangler deploy --env production
 
-      - name: Run post-deploy migration
+      - name: Run post-deploy migrations (production)
         env:
           MIGRATION_SECRET: ${{ secrets.MIGRATION_SECRET }}
           WORKER_URL: ${{ secrets.WORKER_URL }}

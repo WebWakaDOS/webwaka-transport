@@ -36,6 +36,11 @@ echo ""
 echo "Creating SEAT_CACHE_KV ($ENV)..."
 wrangler kv:namespace create "SEAT_CACHE_KV" --env "$ENV"
 
+# Create IDEMPOTENCY_KV
+echo ""
+echo "Creating IDEMPOTENCY_KV ($ENV)..."
+wrangler kv:namespace create "IDEMPOTENCY_KV" --env "$ENV"
+
 echo ""
 echo "=== Done. Copy the 'id' values printed above into wrangler.toml under [env.$ENV]. ==="
 echo ""
@@ -52,3 +57,10 @@ echo ""
 echo "[[env.$ENV.kv_namespaces]]"
 echo 'binding = "SEAT_CACHE_KV"'
 echo 'id = "<paste id here>"'
+echo ""
+echo "[[env.$ENV.kv_namespaces]]"
+echo 'binding = "IDEMPOTENCY_KV"'
+echo 'id = "<paste id here>"'
+echo ""
+echo "IMPORTANT: Replace all 'placeholder-*' entries in wrangler.toml with real IDs."
+echo "The CI pipeline will BLOCK production deploys if placeholder IDs are present."

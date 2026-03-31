@@ -201,7 +201,10 @@ export class SyncEngine {
 
     let response: Response;
     try {
-      response = await this._fetchWithAuth(apiReq);
+      // Attach idempotency key — mutation.id is a stable UUID that persists
+      // across retries. The server returns the cached response on replay.
+      const idempotencyKey = String(id);
+      response = await this._fetchWithAuth(apiReq, idempotencyKey);
     } catch (networkErr) {
       // Network failure — back off and retry
       const errMsg = networkErr instanceof Error ? networkErr.message : 'Network error';
@@ -257,10 +260,13 @@ export class SyncEngine {
     }
   }
 
-  private async _fetchWithAuth(req: ApiRequest): Promise<Response> {
+  private async _fetchWithAuth(req: ApiRequest, idempotencyKey?: string): Promise<Response> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (this._authToken) {
       headers['Authorization'] = `Bearer ${this._authToken}`;
+    }
+    if (idempotencyKey) {
+      headers['X-Idempotency-Key'] = idempotencyKey;
     }
     return fetch(req.url, {
       method: req.method,

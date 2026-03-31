@@ -35,12 +35,19 @@ import { adminRouter } from './api/admin.js';
 import { authRouter } from './api/auth.js';
 import { paymentsRouter, hmacSha512 } from './api/payments.js';
 import { jwtAuthMiddleware, requireTenantMiddleware } from './middleware/auth.js';
+import { idempotencyMiddleware } from './middleware/idempotency.js';
+import {
+  drainEventBus,
+  sweepExpiredReservations,
+  sweepAbandonedBookings,
+} from './lib/sweepers.js';
 
 export interface Env {
   DB: D1Database;
   SESSIONS_KV: KVNamespace;
   TENANT_CONFIG_KV?: KVNamespace;
   SEAT_CACHE_KV?: KVNamespace;
+  IDEMPOTENCY_KV?: KVNamespace;
   JWT_SECRET?: string;
   MIGRATION_SECRET?: string;
   PAYSTACK_SECRET?: string;
@@ -66,7 +73,7 @@ const ALLOWED_ORIGINS = [
 app.use('*', cors({
   origin: (origin) => ALLOWED_ORIGINS.includes(origin) ? origin : undefined,
   allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowHeaders: ['Content-Type', 'Authorization', 'X-Tenant-ID', 'x-tenant-id'],
+  allowHeaders: ['Content-Type', 'Authorization', 'X-Tenant-ID', 'x-tenant-id', 'X-Idempotency-Key'],
   credentials: true,
 }));
 
@@ -108,6 +115,13 @@ app.route('/api/payments', paymentsRouter);
 // Multi-Tenant enforcement — operator_id scoping
 // ============================================================
 app.use('/api/*', requireTenantMiddleware);
+
+// ============================================================
+// Idempotency — deduplicates offline sync retries (B-002)
+// Reads X-Idempotency-Key; serves cached response on replay.
+// Applies only when IDEMPOTENCY_KV is bound.
+// ============================================================
+app.use('/api/*', idempotencyMiddleware);
 
 // ============================================================
 // Module routers (JWT + tenant-scoped)
@@ -214,204 +228,22 @@ app.onError((err, c) => {
 // Scheduled handler — Cron Worker (runs every minute)
 //
 // Responsibilities:
-//   1. Event Bus outbox drain   — processes pending platform_events
-//   2. Seat reservation sweeper — releases expired reservations
-//   3. Abandoned booking sweeper — flags & cancels abandoned bookings
+//   1. Event Bus outbox drain    — processes pending platform_events
+//   2. Seat reservation sweeper  — releases expired reservations
+//   3. Abandoned booking sweeper — cancels bookings pending > 30 min
 //
-// Invariant: Event-Driven (no direct inter-DB access from this cron;
-//            downstream systems receive events via the outbox).
+// Sweepers are extracted to src/lib/sweepers.ts for testability.
 // ============================================================
 export async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
   ctx.waitUntil(Promise.all([
     drainEventBus(env),
     sweepExpiredReservations(env),
+    sweepAbandonedBookings(env),
   ]));
 }
 
-/**
- * Drain the platform_events outbox.
- *
- * Reads up to 50 pending events, attempts to deliver each to the
- * configured downstream consumer endpoint. On success, marks the event
- * 'processed'. On failure, increments retry_count; after 3 retries,
- * marks the event 'dead'.
- *
- * Initially (before consumer endpoints are wired), events are logged
- * and marked processed — establishing the drain infrastructure.
- */
-async function drainEventBus(env: Env): Promise<void> {
-  const db = env.DB;
-  const now = Date.now();
-
-  try {
-    const pending = await db
-      .prepare(
-        `SELECT * FROM platform_events
-         WHERE status = 'pending' AND (retry_count IS NULL OR retry_count < 3)
-         ORDER BY created_at ASC
-         LIMIT 50`
-      )
-      .all();
-
-    if (!pending.results || pending.results.length === 0) return;
-
-    console.log(`[EventBus] Draining ${pending.results.length} pending events`);
-
-    for (const evt of pending.results as any[]) {
-      try {
-        await deliverEvent(evt, env);
-
-        await db
-          .prepare(
-            `UPDATE platform_events
-             SET status = 'processed', processed_at = ?
-             WHERE id = ?`
-          )
-          .bind(now, evt.id)
-          .run();
-
-        console.log(`[EventBus] Processed: ${evt.event_type} id=${evt.id}`);
-      } catch (err: any) {
-        const retryCount = (evt.retry_count ?? 0) + 1;
-        const newStatus = retryCount >= 3 ? 'dead' : 'pending';
-
-        await db
-          .prepare(
-            `UPDATE platform_events
-             SET retry_count = ?, status = ?, last_error = ?
-             WHERE id = ?`
-          )
-          .bind(retryCount, newStatus, err.message ?? 'Unknown error', evt.id)
-          .run();
-
-        console.error(`[EventBus] Failed (attempt ${retryCount}): ${evt.event_type} id=${evt.id} — ${err.message}`);
-      }
-    }
-  } catch (err: any) {
-    console.error(`[EventBus] Drain error: ${err.message}`);
-  }
-}
-
-/**
- * Deliver a single platform event to its downstream consumer.
- *
- * Routing table (extend as consumers are wired):
- *   parcel.*          → webwaka-logistics internal API
- *   payment.*         → notification service
- *   booking.created   → SMS notification trigger
- *   trip.sos_triggered → emergency notification
- *   (all others)      → logged only, no-op delivery
- *
- * Returns without throwing on no-op events.
- * Throws on delivery failure to trigger retry logic above.
- */
-async function deliverEvent(evt: any, env: Env): Promise<void> {
-  const { event_type, payload } = evt;
-
-  if (event_type.startsWith('parcel.')) {
-    await deliverToConsumer(
-      'https://logistics.webwaka.app/api/internal/events',
-      evt,
-      env
-    );
-    return;
-  }
-
-  console.log(`[EventBus] No-op delivery for: ${event_type} — consumer not yet wired`);
-}
-
-/**
- * HTTP delivery to a downstream consumer endpoint.
- * Signed with a shared secret for mutual authentication.
- */
-async function deliverToConsumer(
-  endpointUrl: string,
-  evt: any,
-  _env: Env
-): Promise<void> {
-  const response = await fetch(endpointUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Webwaka-Event-Type': evt.event_type,
-      'X-Webwaka-Aggregate-ID': evt.aggregate_id,
-    },
-    body: JSON.stringify(evt),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Consumer returned ${response.status} for event ${evt.id}`);
-  }
-}
-
-/**
- * Sweep expired seat reservations.
- *
- * Sets status='available' on all reserved seats whose
- * reservation_expires_at is in the past. This prevents seats
- * from being held indefinitely when clients crash or abandon
- * the booking flow.
- *
- * Publishes seat.reservation_expired events for each affected seat.
- */
-async function sweepExpiredReservations(env: Env): Promise<void> {
-  const db = env.DB;
-  const now = Date.now();
-
-  try {
-    const expired = await db
-      .prepare(
-        `SELECT id, trip_id, operator_id
-         FROM seats
-         WHERE status = 'reserved'
-           AND reservation_expires_at IS NOT NULL
-           AND reservation_expires_at < ?`
-      )
-      .bind(now)
-      .all();
-
-    if (!expired.results || expired.results.length === 0) return;
-
-    console.log(`[SeatSweeper] Releasing ${expired.results.length} expired reservations`);
-
-    await db
-      .prepare(
-        `UPDATE seats
-         SET status = 'available',
-             reserved_by = NULL,
-             reservation_token = NULL,
-             reservation_expires_at = NULL,
-             version = version + 1,
-             updated_at = ?
-         WHERE status = 'reserved'
-           AND reservation_expires_at IS NOT NULL
-           AND reservation_expires_at < ?`
-      )
-      .bind(now, now)
-      .run();
-
-    for (const seat of expired.results as any[]) {
-      const evtId = `evt_sw_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-      await db
-        .prepare(
-          `INSERT OR IGNORE INTO platform_events
-           (id, event_type, aggregate_id, aggregate_type, payload, tenant_id, status, created_at)
-           VALUES (?, 'seat.reservation_expired', ?, 'seat', ?, ?, 'pending', ?)`
-        )
-        .bind(
-          evtId,
-          seat.id,
-          JSON.stringify({ seat_id: seat.id, trip_id: seat.trip_id }),
-          seat.operator_id ?? null,
-          now
-        )
-        .run();
-    }
-
-    console.log(`[SeatSweeper] Released ${expired.results.length} seats`);
-  } catch (err: any) {
-    console.error(`[SeatSweeper] Error: ${err.message}`);
-  }
-}
-
 export default app;
+
+// NOTE: drainEventBus, sweepExpiredReservations, sweepAbandonedBookings
+// are imported from src/lib/sweepers.ts above.
+// Legacy inline implementations removed — do not add them back.

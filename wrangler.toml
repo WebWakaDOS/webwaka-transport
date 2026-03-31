@@ -5,7 +5,8 @@ compatibility_flags = ["nodejs_compat"]
 
 # ============================================================
 # Cron Triggers — Scheduled Worker
-# Runs drainEventBus() + sweepExpiredReservations() every minute
+# Runs drainEventBus() + sweepExpiredReservations() +
+# sweepAbandonedBookings() every minute
 # ============================================================
 [triggers]
 crons = ["* * * * *"]
@@ -41,6 +42,10 @@ id = "placeholder-tenant-config-staging"
 binding = "SEAT_CACHE_KV"
 id = "placeholder-seat-cache-staging"
 
+[[env.staging.kv_namespaces]]
+binding = "IDEMPOTENCY_KV"
+id = "placeholder-idempotency-staging"
+
 # ============================================================
 # Production environment
 # ============================================================
@@ -66,3 +71,7 @@ id = "placeholder-tenant-config-prod"
 [[env.production.kv_namespaces]]
 binding = "SEAT_CACHE_KV"
 id = "placeholder-seat-cache-prod"
+
+[[env.production.kv_namespaces]]
+binding = "IDEMPOTENCY_KV"
+id = "placeholder-idempotency-prod"

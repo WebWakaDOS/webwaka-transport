@@ -1,0 +1,275 @@
+/**
+ * WebWaka Scheduled Sweepers
+ * Functions run by the Cloudflare Worker Cron trigger (every minute).
+ *
+ * Responsibilities:
+ *   drainEventBus()           — flush platform_events outbox to downstream consumers
+ *   sweepExpiredReservations() — release timed-out seat holds
+ *   sweepAbandonedBookings()  — cancel bookings pending payment > 30 min (configurable)
+ *
+ * All sweepers are idempotent and safe to re-run on overlap.
+ * Event-Driven invariant: side-effects are published as platform_events so
+ * downstream services can react without polling.
+ */
+import type { Env } from '../worker';
+
+// ============================================================
+// B-005: Abandoned booking sweeper
+// Cancels bookings where payment has not been received within
+// ABANDONMENT_WINDOW_MS (default: 30 minutes).
+// Seats are released and a booking:ABANDONED event is published.
+// ============================================================
+
+const ABANDONMENT_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
+
+export async function sweepAbandonedBookings(env: Env): Promise<void> {
+  const db = env.DB;
+  const now = Date.now();
+  const cutoff = now - ABANDONMENT_WINDOW_MS;
+
+  try {
+    const abandoned = await db
+      .prepare(
+        `SELECT id, customer_id, trip_id, seat_ids
+         FROM bookings
+         WHERE status = 'pending'
+           AND payment_status = 'pending'
+           AND created_at < ?
+           AND deleted_at IS NULL`
+      )
+      .bind(cutoff)
+      .all<{ id: string; customer_id: string; trip_id: string; seat_ids: string }>();
+
+    if (!abandoned.results || abandoned.results.length === 0) return;
+
+    console.log(`[AbandonedSweeper] Cancelling ${abandoned.results.length} abandoned bookings`);
+
+    for (const booking of abandoned.results) {
+      try {
+        const seatIds = JSON.parse(booking.seat_ids) as string[];
+
+        await db.batch([
+          db.prepare(
+            `UPDATE bookings SET status = 'cancelled', cancelled_at = ? WHERE id = ?`
+          ).bind(now, booking.id),
+          ...seatIds.map(seatId =>
+            db.prepare(
+              `UPDATE seats SET status = ?, reserved_by = NULL, reservation_token = NULL,
+               reservation_expires_at = NULL, updated_at = ? WHERE id = ?`
+            ).bind('available', now, seatId)
+          ),
+        ]);
+
+        const evtId = `evt_ab_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        await db.prepare(
+          `INSERT OR IGNORE INTO platform_events
+           (id, event_type, aggregate_id, aggregate_type, payload, status, created_at)
+           VALUES (?, 'booking:ABANDONED', ?, 'booking', ?, 'pending', ?)`
+        ).bind(
+          evtId,
+          booking.id,
+          JSON.stringify({
+            booking_id: booking.id,
+            customer_id: booking.customer_id,
+            trip_id: booking.trip_id,
+            seat_ids: seatIds,
+            abandoned_at: now,
+          }),
+          now
+        ).run();
+
+        console.log(`[AbandonedSweeper] Cancelled booking ${booking.id}`);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[AbandonedSweeper] Failed to cancel booking ${booking.id}: ${msg}`);
+      }
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[AbandonedSweeper] Query error: ${msg}`);
+  }
+}
+
+// ============================================================
+// Seat reservation sweeper — releases TTL-expired seat holds
+// (moved from worker.ts for separation of concerns)
+// ============================================================
+
+export async function sweepExpiredReservations(env: Env): Promise<void> {
+  const db = env.DB;
+  const now = Date.now();
+
+  try {
+    const expired = await db
+      .prepare(
+        `SELECT id, trip_id, operator_id
+         FROM seats
+         WHERE status = 'reserved'
+           AND reservation_expires_at IS NOT NULL
+           AND reservation_expires_at < ?`
+      )
+      .bind(now)
+      .all<{ id: string; trip_id: string; operator_id: string | null }>();
+
+    if (!expired.results || expired.results.length === 0) return;
+
+    console.log(`[SeatSweeper] Releasing ${expired.results.length} expired reservations`);
+
+    await db
+      .prepare(
+        `UPDATE seats
+         SET status = 'available',
+             reserved_by = NULL,
+             reservation_token = NULL,
+             reservation_expires_at = NULL,
+             version = version + 1,
+             updated_at = ?
+         WHERE status = 'reserved'
+           AND reservation_expires_at IS NOT NULL
+           AND reservation_expires_at < ?`
+      )
+      .bind(now, now)
+      .run();
+
+    for (const seat of expired.results) {
+      const evtId = `evt_sw_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      await db
+        .prepare(
+          `INSERT OR IGNORE INTO platform_events
+           (id, event_type, aggregate_id, aggregate_type, payload, tenant_id, status, created_at)
+           VALUES (?, 'seat.reservation_expired', ?, 'seat', ?, ?, 'pending', ?)`
+        )
+        .bind(
+          evtId,
+          seat.id,
+          JSON.stringify({ seat_id: seat.id, trip_id: seat.trip_id }),
+          seat.operator_id ?? null,
+          now
+        )
+        .run();
+    }
+
+    console.log(`[SeatSweeper] Released ${expired.results.length} seats`);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[SeatSweeper] Error: ${msg}`);
+  }
+}
+
+// ============================================================
+// Event Bus drain — flushes platform_events outbox
+// (moved from worker.ts for separation of concerns)
+// ============================================================
+
+export async function drainEventBus(env: Env): Promise<void> {
+  const db = env.DB;
+  const now = Date.now();
+
+  try {
+    const pending = await db
+      .prepare(
+        `SELECT * FROM platform_events
+         WHERE status = 'pending' AND (retry_count IS NULL OR retry_count < 3)
+         ORDER BY created_at ASC
+         LIMIT 50`
+      )
+      .all();
+
+    if (!pending.results || pending.results.length === 0) return;
+
+    console.log(`[EventBus] Draining ${pending.results.length} pending events`);
+
+    for (const evt of pending.results as Record<string, unknown>[]) {
+      try {
+        await deliverEvent(evt, env);
+
+        await db
+          .prepare(
+            `UPDATE platform_events SET status = 'processed', processed_at = ? WHERE id = ?`
+          )
+          .bind(now, evt['id'])
+          .run();
+
+        console.log(`[EventBus] Processed: ${evt['event_type']} id=${evt['id']}`);
+      } catch (err: unknown) {
+        const errMsg = err instanceof Error ? err.message : 'Unknown error';
+        const retryCount = ((evt['retry_count'] as number) ?? 0) + 1;
+        const newStatus = retryCount >= 3 ? 'dead' : 'pending';
+
+        await db
+          .prepare(
+            `UPDATE platform_events SET retry_count = ?, status = ?, last_error = ? WHERE id = ?`
+          )
+          .bind(retryCount, newStatus, errMsg, evt['id'])
+          .run();
+
+        console.error(`[EventBus] Failed (attempt ${retryCount}): ${evt['event_type']} id=${evt['id']} — ${errMsg}`);
+      }
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[EventBus] Drain error: ${msg}`);
+  }
+}
+
+// ============================================================
+// Event routing — wire downstream consumers here as they are added
+// ============================================================
+
+async function deliverEvent(evt: Record<string, unknown>, env: Env): Promise<void> {
+  const eventType = evt['event_type'] as string;
+
+  // seat:RESERVED → invalidate seat cache
+  if (eventType === 'seat:RESERVED' || eventType === 'seat.reservation_expired') {
+    if (env.SEAT_CACHE_KV && evt['aggregate_id']) {
+      try {
+        await env.SEAT_CACHE_KV.delete(String(evt['aggregate_id']));
+      } catch { /* non-fatal */ }
+    }
+    return;
+  }
+
+  // booking:CONFIRMED → push notification (when VAPID is configured)
+  if (eventType === 'booking.created' || eventType === 'booking:CONFIRMED') {
+    // TODO(C-001): send push notification via VAPID
+    console.log(`[EventBus] booking:CONFIRMED — push notification not yet wired`);
+    return;
+  }
+
+  // booking:ABANDONED → log (future: SMS to customer)
+  if (eventType === 'booking:ABANDONED') {
+    console.log(`[EventBus] booking:ABANDONED — SMS notification not yet wired`);
+    return;
+  }
+
+  // parcel.* → logistics service
+  if (eventType.startsWith('parcel.')) {
+    await deliverToConsumer('https://logistics.webwaka.app/api/internal/events', evt);
+    return;
+  }
+
+  // payment:AMOUNT_MISMATCH → fraud alert log
+  if (eventType === 'payment:AMOUNT_MISMATCH') {
+    console.error(`[EventBus] FRAUD ALERT: payment:AMOUNT_MISMATCH — booking ${evt['aggregate_id']}`);
+    return;
+  }
+
+  // Default: no-op delivery (consumer not yet wired)
+  console.log(`[EventBus] No-op delivery for: ${eventType} — consumer not yet wired`);
+}
+
+async function deliverToConsumer(endpointUrl: string, evt: Record<string, unknown>): Promise<void> {
+  const response = await fetch(endpointUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Webwaka-Event-Type': String(evt['event_type'] ?? ''),
+      'X-Webwaka-Aggregate-ID': String(evt['aggregate_id'] ?? ''),
+    },
+    body: JSON.stringify(evt),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Consumer returned ${response.status} for event ${evt['id']}`);
+  }
+}

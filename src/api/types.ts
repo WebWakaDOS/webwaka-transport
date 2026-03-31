@@ -15,6 +15,7 @@ export interface Env {
   SESSIONS_KV?: KVNamespace;
   TENANT_CONFIG_KV?: KVNamespace;
   SEAT_CACHE_KV?: KVNamespace;
+  IDEMPOTENCY_KV?: KVNamespace;
   JWT_SECRET?: string;
   MIGRATION_SECRET?: string;
   PAYSTACK_SECRET?: string;

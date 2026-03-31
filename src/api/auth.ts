@@ -72,9 +72,19 @@ authRouter.post('/otp/request', async (c) => {
 
   const hasSms = Boolean(c.env.SMS_API_KEY);
   if (hasSms) {
-    // TODO: Send SMS via Termii / Africa's Talking
-    // await sendOtpSms(phone, code, c.env.SMS_API_KEY);
-    console.log(`[auth] OTP for ${phone}: ${code} (SMS would fire here)`);
+    try {
+      const { buildSmsProvider } = await import('../lib/sms.js');
+      await buildSmsProvider(c.env).send(
+        phone,
+        `Your WebWaka OTP is: ${code}. Valid for 5 minutes. Do not share this code.`
+      );
+    } catch (smsErr: unknown) {
+      const errMsg = smsErr instanceof Error ? smsErr.message : String(smsErr);
+      console.error(`[auth/otp/request] SMS send failed for ${phone}: ${errMsg}`);
+      // Non-fatal: OTP is stored in KV; dev_code returned if SMS is not configured
+    }
+  } else {
+    console.log(`[auth] OTP for ${phone}: ${code} (SMS not configured — dev mode)`);
   }
 
   return c.json({
