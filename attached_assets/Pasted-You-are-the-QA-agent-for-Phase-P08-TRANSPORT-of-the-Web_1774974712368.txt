@@ -1,0 +1,66 @@
+You are the QA agent for Phase P08-TRANSPORT of the WebWaka platform.
+Target repo: webwaka-transport
+
+Deeply verify P08-TRANSPORT (Revenue Features). Fix every issue. Do not declare verified until all checks pass.
+
+=== VERIFICATION CHECKLIST ===
+
+--- P08-T1: Seat Templates ---
+1. Confirm PUT /api/operator/vehicles/:id/template validates: all seat numbers are unique, all class values are in the allowed set (standard, window, vip, front), the template JSON is parseable.
+2. Confirm the template is stored in the seat_template column of the vehicles table.
+3. Confirm that when creating a trip via POST /api/seat-inventory/trips, if the vehicle has a seat_template, seats are generated from it (with correct seat_class per template).
+4. Confirm that when no seat_template exists, seats are generated sequentially with class='standard' (backward compatible).
+5. Confirm GET /api/seat-inventory/trips/:id/availability returns the seat_layout object alongside the seats array.
+6. Check: what if the seat_template JSON is malformed (invalid JSON stored in DB)? The trip creation must not crash — it should fall back to sequential seat generation and log an error.
+7. Check: what if the template defines 54 seats but the vehicle capacity is 45? The system should use the template's seat count, not the vehicle capacity field. Confirm this is the behavior.
+
+--- P08-T2: Seat Class Pricing ---
+1. Confirm PUT /api/operator/routes/:id/fare-matrix validates that all multipliers are ≥ 1.0 and ≤ 5.0 (or a configurable max). An invalid value like 0.5 or 10 must return 400.
+2. Confirm the fare matrix is stored in the fare_matrix column of the routes table.
+3. Confirm GET /api/booking/trips/search returns effective_fare_by_class in each trip result.
+4. Confirm the class multipliers are applied: a route with base_fare=5000 kobo and vip_multiplier=1.5 must return vip_fare=7500 kobo.
+5. Confirm time_multipliers are applied when configured (a peak-hour multiplier of 1.2 must raise the fare by 20%).
+6. Confirm the lowest-class fare is returned as effective_fare for sorting purposes.
+7. In POST /api/booking/bookings, confirm total_amount_kobo is validated against the computed fare. Test: submit a booking with total_amount_kobo=0 — must return 422 with fare mismatch. Submit with the correct amount — must succeed.
+8. Confirm the ±2% tolerance is applied for rounding (a 1 kobo difference due to rounding must not fail the booking).
+
+--- P08-T3: Cancellation Refund ---
+1. Confirm the cancellation policy is read from operator config (not hardcoded values).
+2. Confirm the refund amount is computed correctly for all three scenarios: full refund, half refund, no refund.
+3. Specifically: confirm time math uses kobo correctly — refund = Math.floor(total_amount_kobo / 2) for half, not a float division.
+4. Confirm initiatePaystackRefund is only called when payment_status='completed' AND payment_method IN ('paystack', 'flutterwave'). Cash cancellations must NOT trigger the Paystack API.
+5. Confirm manual_refund_required=1 is set on cash cancellations.
+6. Confirm refund_reference and refund_amount_kobo columns exist on the bookings table (migration 003).
+7. Confirm a booking:REFUNDED event is published after a successful refund.
+8. Check: what if the Paystack Refund API returns an error (e.g. invalid reference)? The booking should still be cancelled, but refund_reference should not be set, and the error should be logged. The cancellation must succeed even if the refund fails.
+9. Confirm seats are released on cancellation regardless of refund outcome.
+
+--- P08-T4: Waiting List ---
+1. Confirm POST /api/booking/trips/:id/waitlist returns 400 if seats of the requested class ARE available (don't allow joining a non-full waitlist).
+2. Confirm position numbering is correct: first person gets 1, second gets 2, etc.
+3. Confirm GET /api/booking/waitlist returns only non-deleted, non-expired entries for the customer.
+4. Confirm DELETE /api/booking/trips/:id/waitlist soft-deletes (sets deleted_at, does not hard-delete).
+5. Confirm the notification logic in sweepExpiredReservations: after a seat is released, the first notified waiting customer gets an SMS with a 10-minute booking link.
+6. Confirm notified_at is set so the same customer is not notified twice for the same seat release event.
+7. Check: what if all customers on the waitlist have been notified and none booked? The next seat release should notify position 2 (the next un-notified entry). Confirm the query correctly orders by position and filters notified_at IS NULL.
+8. Confirm waiting_list entries have an expires_at and the sweep does not notify expired entries.
+
+--- P08-T5: Group Booking ---
+1. Confirm POST /api/agent-sales/group-bookings validates seat_count ∈ [2, 50].
+2. Confirm it uses atomic seat reservation (same optimistic locking pattern as reserve-batch from P02-T2).
+3. Confirm that if fewer seats than requested are available, it returns 422 with the available count.
+4. Confirm one bookings record is created (not N individual records).
+5. Confirm the passenger_names array is populated (group_name repeated seat_count times, or equivalent).
+6. Confirm one sales_transactions record is created for the total.
+7. Confirm one receipts record is created.
+8. Confirm a group_booking_id is generated and stored on the booking.
+9. Confirm GET /api/agent-sales/group-bookings/:id returns the group booking detail.
+10. Check: what if the group booking fails mid-transaction (e.g. DB error after reserving but before creating the booking record)? The seats should be released. Confirm the error handling rolls back the seat reservations.
+
+--- FINAL CHECKS ---
+1. Run tsc --noEmit — zero errors.
+2. Run migration 003 locally and confirm no SQL errors.
+3. Start the dev server. Test the fare matrix endpoint. GET /api/booking/trips/search with a route that has a fare matrix — confirm class prices appear in the response.
+4. Test cancellation: create a booking with paymentStatus='completed', cancel it, confirm refund_amount_kobo is computed correctly.
+
+Report every issue found and every fix applied.

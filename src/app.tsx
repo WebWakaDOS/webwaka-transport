@@ -455,7 +455,6 @@ function AgentPOSModule({ online }: { online: boolean }) {
     try {
       const result = await api.createGroupBooking({
         trip_id: tripId,
-        customer_id: user?.id ?? '',
         group_name: grpName,
         leader_name: grpLeaderName,
         leader_phone: grpLeaderPhone,

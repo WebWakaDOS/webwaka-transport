@@ -517,7 +517,7 @@ export async function sweepExpiredWaitlistNotifications(env: Env): Promise<void>
           ).bind(wl.trip_id, wl.seat_class).first<{ id: string }>();
 
           if (seat) {
-            const expires_at = now + 30 * 60_000;
+            const expires_at = now + 10 * 60_000; // T4-5: 10-minute hold window
             await db.prepare(
               `UPDATE waiting_list SET notified_at = ?, expires_at = ? WHERE id = ?`
             ).bind(now, expires_at, next.id).run();
@@ -529,7 +529,7 @@ export async function sweepExpiredWaitlistNotifications(env: Env): Promise<void>
             if (customer?.phone && !customer.phone.startsWith('NDPR_')) {
               await sendSms(
                 customer.phone,
-                `WebWaka: A ${wl.seat_class} seat on your waitlisted trip is now available! Book within 30 minutes.`,
+                `WebWaka: A ${wl.seat_class} seat on your waitlisted trip is now available! Book within 10 minutes.`,
                 env,
               ).catch(() => {});
             }

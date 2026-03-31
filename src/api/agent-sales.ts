@@ -8,6 +8,28 @@ import { requireRole, publishEvent } from '@webwaka/core';
 import type { AppContext, DbAgent, DbSalesTransaction, DbReceipt } from './types';
 import { genId, parsePagination, metaResponse, requireFields, applyTenantScope } from './types';
 
+// ---- Fare helpers (copied from booking-portal; keep in sync) ----
+interface GrpFareMatrix {
+  standard?: number; window?: number; vip?: number; front?: number;
+  time_multipliers?: { before_hours: number; multiplier: number }[];
+}
+function grpComputeFareByClass(baseFare: number, matrix: GrpFareMatrix | null, departureTime: number): Record<string, number> {
+  const classes = ['standard', 'window', 'vip', 'front'] as const;
+  let timeMultiplier = 1.0;
+  if (matrix?.time_multipliers) {
+    const hoursUntil = (departureTime - Date.now()) / 3_600_000;
+    for (const tm of matrix.time_multipliers) {
+      if (hoursUntil <= tm.before_hours) { timeMultiplier = Math.min(5.0, Math.max(1.0, tm.multiplier)); break; }
+    }
+  }
+  const result: Record<string, number> = {};
+  for (const cls of classes) {
+    const classRate = matrix?.[cls] ?? 1.0;
+    result[cls] = Math.round(baseFare * classRate * timeMultiplier);
+  }
+  return result;
+}
+
 export const agentSalesRouter = new Hono<AppContext>();
 
 // ============================================================
@@ -634,5 +656,179 @@ agentSalesRouter.patch('/reconciliation/:id', requireRole(['SUPER_ADMIN', 'TENAN
     return c.json({ success: true, data: { id, status, reviewed_at: now } });
   } catch {
     return c.json({ success: false, error: 'Failed to update reconciliation' }, 500);
+  }
+});
+
+// ============================================================
+// P08-T5: POST /group-bookings — create a group booking (STAFF+)
+// Creates booking + group_bookings + sales_transaction + receipt atomically.
+// seat_ids.length must be in [2, 50]; returns 422 if insufficient seats available.
+// ============================================================
+agentSalesRouter.post('/group-bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
+  const body = await c.req.json() as Record<string, unknown>;
+  const missing = requireFields(body, ['trip_id', 'agent_id', 'group_name', 'leader_name', 'leader_phone', 'seat_ids', 'passenger_names', 'payment_method']);
+  if (missing) return c.json({ success: false, error: missing }, 400);
+
+  const {
+    trip_id, agent_id, group_name, leader_name, leader_phone,
+    seat_ids, passenger_names, seat_class, payment_method, total_amount_kobo,
+  } = body as {
+    trip_id: string; agent_id: string; group_name: string;
+    leader_name: string; leader_phone: string;
+    seat_ids: string[]; passenger_names: string[];
+    seat_class?: string; payment_method: string; total_amount_kobo?: number;
+  };
+
+  if (!Array.isArray(seat_ids) || seat_ids.length < 2 || seat_ids.length > 50) {
+    return c.json({ success: false, error: 'seat_ids must be an array of 2–50 seats' }, 400);
+  }
+  if (!Array.isArray(passenger_names) || passenger_names.length !== seat_ids.length) {
+    return c.json({ success: false, error: 'passenger_names must have one entry per seat_id' }, 400);
+  }
+  const VALID_CLASSES = ['standard', 'window', 'vip', 'front'];
+  const effectiveSeatClass = seat_class ?? 'standard';
+  if (!VALID_CLASSES.includes(effectiveSeatClass)) {
+    return c.json({ success: false, error: `seat_class must be one of: ${VALID_CLASSES.join(', ')}` }, 400);
+  }
+
+  const db = c.env.DB;
+  const jwtUser = c.get('user');
+  const now = Date.now();
+
+  try {
+    const trip = await db.prepare(
+      `SELECT t.id, t.state, t.operator_id, t.departure_time, r.base_fare, r.fare_matrix
+       FROM trips t JOIN routes r ON t.route_id = r.id WHERE t.id = ? AND t.deleted_at IS NULL`
+    ).bind(trip_id).first<{ id: string; state: string; operator_id: string; departure_time: number; base_fare: number; fare_matrix: string | null }>();
+    if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
+    if (!['scheduled', 'boarding'].includes(trip.state)) {
+      return c.json({ success: false, error: `Cannot book on a trip in '${trip.state}' state` }, 409);
+    }
+
+    // Verify all requested seats exist, belong to this trip, and are available
+    const placeholders = seat_ids.map(() => '?').join(',');
+    const seatRows = await db.prepare(
+      `SELECT id, seat_number, seat_class, status FROM seats WHERE id IN (${placeholders}) AND trip_id = ?`
+    ).bind(...seat_ids, trip_id).all<{ id: string; seat_number: string; seat_class: string; status: string }>();
+
+    const availableSeats = seatRows.results.filter(s => s.status === 'available');
+    if (availableSeats.length < seat_ids.length) {
+      return c.json({
+        success: false,
+        error: 'One or more requested seats are not available',
+        available_count: availableSeats.length,
+        requested_count: seat_ids.length,
+      }, 422);
+    }
+
+    // Compute expected fare and validate submitted amount within ±2%
+    const fareMatrix: GrpFareMatrix | null = trip.fare_matrix ? JSON.parse(trip.fare_matrix) as GrpFareMatrix : null;
+    const fareByClass = grpComputeFareByClass(trip.base_fare, fareMatrix, trip.departure_time);
+    const perSeatFare = fareByClass[effectiveSeatClass] ?? trip.base_fare;
+    const expected_kobo = perSeatFare * seat_ids.length;
+
+    if (total_amount_kobo !== undefined) {
+      const tolerance = Math.round(expected_kobo * 0.02);
+      if (Math.abs(total_amount_kobo - expected_kobo) > tolerance) {
+        return c.json({ success: false, error: 'fare_mismatch', expected_kobo, submitted_kobo: total_amount_kobo }, 422);
+      }
+    }
+    const total_amount = total_amount_kobo ?? expected_kobo;
+
+    const booking_id = genId('bkg');
+    const group_id = genId('grp');
+    const txn_id = genId('txn');
+    const receipt_id = genId('rct');
+    const payment_reference = `waka_grp_${txn_id.slice(-12)}`;
+    const qrCode = `${txn_id}:${seat_ids.join(',')}`;
+    const seatNumbers = seatRows.results.map(s => s.seat_number);
+
+    await db.batch([
+      // 1. Master booking record
+      db.prepare(
+        `INSERT INTO bookings (id, customer_id, trip_id, seat_ids, passenger_names, total_amount, status, payment_status, payment_method, payment_reference, group_booking_id, is_guest, created_at)
+         VALUES (?, NULL, ?, ?, ?, ?, 'confirmed', 'completed', ?, ?, ?, 0, ?)`
+      ).bind(booking_id, trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, payment_method, payment_reference, group_id, now),
+
+      // 2. Group booking metadata
+      db.prepare(
+        `INSERT INTO group_bookings (id, operator_id, agent_id, trip_id, booking_id, group_name, leader_name, leader_phone, seat_count, seat_class, total_amount_kobo, payment_method, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(group_id, trip.operator_id, agent_id ?? jwtUser?.id ?? 'unknown', trip_id, booking_id, group_name, leader_name, leader_phone, seat_ids.length, effectiveSeatClass, total_amount, payment_method, now),
+
+      // 3. Sales transaction (POS record)
+      db.prepare(
+        `INSERT INTO sales_transactions (id, agent_id, trip_id, seat_ids, passenger_names, total_amount, payment_method, payment_status, sync_status, receipt_id, passenger_id_type, passenger_id_hash, park_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', 'synced', ?, NULL, NULL, NULL, ?)`
+      ).bind(txn_id, agent_id ?? jwtUser?.id ?? 'unknown', trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, payment_method, receipt_id, now),
+
+      // 4. Receipt with QR code
+      db.prepare(
+        `INSERT INTO receipts (id, transaction_id, agent_id, trip_id, passenger_names, seat_numbers, total_amount, payment_method, qr_code, issued_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(receipt_id, txn_id, agent_id ?? jwtUser?.id ?? 'unknown', trip_id, JSON.stringify(passenger_names), JSON.stringify(seatNumbers), total_amount, payment_method, qrCode, now),
+
+      // 5. Confirm all seats atomically
+      ...seat_ids.map(seatId =>
+        db.prepare(
+          `UPDATE seats SET status = 'confirmed', confirmed_by = ?, confirmed_at = ?, updated_at = ? WHERE id = ?`
+        ).bind(booking_id, now, now, seatId)
+      ),
+    ]);
+
+    try {
+      await publishEvent(db, {
+        event_type: 'agent.group_booking.completed',
+        aggregate_id: group_id,
+        aggregate_type: 'group_bookings',
+        payload: { group_id, booking_id, txn_id, receipt_id, trip_id, seat_count: seat_ids.length, total_amount, payment_method },
+        timestamp: now,
+      });
+    } catch { /* non-fatal */ }
+
+    return c.json({
+      success: true,
+      data: {
+        group_booking_id: group_id,
+        booking_id,
+        transaction_id: txn_id,
+        receipt_id,
+        trip_id,
+        seat_count: seat_ids.length,
+        seat_numbers: seatNumbers,
+        total_amount,
+        per_seat_fare: perSeatFare,
+        payment_method,
+        payment_reference,
+        qr_code: qrCode,
+      },
+    }, 201);
+  } catch {
+    return c.json({ success: false, error: 'Failed to create group booking' }, 500);
+  }
+});
+
+// ============================================================
+// P08-T5: GET /group-bookings/:id — fetch group booking details (STAFF+)
+// ============================================================
+agentSalesRouter.get('/group-bookings/:id', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
+  const id = c.req.param('id');
+  const db = c.env.DB;
+  try {
+    const group = await db.prepare(
+      `SELECT gb.*, b.status AS booking_status, b.seat_ids, b.passenger_names,
+              b.payment_status, b.payment_reference, b.total_amount,
+              r.id AS receipt_id, r.qr_code, r.seat_numbers, r.issued_at
+       FROM group_bookings gb
+       JOIN bookings b ON gb.booking_id = b.id
+       LEFT JOIN receipts r ON r.transaction_id = (
+         SELECT id FROM sales_transactions WHERE trip_id = gb.trip_id AND seat_ids = b.seat_ids LIMIT 1
+       )
+       WHERE gb.id = ?`
+    ).bind(id).first();
+    if (!group) return c.json({ success: false, error: 'Group booking not found' }, 404);
+    return c.json({ success: true, data: group });
+  } catch {
+    return c.json({ success: false, error: 'Failed to fetch group booking' }, 500);
   }
 });

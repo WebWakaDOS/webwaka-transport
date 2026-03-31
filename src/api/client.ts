@@ -795,18 +795,28 @@ export class ApiClient {
   // ---- P08-T5: Group Bookings ----
 
   async createGroupBooking(body: {
-    trip_id: string; customer_id: string; group_name: string;
+    trip_id: string; agent_id: string; group_name: string;
     leader_name: string; leader_phone: string;
     seat_ids: string[]; passenger_names: string[];
-    seat_class?: string; payment_method: string; agent_id: string;
+    seat_class?: string; payment_method: string;
     total_amount_kobo?: number;
-  }): Promise<{ group_booking_id: string; booking_id: string; total_amount: number; payment_reference: string }> {
-    const res = await this.request('POST', '/api/booking/group-bookings', body);
-    return res as { group_booking_id: string; booking_id: string; total_amount: number; payment_reference: string };
+  }): Promise<{
+    group_booking_id: string; booking_id: string; transaction_id: string;
+    receipt_id: string; trip_id: string; seat_count: number; seat_numbers: string[];
+    total_amount: number; per_seat_fare: number; payment_method: string;
+    payment_reference: string; qr_code: string;
+  }> {
+    const res = await this.request('POST', '/api/agent-sales/group-bookings', body);
+    return res as {
+      group_booking_id: string; booking_id: string; transaction_id: string;
+      receipt_id: string; trip_id: string; seat_count: number; seat_numbers: string[];
+      total_amount: number; per_seat_fare: number; payment_method: string;
+      payment_reference: string; qr_code: string;
+    };
   }
 
   async getGroupBooking(id: string): Promise<Record<string, unknown>> {
-    const res = await this.request('GET', `/api/booking/group-bookings/${id}`);
+    const res = await this.request('GET', `/api/agent-sales/group-bookings/${id}`);
     return res as Record<string, unknown>;
   }
 }

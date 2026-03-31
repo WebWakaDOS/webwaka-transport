@@ -526,7 +526,7 @@ async function notifyWaitlist(db: D1Database, trip_id: string, env: AppContext['
   ).bind(entry.customer_id).first<{ phone: string }>();
 
   const now = Date.now();
-  const expires_at = now + 30 * 60_000;
+  const expires_at = now + 10 * 60_000; // T4-5: 10-minute hold window
   await db.prepare(
     `UPDATE waiting_list SET notified_at = ?, expires_at = ? WHERE id = ?`
   ).bind(now, expires_at, entry.id).run();
@@ -534,7 +534,7 @@ async function notifyWaitlist(db: D1Database, trip_id: string, env: AppContext['
   if (customer?.phone) {
     await sendSms(
       customer.phone,
-      `WebWaka: A ${entry.seat_class} seat is available on your waitlisted trip! Book within 30 minutes before it's released.`,
+      `WebWaka: A ${entry.seat_class} seat is available on your waitlisted trip! Book within 10 minutes before it's released.`,
       env,
     ).catch(() => {});
   }
@@ -560,6 +560,18 @@ bookingPortalRouter.post('/trips/:id/waitlist', requireRole(['CUSTOMER', 'STAFF'
   try {
     const trip = await db.prepare(`SELECT id FROM trips WHERE id = ? AND deleted_at IS NULL`).bind(trip_id).first<{ id: string }>();
     if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
+
+    // T4-1: Reject if seats of the requested class are still available — waitlist is only for full trips
+    const availableCount = await db.prepare(
+      `SELECT COUNT(*) as cnt FROM seats WHERE trip_id = ? AND seat_class = ? AND status = 'available'`
+    ).bind(trip_id, seat_class).first<{ cnt: number }>();
+    if ((availableCount?.cnt ?? 0) > 0) {
+      return c.json({
+        success: false,
+        error: `Seats of class '${seat_class!}' are still available. Waitlist only applies when that class is fully booked.`,
+        available_count: availableCount?.cnt ?? 0,
+      }, 400);
+    }
 
     // Check if already on waitlist
     const existing = await db.prepare(
@@ -622,121 +634,8 @@ bookingPortalRouter.delete('/trips/:id/waitlist/:wl_id', requireRole(['CUSTOMER'
   }
 });
 
-// ============================================================
-// P08-T5: POST /group-bookings — create a group booking (STAFF+)
-// One booking covers all seats; group_bookings stores group metadata
-// ============================================================
-bookingPortalRouter.post('/group-bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
-  const body = await c.req.json() as Record<string, unknown>;
-  const {
-    trip_id, customer_id, group_name, leader_name, leader_phone,
-    seat_ids, passenger_names, seat_class, payment_method, agent_id,
-    total_amount_kobo,
-  } = body as {
-    trip_id?: string; customer_id?: string; group_name?: string;
-    leader_name?: string; leader_phone?: string;
-    seat_ids?: string[]; passenger_names?: string[]; seat_class?: string;
-    payment_method?: string; agent_id?: string; total_amount_kobo?: number;
-  };
-
-  const missing = requireFields(body as Record<string, unknown>, ['trip_id', 'customer_id', 'group_name', 'leader_name', 'leader_phone', 'payment_method', 'agent_id']);
-  if (missing) return c.json({ success: false, error: missing }, 400);
-  if (!Array.isArray(seat_ids) || seat_ids.length === 0) {
-    return c.json({ success: false, error: 'seat_ids must be a non-empty array' }, 400);
-  }
-  if (!Array.isArray(passenger_names) || passenger_names.length !== seat_ids.length) {
-    return c.json({ success: false, error: 'passenger_names must have one entry per seat' }, 400);
-  }
-  const VALID_CLASSES = ['standard', 'window', 'vip', 'front'];
-  if (seat_class && !VALID_CLASSES.includes(seat_class)) {
-    return c.json({ success: false, error: `seat_class must be one of: ${VALID_CLASSES.join(', ')}` }, 400);
-  }
-
-  const db = c.env.DB;
-  const now = Date.now();
-  const jwtUser = c.get('user');
-
-  try {
-    const trip = await db.prepare(
-      `SELECT t.id, t.state, t.operator_id, t.departure_time, r.base_fare, r.fare_matrix
-       FROM trips t JOIN routes r ON t.route_id = r.id WHERE t.id = ?`
-    ).bind(trip_id).first<{ id: string; state: string; operator_id: string; departure_time: number; base_fare: number; fare_matrix: string | null }>();
-    if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
-    if (!['scheduled', 'boarding'].includes(trip.state)) {
-      return c.json({ success: false, error: `Cannot book on a trip in '${trip.state}' state` }, 409);
-    }
-
-    // Verify seats belong to this trip
-    const seatRows = await db.prepare(
-      `SELECT id, seat_class FROM seats WHERE id IN (${seat_ids!.map(() => '?').join(',')}) AND trip_id = ? AND status = 'available'`
-    ).bind(...seat_ids!, trip_id).all<{ id: string; seat_class: string }>();
-    if (seatRows.results.length !== seat_ids!.length) {
-      return c.json({ success: false, error: 'One or more seats not available on this trip' }, 409);
-    }
-
-    // Compute expected fare
-    const fareMatrix: FareMatrix | null = trip.fare_matrix ? JSON.parse(trip.fare_matrix) as FareMatrix : null;
-    const fareByClass = computeFareByClass(trip.base_fare, fareMatrix, trip.departure_time);
-    const effectiveSeatClass = seat_class ?? 'standard';
-    const perSeatFare = fareByClass[effectiveSeatClass] ?? trip.base_fare;
-    const expected_kobo = perSeatFare * seat_ids!.length;
-
-    if (total_amount_kobo !== undefined) {
-      const tolerance = Math.round(expected_kobo * 0.02);
-      if (Math.abs(total_amount_kobo - expected_kobo) > tolerance) {
-        return c.json({ success: false, error: 'fare_mismatch', expected_kobo, submitted_kobo: total_amount_kobo }, 422);
-      }
-    }
-    const total_amount = total_amount_kobo ?? expected_kobo;
-
-    const booking_id = genId('bkg');
-    const group_id = genId('grp');
-    const payment_reference = `waka_${nanoid('', 16)}`;
-
-    await db.batch([
-      db.prepare(
-        `INSERT INTO bookings (id, customer_id, trip_id, seat_ids, passenger_names, total_amount, status, payment_status, payment_method, payment_reference, group_booking_id, is_guest, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'confirmed', 'pending', ?, ?, ?, 0, ?)`
-      ).bind(booking_id, customer_id, trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, payment_method, payment_reference, group_id, now),
-      db.prepare(
-        `INSERT INTO group_bookings (id, operator_id, agent_id, trip_id, booking_id, group_name, leader_name, leader_phone, seat_count, seat_class, total_amount_kobo, payment_method, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).bind(group_id, trip.operator_id, agent_id ?? jwtUser?.id ?? 'unknown', trip_id, booking_id, group_name, leader_name, leader_phone, seat_ids!.length, effectiveSeatClass, total_amount, payment_method, now),
-      ...seat_ids!.map(seatId =>
-        db.prepare(
-          `UPDATE seats SET status = 'confirmed', confirmed_by = ?, updated_at = ? WHERE id = ?`
-        ).bind(booking_id, now, seatId)
-      ),
-    ]);
-
-    return c.json({
-      success: true,
-      data: { group_booking_id: group_id, booking_id, trip_id, seat_count: seat_ids!.length, total_amount, payment_reference },
-    }, 201);
-  } catch {
-    return c.json({ success: false, error: 'Failed to create group booking' }, 500);
-  }
-});
-
-// ============================================================
-// P08-T5: GET /group-bookings/:id — fetch group booking details (STAFF+)
-// ============================================================
-bookingPortalRouter.get('/group-bookings/:id', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
-  const id = c.req.param('id');
-  const db = c.env.DB;
-  try {
-    const group = await db.prepare(
-      `SELECT gb.*, b.status as booking_status, b.seat_ids, b.passenger_names, b.payment_status, b.payment_reference
-       FROM group_bookings gb
-       JOIN bookings b ON gb.booking_id = b.id
-       WHERE gb.id = ?`
-    ).bind(id).first();
-    if (!group) return c.json({ success: false, error: 'Group booking not found' }, 404);
-    return c.json({ success: true, data: group });
-  } catch {
-    return c.json({ success: false, error: 'Failed to fetch group booking' }, 500);
-  }
-});
+// NOTE: POST /group-bookings and GET /group-bookings/:id live on the agent-sales router
+// at /api/agent-sales/group-bookings — they require sales_transaction + receipt creation.
 
 // ============================================================
 // P08-T5: PATCH /group-bookings/:id/cancel — cancel group booking (STAFF+)

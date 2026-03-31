@@ -85,15 +85,31 @@ seatInventoryRouter.post('/trips', async (c) => {
 
     if (vehicle?.seat_template) {
       // Template-based: generate seats from the vehicle's layout definition
-      type TemplateSeat = { number: string; row: number; column: number; class: string };
-      const template = JSON.parse(vehicle.seat_template) as { seats: TemplateSeat[] };
-      actualSeatCount = template.seats.length;
-      seatInserts = template.seats.map(s =>
-        db.prepare(
-          `INSERT INTO seats (id, trip_id, seat_number, seat_class, status, version, created_at, updated_at)
-           VALUES (?, ?, ?, ?, 'available', 0, ?, ?)`
-        ).bind(`${id}_s${s.number}`, id, s.number, s.class, now, now)
-      );
+      // T1-6: Malformed JSON must not crash — fall back to sequential seats
+      try {
+        type TemplateSeat = { number: string; row: number; column: number; class: string };
+        const template = JSON.parse(vehicle.seat_template) as { seats: TemplateSeat[] };
+        if (!Array.isArray(template.seats) || template.seats.length === 0) {
+          throw new Error('seat_template.seats is missing or empty');
+        }
+        // T1-7: Template seat count takes precedence over vehicle capacity field
+        actualSeatCount = template.seats.length;
+        seatInserts = template.seats.map(s =>
+          db.prepare(
+            `INSERT INTO seats (id, trip_id, seat_number, seat_class, status, version, created_at, updated_at)
+             VALUES (?, ?, ?, ?, 'available', 0, ?, ?)`
+          ).bind(`${id}_s${s.number}`, id, s.number, s.class, now, now)
+        );
+      } catch (parseErr: unknown) {
+        console.error('[seat-inventory] seat_template parse error for vehicle', vehicle_id, parseErr instanceof Error ? parseErr.message : parseErr, '— falling back to sequential seats');
+        // Fallback: sequential integer seats, all standard class
+        seatInserts = Array.from({ length: total_seats }, (_, i) =>
+          db.prepare(
+            `INSERT INTO seats (id, trip_id, seat_number, seat_class, status, version, created_at, updated_at)
+             VALUES (?, ?, ?, 'standard', 'available', 0, ?, ?)`
+          ).bind(`${id}_s${i + 1}`, id, String(i + 1).padStart(2, '0'), now, now)
+        );
+      }
     } else {
       // Fallback: sequential integer seats, all standard class
       const seatStmt = db.prepare(
