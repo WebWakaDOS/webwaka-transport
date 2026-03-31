@@ -8,6 +8,7 @@ import { requireRole, publishEvent } from '@webwaka/core';
 import type { AppContext, DbOperator, DbRoute, DbVehicle, DbTrip, DbDriver } from './types';
 import { genId, parsePagination, metaResponse, requireFields, applyTenantScope } from './types';
 import { getOperatorConfig, validateOperatorConfig } from '../lib/operator-config.js';
+import { sendSms } from '../lib/sms.js';
 
 export const operatorManagementRouter = new Hono<AppContext>();
 
@@ -321,6 +322,28 @@ operatorManagementRouter.get('/trips', async (c) => {
     return c.json({ success: true, data: result.results, meta: metaResponse(result.results.length, limit, offset) });
   } catch {
     return c.json({ success: false, error: 'Failed to fetch trips' }, 500);
+  }
+});
+
+// ============================================================
+// GET /trips/:id — single trip detail including location fields (P05-T1)
+// ============================================================
+operatorManagementRouter.get('/trips/:id', async (c) => {
+  const id = c.req.param('id');
+  const db = c.env.DB;
+
+  try {
+    const trip = await db.prepare(
+      `SELECT t.*, r.origin, r.destination, r.base_fare
+       FROM trips t
+       JOIN routes r ON t.route_id = r.id
+       WHERE t.id = ? AND t.deleted_at IS NULL`
+    ).bind(id).first<DbTrip & { origin: string; destination: string; base_fare: number }>();
+
+    if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
+    return c.json({ success: true, data: trip });
+  } catch {
+    return c.json({ success: false, error: 'Failed to fetch trip' }, 500);
   }
 });
 
@@ -700,21 +723,13 @@ operatorManagementRouter.post('/trips/:id/sos', requireRole(['SUPER_ADMIN', 'TEN
     const config = await getOperatorConfig(c.env, trip.operator_id);
     const smsTarget = config.emergency_contact_phone;
 
-    // Non-fatal SMS to emergency contact
+    // Non-fatal SMS to emergency contact (non-blocking: await with .catch so driver response is not held up)
     if (smsTarget) {
-      const smsBody = JSON.stringify({
-        api_key: c.env.TERMII_API_KEY ?? c.env.SMS_API_KEY ?? '',
-        to: smsTarget,
-        from: 'WebWaka',
-        sms: `\uD83D\uDEA8 SOS ALERT: Driver triggered emergency on Trip ${id.slice(-8)}, Route ${route}. Time: ${new Date(now).toLocaleString('en-NG', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' })}. Check dispatch dashboard immediately.`,
-        type: 'plain',
-        channel: 'generic',
-      });
-      fetch('https://api.ng.termii.com/api/sms/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: smsBody,
-      }).catch(() => {});
+      const sosMessage =
+        `\uD83D\uDEA8 SOS ALERT: Driver triggered emergency on Trip ${id.slice(-8)}, Route ${route}. ` +
+        `Time: ${new Date(now).toLocaleString('en-NG', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' })}. ` +
+        `Check dispatch dashboard immediately.`;
+      await sendSms(smsTarget, sosMessage, c.env).catch(() => {});
     }
 
     try {
@@ -789,12 +804,18 @@ operatorManagementRouter.post('/trips/:id/sos/clear', requireRole(['SUPER_ADMIN'
 operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
   const id = c.req.param('id');
   const db = c.env.DB;
+  const user = c.get('user');
 
   try {
     const trip = await db.prepare(
       `SELECT id, operator_id, route_id, driver_id, state, departure_time FROM trips WHERE id = ? AND deleted_at IS NULL`
     ).bind(id).first<{ id: string; operator_id: string; route_id: string; driver_id: string | null; state: string; departure_time: number }>();
     if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
+
+    // Tenant scope: non-SUPER_ADMIN users can only access their own operator's manifest
+    if (user?.role !== 'SUPER_ADMIN' && user?.operatorId && trip.operator_id !== user.operatorId) {
+      return c.json({ success: false, error: 'Forbidden — this trip belongs to a different operator' }, 403);
+    }
 
     const [routeRow, bookingsResult, seatsResult, driverRow] = await Promise.all([
       db.prepare(
@@ -1216,11 +1237,15 @@ operatorManagementRouter.post('/trips/:id/delay', requireRole(['SUPER_ADMIN', 'T
 
   try {
     const trip = await db.prepare(
-      `SELECT t.id, t.operator_id, t.route_id, t.departure_time, r.origin, r.destination
+      `SELECT t.id, t.operator_id, t.route_id, t.departure_time, t.state, r.origin, r.destination
        FROM trips t JOIN routes r ON r.id = t.route_id
        WHERE t.id = ? AND t.deleted_at IS NULL`
-    ).bind(tripId).first<{ id: string; operator_id: string; route_id: string; departure_time: number; origin: string; destination: string }>();
+    ).bind(tripId).first<{ id: string; operator_id: string; route_id: string; departure_time: number; state: string; origin: string; destination: string }>();
     if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
+
+    if (trip.state === 'completed' || trip.state === 'cancelled') {
+      return c.json({ success: false, error: 'trip_not_active', message: `Cannot file delay on a ${trip.state} trip` }, 422);
+    }
 
     await db.prepare(
       `UPDATE trips SET delay_reason_code = ?, delay_reported_at = ?, estimated_departure_ms = ?, updated_at = ? WHERE id = ?`

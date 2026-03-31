@@ -469,7 +469,9 @@ bookingPortalRouter.get('/bookings/:id', async (c) => {
   const db = c.env.DB;
   try {
     const booking = await db.prepare(
-      `SELECT b.*, r.origin, r.destination, t.departure_time, o.name as operator_name
+      `SELECT b.*, r.origin, r.destination,
+              t.departure_time, t.current_latitude, t.current_longitude, t.location_updated_at,
+              o.name as operator_name
        FROM bookings b
        JOIN trips t ON b.trip_id = t.id
        JOIN routes r ON t.route_id = r.id

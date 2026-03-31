@@ -1,0 +1,77 @@
+You are the QA agent for Phase P05-TRANSPORT of the WebWaka platform.
+Target repo: webwaka-transport
+
+Deeply verify P05-TRANSPORT. Fix every issue. Do not declare verified until all checks pass.
+
+=== VERIFICATION CHECKLIST ===
+
+--- P05-T1: GPS Location Update ---
+1. Confirm POST /api/operator/trips/:id/location exists and requires DRIVER role or above.
+2. Confirm validation: latitude ∈ [-90, 90] and longitude ∈ [-180, 180]. Test boundary values: lat=90.1 should return 400.
+3. Confirm the endpoint returns 422 for completed or cancelled trips (GPS update on a finished trip makes no sense).
+4. Confirm current_latitude, current_longitude, and location_updated_at are written to the trips table.
+5. Confirm location_updated_at column exists in the trips table (check migration 002 or 003).
+6. Confirm GET /api/operator/trips/:id response includes current_latitude, current_longitude, location_updated_at.
+7. Confirm GET /api/booking/bookings/:id response also includes these trip location fields (for passenger tracking).
+8. Confirm a platform event trip.location_updated is published with the coordinates.
+
+--- P05-T2: SOS System ---
+1. Confirm POST /api/operator/trips/:id/sos exists and requires DRIVER role.
+2. Confirm it returns 409 if sos_active is already 1 (cannot trigger SOS twice).
+3. Confirm it sets sos_active=1, sos_triggered_at, and sos_triggered_by in the database.
+4. Confirm it reads emergency_contact_phone from operator config and sends an SMS.
+5. Confirm the SMS is sent even if the Termii response is slow — it must not block the response to the driver.
+6. Confirm it publishes a trip:SOS_ACTIVATED platform event.
+7. Confirm POST /api/operator/trips/:id/sos/clear exists and requires SUPERVISOR role.
+8. Confirm clear returns 409 if sos_active is already 0.
+9. Confirm clear sets sos_active=0, sos_cleared_at, and sos_cleared_by.
+10. Confirm drainEventBus handles trip:SOS_ACTIVATED — does not silently swallow it (should log as console.error at minimum, attempt email if configured).
+11. Check: what if emergency_contact_phone is empty string? SMS should be skipped gracefully, not crash.
+12. Check RBAC: a CUSTOMER or AGENT role must receive 403 when calling the SOS trigger.
+
+--- P05-T3: Boarding Scan ---
+1. Confirm POST /api/operator/trips/:id/board exists and requires STAFF role.
+2. Confirm qr_payload is parsed as "{bookingId}:{seatIds_comma}". Test: what if qr_payload has no colon? Should return 400.
+3. Confirm the booking is validated against the tripId (cannot board a passenger from a different trip).
+4. Confirm already-boarded tickets return 409 with the original boarded_at timestamp in the response.
+5. Confirm invalid tickets (not found for this trip) return 404 — not a generic 500 error.
+6. Confirm boarded_at and boarded_by are written to the bookings table.
+7. Confirm a booking.boarded platform event is published.
+8. Confirm GET /api/operator/trips/:id/boarding-status returns total_confirmed, total_boarded, remaining, last_boarded_at.
+9. Check: what if a ticket is in 'pending' status (unpaid)? It must return 422 'booking_not_confirmed', not allow boarding.
+10. Check: what if a ticket is in 'cancelled' status? Also must return 422, not allow boarding.
+
+--- P05-T4: Manifest Export ---
+1. Confirm GET /api/operator/trips/:id/manifest returns enhanced manifest with passenger_names, seat_numbers, boarded_at, payment_method, passenger_id_type, booking_id for each booking.
+2. Confirm CSV export works: sending Accept: text/csv returns a CSV file with the correct Content-Disposition header.
+3. Confirm the CSV has a header row and data rows. Verify the header matches the data columns.
+4. Check: what if the trip has zero confirmed bookings? CSV and JSON should return empty data (not crash).
+5. Check: manifest endpoint requires authentication and operator scope — a different operator cannot read another operator's manifest. Confirm tenant scope is applied.
+
+--- P05-T5: Pre-Trip Inspection ---
+1. Confirm POST /api/operator/trips/:id/inspection exists and requires DRIVER role.
+2. Confirm that submitting any boolean field as false causes a 422 error identifying the specific failed item.
+3. Confirm duplicate inspection attempts return 409.
+4. Confirm inspection_completed_at is written to the trips table.
+5. Confirm GET /api/operator/trips/:id/inspection returns the record or null.
+6. In the trip state transition endpoint, confirm that transitioning to 'boarding' checks inspection_required_before_boarding from config. If true and no inspection: return 422 with the correct error code.
+7. Check: if inspection_required_before_boarding is false (default), trips can transition to boarding without an inspection. Confirm this default path works.
+
+--- P05-T6: Delay Reporting ---
+1. Confirm POST /api/operator/trips/:id/delay exists and requires SUPERVISOR role.
+2. Confirm reason_code is validated against the allowed set: traffic, breakdown, weather, accident, fuel, other. An invalid code like 'alien_abduction' must return 400.
+3. Confirm estimated_departure_ms must be in the future (> Date.now()). A past timestamp must return 400.
+4. Confirm delay columns are written to the trips table (delay_reason_code, delay_reported_at, estimated_departure_ms).
+5. Confirm a trip:DELAYED platform event is published.
+6. Confirm drainEventBus handles trip:DELAYED: queries confirmed bookings and sends SMS to each passenger phone. Confirm this is non-fatal (failed SMS does not mark the event as dead).
+7. Confirm GET /api/operator/trips/:id/delay returns the delay info or null.
+8. Check: can a delay be filed on a 'completed' or 'cancelled' trip? It should return 422. Confirm.
+
+--- FINAL CHECKS ---
+1. Run tsc --noEmit — zero errors.
+2. Confirm migration 003 file exists with the new columns for delay_reason_code, delay_reported_at, estimated_departure_ms, location_updated_at, and any others added in P05.
+3. Run the migration locally and confirm no SQL errors.
+4. Start the dev server. Confirm no runtime errors on startup.
+5. Grep for any TODO or placeholder comment in files modified in P05. Resolve all of them.
+
+Report every issue found and every fix applied.
