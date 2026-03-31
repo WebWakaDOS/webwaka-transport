@@ -496,13 +496,57 @@ export class ApiClient {
     passenger_names: string[];
     total_amount: number;
     payment_method: string;
-  }): Promise<{ id: string; receipt_id: string; total_amount: number; payment_method: string }> {
+    passenger_id_type?: string | null;
+    passenger_id_number?: string | null;
+  }): Promise<{
+    id: string; receipt_id: string; total_amount: number; payment_method: string;
+    qr_code: string; seat_numbers: string[];
+  }> {
     return this.request('POST', '/api/agent-sales/transactions', data);
   }
 
   async getAgentDashboard(agentId?: string): Promise<{ today_transactions: number; today_revenue_kobo: number }> {
     const q = agentId ? `?agent_id=${agentId}` : '';
     return this.request('GET', `/api/agent-sales/dashboard${q}`);
+  }
+
+  // P07-T1: Float Reconciliation
+  async submitReconciliation(data: {
+    agent_id: string; operator_id: string; period_date: string;
+    submitted_kobo: number; notes?: string;
+  }): Promise<{
+    id: string; expected_kobo: number; submitted_kobo: number;
+    discrepancy_kobo: number; status: string;
+  }> {
+    return this.request('POST', '/api/agent-sales/reconciliation', data);
+  }
+
+  async getReconciliations(params?: {
+    agent_id?: string; status?: string; period_date?: string;
+  }): Promise<Array<{
+    id: string; agent_id: string; period_date: string;
+    expected_kobo: number; submitted_kobo: number; discrepancy_kobo: number;
+    status: string; reviewed_by: string | null; notes: string | null; created_at: number;
+  }>> {
+    const qs = new URLSearchParams(
+      Object.entries(params ?? {}).filter(([, v]) => v != null) as [string, string][]
+    ).toString();
+    return this.request('GET', `/api/agent-sales/reconciliation${qs ? `?${qs}` : ''}`);
+  }
+
+  // P07-T4: Bus Parks
+  async getBusParks(): Promise<Array<{
+    id: string; operator_id: string; name: string; city: string; state: string;
+    latitude: number | null; longitude: number | null; created_at: number;
+  }>> {
+    return this.request('GET', '/api/agent-sales/parks');
+  }
+
+  async createBusPark(data: {
+    operator_id: string; name: string; city: string; state: string;
+    latitude?: number | null; longitude?: number | null;
+  }): Promise<{ id: string; name: string; city: string; state: string }> {
+    return this.request('POST', '/api/agent-sales/parks', data);
   }
 
   // ============================================================

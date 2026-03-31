@@ -540,6 +540,16 @@ const MIGRATIONS: Migration[] = [
       `ALTER TABLE trips ADD COLUMN estimated_departure_ms INTEGER`,
     ],
   },
+  {
+    name: '013_p07_agent_ops',
+    statements: [
+      // P07-T5: Passenger ID capture (hashed, never raw)
+      `ALTER TABLE sales_transactions ADD COLUMN passenger_id_type TEXT`,
+      `ALTER TABLE sales_transactions ADD COLUMN passenger_id_hash TEXT`,
+      // P07-T2: QR code string embedded in receipt for thermal printing
+      `ALTER TABLE receipts ADD COLUMN qr_code TEXT`,
+    ],
+  },
 ];
 
 export const adminRouter = new Hono<{ Bindings: AdminEnv }>();

@@ -13,6 +13,7 @@ import { TicketPage } from './components/ticket';
 import { ConflictLog } from './components/conflict-log';
 import { AnalyticsDashboard } from './components/analytics';
 import { DriverView } from './components/driver-view';
+import ReceiptModal, { type ReceiptData } from './components/receipt';
 import { api, ApiError } from './api/client';
 import type { TripSummary, Route, Vehicle, Trip, OperatorStats, Booking, SeatAvailability, TripManifest, ManifestEntry, Driver, Agent, RevenueReport, RouteRevenue, PlatformOperator } from './api/client';
 import { getConflicts } from './core/offline/db';
@@ -217,10 +218,13 @@ function TripSearchModule() {
 }
 
 // ============================================================
-// Agent POS Module (TRN-2)
+// Agent POS Module (TRN-2) — P07-enhanced with receipt, ID capture, float reconciliation, parks, session switcher
 // ============================================================
+const ID_TYPES = ['NIN', 'BVN', 'passport', 'drivers_license'] as const;
+type PassengerIdType = (typeof ID_TYPES)[number];
+
 function AgentPOSModule({ online }: { online: boolean }) {
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
   const [trips, setTrips] = useState<Trip[]>([]);
   const [tripsLoading, setTripsLoading] = useState(false);
   const [tripId, setTripId] = useState('');
@@ -230,11 +234,34 @@ function AgentPOSModule({ online }: { online: boolean }) {
   const [passengers, setPassengers] = useState('');
   const [amount, setAmount] = useState('');
   const [method, setMethod] = useState<'cash' | 'mobile_money' | 'card'>('cash');
-  const [lastReceipt, setLastReceipt] = useState<{ receipt_id: string; total_amount: number; payment_method: string } | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
-  // Load active trips when coming online
+  // P07-T5: Passenger ID
+  const [passIdType, setPassIdType] = useState<PassengerIdType | ''>('');
+  const [passIdNumber, setPassIdNumber] = useState('');
+
+  // P07-T4: Bus Park
+  const [parks, setParks] = useState<{ id: string; name: string; city: string }[]>([]);
+  const [parkId, setParkId] = useState('');
+
+  // P07-T2: Receipt modal
+  const [receiptModal, setReceiptModal] = useState<ReceiptData | null>(null);
+
+  // P07-T1: Float reconciliation
+  const [eodOpen, setEodOpen] = useState(false);
+  const [eodSubmitting, setEodSubmitting] = useState(false);
+  const [eodCash, setEodCash] = useState('');
+  const [eodNote, setEodNote] = useState('');
+  const [eodResult, setEodResult] = useState<{
+    expected_kobo: number; submitted_kobo: number; discrepancy_kobo: number; status: string;
+  } | null>(null);
+  const [eodError, setEodError] = useState('');
+
+  // P07-T3: Session switcher
+  const [agentSessions, setAgentSessions] = useState<{ agent_id: string; name: string; expires_at: number }[]>([]);
+
+  // Load active trips
   useEffect(() => {
     if (!online) return;
     setTripsLoading(true);
@@ -243,6 +270,25 @@ function AgentPOSModule({ online }: { online: boolean }) {
       .catch(() => setTrips([]))
       .finally(() => setTripsLoading(false));
   }, [online]);
+
+  // Load bus parks
+  useEffect(() => {
+    if (!online) return;
+    api.getBusParks()
+      .then(data => setParks(data.map(p => ({ id: p.id, name: p.name, city: p.city }))))
+      .catch(() => {/* non-fatal */});
+  }, [online]);
+
+  // Load cached agent sessions for switcher
+  useEffect(() => {
+    void (async () => {
+      try {
+        const { listAgentSessions } = await import('./core/offline/db');
+        const sessions = await listAgentSessions();
+        setAgentSessions(sessions.map(s => ({ agent_id: s.agent_id, name: s.name, expires_at: s.expires_at })));
+      } catch { /* non-fatal */ }
+    })();
+  }, []);
 
   // Load seat availability when trip changes
   useEffect(() => {
@@ -254,7 +300,7 @@ function AgentPOSModule({ online }: { online: boolean }) {
       .finally(() => setSeatsLoading(false));
   }, [tripId]);
 
-  // Auto-fill amount from trip base_fare × selected seat count
+  // Auto-fill amount from trip base_fare × seat count
   useEffect(() => {
     const trip = trips.find(tr => tr.id === tripId);
     if (trip?.base_fare != null && selectedSeats.length > 0) {
@@ -265,9 +311,7 @@ function AgentPOSModule({ online }: { online: boolean }) {
   }, [selectedSeats, tripId, trips]);
 
   const toggleSeat = (seatId: string) => {
-    setSelectedSeats(prev =>
-      prev.includes(seatId) ? prev.filter(s => s !== seatId) : [...prev, seatId]
-    );
+    setSelectedSeats(prev => prev.includes(seatId) ? prev.filter(s => s !== seatId) : [...prev, seatId]);
   };
 
   const handleSale = async () => {
@@ -297,17 +341,37 @@ function AgentPOSModule({ online }: { online: boolean }) {
     }
 
     try {
-      const receipt = await api.recordSale({
+      const result = await api.recordSale({
         agent_id: agentId,
         trip_id: tripId,
         seat_ids: selectedSeats,
         passenger_names: passArr,
         total_amount: amountKobo,
         payment_method: method,
+        passenger_id_type: passIdType || null,
+        passenger_id_number: passIdNumber.trim() || null,
       });
-      setLastReceipt(receipt);
+
+      // Build receipt data for thermal print modal (P07-T2)
+      const trip = trips.find(tr => tr.id === tripId);
+      setReceiptModal({
+        receipt_id: result.receipt_id,
+        transaction_id: result.id,
+        trip_origin: trip?.origin ?? trip?.route_id ?? '—',
+        trip_destination: trip?.destination ?? '—',
+        departure_time: trip?.departure_time ?? Date.now(),
+        agent_name: user?.name ?? undefined,
+        seat_numbers: result.seat_numbers ?? selectedSeats,
+        passenger_names: passArr,
+        total_amount: amountKobo,
+        payment_method: method,
+        qr_code: result.qr_code,
+        issued_at: Date.now(),
+      });
+
+      // Reset form
       setTripId(''); setSelectedSeats([]); setSeatAvailability(null);
-      setPassengers(''); setAmount('');
+      setPassengers(''); setAmount(''); setPassIdType(''); setPassIdNumber('');
     } catch (e) {
       setError(e instanceof ApiError ? e.message : t('error'));
     } finally {
@@ -315,17 +379,151 @@ function AgentPOSModule({ online }: { online: boolean }) {
     }
   };
 
+  const handleEodSubmit = async () => {
+    if (!eodCash || !user) return;
+    setEodSubmitting(true);
+    setEodError('');
+    const submittedKobo = Math.round(parseFloat(eodCash) * 100);
+    const today = new Date().toISOString().slice(0, 10);
+    try {
+      const result = await api.submitReconciliation({
+        agent_id: user.id,
+        operator_id: user.operator_id ?? '',
+        period_date: today,
+        submitted_kobo: submittedKobo,
+        ...(eodNote.trim() ? { notes: eodNote.trim() } : {}),
+      });
+      setEodResult(result);
+      setEodCash(''); setEodNote('');
+    } catch (e) {
+      setEodError(e instanceof ApiError ? e.message : 'Failed to submit reconciliation');
+    } finally {
+      setEodSubmitting(false);
+    }
+  };
+
+  const handleSwitchAgent = useCallback(() => {
+    if (window.confirm('Switch agent? Your pending offline transactions are saved.')) {
+      logout();
+    }
+  }, [logout]);
+
+  const formatKobo = (k: number) =>
+    new Intl.NumberFormat('en-NG', { style: 'currency', currency: 'NGN' }).format(k / 100);
+
   return (
     <div style={{ padding: 16 }}>
-      <h2 style={{ margin: '0 0 16px', fontSize: 18 }}>{t('agent_pos')}</h2>
+      {/* P07-T3: Session switcher header */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+        <div>
+          <h2 style={{ margin: 0, fontSize: 18 }}>{t('agent_pos')}</h2>
+          {user?.name && (
+            <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>
+              Agent: <strong>{user.name}</strong>
+            </div>
+          )}
+        </div>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          {agentSessions.length > 1 && (
+            <button
+              onClick={handleSwitchAgent}
+              style={{
+                padding: '5px 10px', borderRadius: 6, border: '1px solid #e2e8f0',
+                background: '#fff', color: '#475569', fontSize: 11, cursor: 'pointer', fontWeight: 600,
+              }}
+            >
+              Switch Agent
+            </button>
+          )}
+          <button
+            onClick={() => { setEodOpen(o => !o); setEodResult(null); setEodError(''); }}
+            style={{
+              padding: '5px 10px', borderRadius: 6, border: '1px solid #d97706',
+              background: eodOpen ? '#fef3c7' : '#fff', color: '#b45309', fontSize: 11, cursor: 'pointer', fontWeight: 700,
+            }}
+          >
+            End of Day
+          </button>
+        </div>
+      </div>
 
-      {lastReceipt && (
-        <div style={{ ...cardStyle, background: '#f0fdf4', borderColor: '#16a34a', marginBottom: 16, cursor: 'default' }}>
-          <div style={{ fontWeight: 700, color: '#16a34a' }}>✓ {t('sale_complete')}</div>
-          <div style={{ fontSize: 13, marginTop: 4 }}>
-            {t('fare')}: {formatAmount(lastReceipt.total_amount)} · {lastReceipt.payment_method}
+      {/* P07-T1: End of Day float reconciliation panel */}
+      {eodOpen && (
+        <div style={{ ...cardStyle, background: '#fffbeb', borderColor: '#f59e0b', marginBottom: 14 }}>
+          <div style={{ fontWeight: 700, color: '#92400e', marginBottom: 10, fontSize: 14 }}>
+            Cash Float Reconciliation — {new Date().toLocaleDateString('en-NG')}
           </div>
-          <div style={{ fontSize: 12, color: '#64748b' }}>Receipt: {lastReceipt.receipt_id}</div>
+          {eodResult ? (
+            <div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 10 }}>
+                {[
+                  { label: 'Expected', value: formatKobo(eodResult.expected_kobo), color: '#1e40af' },
+                  { label: 'Submitted', value: formatKobo(eodResult.submitted_kobo), color: '#16a34a' },
+                  {
+                    label: 'Discrepancy',
+                    value: formatKobo(Math.abs(eodResult.discrepancy_kobo)),
+                    color: eodResult.discrepancy_kobo === 0 ? '#16a34a' : eodResult.discrepancy_kobo < 0 ? '#dc2626' : '#d97706',
+                  },
+                ].map(item => (
+                  <div key={item.label} style={{ textAlign: 'center', padding: '8px 4px', background: '#fff', borderRadius: 6 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: item.color }}>{item.value}</div>
+                    <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>{item.label}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{
+                padding: '8px 12px', borderRadius: 6, textAlign: 'center', fontWeight: 700, fontSize: 13,
+                background: eodResult.discrepancy_kobo === 0 ? '#f0fdf4' : '#fef3c7',
+                color: eodResult.discrepancy_kobo === 0 ? '#16a34a' : '#92400e',
+              }}>
+                {eodResult.discrepancy_kobo === 0
+                  ? '✓ Balanced — great work!'
+                  : eodResult.discrepancy_kobo < 0
+                    ? '⚠ Shortage — pending supervisor review'
+                    : '⚠ Overage — pending supervisor review'}
+              </div>
+              <button
+                onClick={() => { setEodOpen(false); setEodResult(null); }}
+                style={{ ...primaryBtnStyle, marginTop: 10, background: '#92400e', borderColor: '#92400e' }}
+              >
+                Close
+              </button>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {eodError && (
+                <div style={{ padding: '8px 12px', background: '#fee2e2', borderRadius: 6, color: '#b91c1c', fontSize: 12 }}>
+                  {eodError}
+                </div>
+              )}
+              <input
+                type="number"
+                placeholder="Cash collected (₦)"
+                value={eodCash}
+                onChange={e => setEodCash(e.target.value)}
+                style={inputStyle}
+              />
+              <input
+                placeholder="Notes (optional)"
+                value={eodNote}
+                onChange={e => setEodNote(e.target.value)}
+                style={inputStyle}
+              />
+              <button
+                onClick={() => void handleEodSubmit()}
+                disabled={eodSubmitting || !eodCash}
+                style={{ ...primaryBtnStyle, background: '#b45309', borderColor: '#b45309' }}
+              >
+                {eodSubmitting ? 'Submitting…' : 'Submit Reconciliation'}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {!online && (
+        <div style={{ padding: '8px 14px', background: '#fef3c7', borderRadius: 8, color: '#92400e', fontSize: 12, marginBottom: 12 }}>
+          Offline — sales will be queued and synced when connection is restored.
         </div>
       )}
 
@@ -336,7 +534,17 @@ function AgentPOSModule({ online }: { online: boolean }) {
       )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {/* Trip selector — dropdown when online with trips, text input as fallback */}
+        {/* P07-T4: Park selector */}
+        {parks.length > 0 && (
+          <select value={parkId} onChange={e => setParkId(e.target.value)} style={inputStyle}>
+            <option value="">-- Bus Park (optional) --</option>
+            {parks.map(p => (
+              <option key={p.id} value={p.id}>{p.name} · {p.city}</option>
+            ))}
+          </select>
+        )}
+
+        {/* Trip selector */}
         {online && trips.length > 0 ? (
           <select value={tripId} onChange={e => setTripId(e.target.value)} style={inputStyle}>
             <option value="">-- {t('select_trip')} --</option>
@@ -356,7 +564,7 @@ function AgentPOSModule({ online }: { online: boolean }) {
           />
         )}
 
-        {/* Seat grid — shown when a trip is selected */}
+        {/* Seat grid */}
         {tripId && (
           seatsLoading ? (
             <p style={{ color: '#94a3b8', textAlign: 'center', fontSize: 13, margin: '4px 0' }}>{t('loading')} seats…</p>
@@ -398,6 +606,28 @@ function AgentPOSModule({ online }: { online: boolean }) {
           onChange={e => setPassengers(e.target.value)}
           style={inputStyle}
         />
+
+        {/* P07-T5: Passenger ID capture */}
+        <div style={{ display: 'flex', gap: 6 }}>
+          <select
+            value={passIdType}
+            onChange={e => setPassIdType(e.target.value as PassengerIdType | '')}
+            style={{ ...inputStyle, flex: '0 0 140px' }}
+          >
+            <option value="">ID Type (opt.)</option>
+            {ID_TYPES.map(t => (
+              <option key={t} value={t}>{t.replace('_', ' ')}</option>
+            ))}
+          </select>
+          <input
+            placeholder="ID Number"
+            value={passIdNumber}
+            onChange={e => setPassIdNumber(e.target.value)}
+            style={{ ...inputStyle, flex: 1 }}
+            disabled={!passIdType}
+          />
+        </div>
+
         <input
           placeholder={`${t('fare')} (₦)`}
           type="number"
@@ -425,6 +655,14 @@ function AgentPOSModule({ online }: { online: boolean }) {
           {submitting ? t('loading') : t('sale_complete')}
         </button>
       </div>
+
+      {/* P07-T2: Thermal Receipt Modal */}
+      {receiptModal && (
+        <ReceiptModal
+          receipt={receiptModal}
+          onClose={() => setReceiptModal(null)}
+        />
+      )}
     </div>
   );
 }

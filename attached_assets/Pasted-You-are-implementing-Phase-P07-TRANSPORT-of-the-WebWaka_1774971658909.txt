@@ -1,0 +1,137 @@
+You are implementing Phase P07-TRANSPORT of the WebWaka platform.
+Target repo: webwaka-transport
+
+This phase builds the agent operations layer: float reconciliation, thermal receipt printing, multi-agent device management, bus park management, and passenger ID capture. Read webwaka-implementation-plan.md for full context.
+
+=== TASK P07-T1: Agent Daily Float Reconciliation ===
+File: src/api/agent-sales.ts
+Frontend: agent POS
+
+Add POST /api/agent-sales/reconciliation (AGENT role+):
+- Body: { date: string (YYYY-MM-DD format), cash_submitted_kobo: number }
+- Validate: date must match /^\d{4}-\d{2}-\d{2}$/. cash_submitted_kobo must be a positive integer.
+- Check for existing reconciliation: SELECT id FROM float_reconciliation WHERE agent_id = ? AND period_date = ? — return 409 if already filed
+- Compute expected: SELECT COALESCE(SUM(total_amount), 0) as expected FROM sales_transactions WHERE agent_id = ? AND strftime('%Y-%m-%d', datetime(created_at/1000, 'unixepoch')) = ? AND payment_method = 'cash' AND deleted_at IS NULL
+- Compute discrepancy_kobo = expected_kobo - cash_submitted_kobo
+- INSERT into float_reconciliation
+- Publish event: agent.reconciliation_filed with { agent_id, date, expected_kobo, submitted_kobo, discrepancy_kobo }
+- Return the reconciliation record with discrepancy highlighted
+
+Add GET /api/agent-sales/reconciliation:
+- AGENT role: returns their own reconciliations (last 30 days)
+- SUPERVISOR+: returns all reconciliations for the operator (filterable by agent_id and date range)
+
+Add PATCH /api/agent-sales/reconciliation/:id (SUPERVISOR+):
+- Body: { status: 'approved'|'disputed', notes?: string }
+- UPDATE float_reconciliation SET status = ?, reviewed_by = ?, reviewed_at = ?, notes = ? WHERE id = ?
+- Return updated record
+
+Frontend: add "End of Day" button in agent POS. Shows today's transaction summary (count and sum from the dashboard API). Prompts for physical cash count. Submits reconciliation. Shows result with discrepancy in red if > ₦500 (50,000 kobo).
+
+=== TASK P07-T2: Thermal Receipt Printing ===
+File: src/components/receipt.tsx (create new component)
+File: Agent sale completion screen
+
+1. Install QR code library: npm install qrcode @types/qrcode
+
+2. Create src/components/receipt.tsx component:
+Props: { receiptId: string, bookingId: string, operatorName: string, origin: string, destination: string, departureTime: number, seatNumbers: string[], passengerNames: string[], totalAmountKobo: number, paymentMethod: string }
+
+Render:
+- Header: operator name in bold, "WebWaka Transport" subtitle
+- Route: "{origin} ──────────── {destination}"
+- Date/Time: formatted departure
+- Seat(s): seat numbers listed
+- Passenger(s): names listed
+- Amount: formatted with formatKobo from @webwaka/core
+- Payment Method: formatted (Cash / Card / Transfer)
+- Reference: last 8 chars of bookingId uppercased
+- QR Code: encoded as `{bookingId}:{seatNumbers.join(',')}` — use QRCode.toDataURL() to generate a data URL and render as <img>
+- Footer: "Powered by WebWaka | webwaka.ng"
+
+3. Add styles with @media print CSS:
+- Body: margin 0, padding 0
+- Receipt container: max-width 72mm (for 80mm thermal), font-size 11px, font-family monospace
+- Hide everything except .receipt-printable when printing
+- Each section: clear borders, no shadows
+
+4. After a successful POS sale, show the receipt in a modal with:
+- "Print Receipt" button (calls window.print())
+- "Share via WhatsApp" button: wa.me/?text={encodeURIComponent(summary)}
+- "Done" button to close
+
+5. Populate qr_code column in receipts table: when creating a receipt in POST /api/agent-sales/transactions, set qr_code = `${bookingId}:${seatIds.join(',')}`.
+
+=== TASK P07-T3: Multi-Agent Device Session Management ===
+File: src/components/ (agent session switcher component)
+File: src/core/offline/db.ts
+
+1. In db.ts, extend getAgentSession(agentId: string) to support offline grace period:
+- If session.expiresAt < Date.now(): check if Date.now() < session.expiresAt + OFFLINE_GRACE_MS (where OFFLINE_GRACE_MS = 8 * 3600 * 1000)
+- If within grace period AND navigator.onLine === false: return { ...session, gracePeriod: true }
+- If online and expired: return null (force re-login)
+
+2. Create a session switcher component in the POS header:
+- Shows "Agent: {agentName}" with a dropdown arrow
+- On click: shows a "Switch Agent" option and current agent name
+- On "Switch Agent":
+a. Call syncEngine.flush() — await completion
+b. Clear current auth state (JWT, agent session in memory)
+c. Navigate to the agent login screen (phone + OTP)
+- After new agent logs in: load their sessions and pending transactions
+
+3. Show a yellow banner when operating in offline grace mode: "Session expired — operating in offline mode. Sync when connected to refresh."
+
+4. Add getAgentSession supporting multiple stored sessions: use agent ID as the Dexie key so multiple agents' sessions can be stored simultaneously.
+
+=== TASK P07-T4: Bus Park / Terminal Management ===
+File: src/api/agent-sales.ts
+
+Add POST /api/agent-sales/parks (TENANT_ADMIN+):
+- Body: { name, city, state, latitude?, longitude? }
+- INSERT into bus_parks
+- Return created park
+
+Add GET /api/agent-sales/parks:
+- Returns all bus parks for the operator
+
+Add POST /api/agent-sales/parks/:id/agents (SUPERVISOR+):
+- Body: { agent_id: string }
+- INSERT into agent_bus_parks
+- Return 200
+
+Add DELETE /api/agent-sales/parks/:id/agents/:agentId (SUPERVISOR+):
+- DELETE from agent_bus_parks
+- Return 204
+
+In agent login flow: after login, check agent_bus_parks for the agent. If exactly one park: auto-set active_park_id in agent session. If multiple: show park selector. If none: proceed without park filtering.
+
+Add park_id as optional query param to:
+- GET /api/agent-sales/transactions?park_id= — joins via agents table through agent_bus_parks
+- GET /api/operator/trips?park_id= — filters trips where park_id = ?
+
+=== TASK P07-T5: Passenger ID Capture at POS ===
+File: src/api/agent-sales.ts
+Frontend: agent sale form
+
+1. Extend POST /api/agent-sales/transactions body schema to accept optional fields:
+- passenger_id_type: 'NIN' | 'BVN' | 'passport' | 'drivers_license' | null
+- passenger_id_number: string | null
+
+2. Before storing, if passenger_id_number is provided:
+- Hash it: const encoder = new TextEncoder(); const data = encoder.encode(passenger_id_number); const hashBuf = await crypto.subtle.digest('SHA-256', data); const hashHex = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
+- Store passenger_id_type (un-hashed) and passenger_id_hash (hashed) on the transaction record
+- Add passenger_id_type TEXT, passenger_id_hash TEXT columns to sales_transactions (migration 003)
+- Never store the raw passenger_id_number
+
+3. Include passenger_id_type (not the hash) in GET /api/operator/trips/:id/manifest response for FRSC compliance.
+
+4. Frontend: in the agent sale form, add an optional "Passenger ID" section:
+- Dropdown: NIN / BVN / Passport / Driver's License
+- Text input for ID number
+- Label these as "Optional — for manifests"
+- Disable autocomplete on the ID number field
+
+=== DONE ===
+Run tsc --noEmit. Test float reconciliation roundtrip. Test receipt print. Confirm passenger ID hash is stored correctly and never returns the raw number in any API response.
+```

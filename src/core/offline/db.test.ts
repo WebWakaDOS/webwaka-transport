@@ -212,6 +212,7 @@ describe('Agent Session Cache', () => {
     await cacheAgentSession({
       agent_id: 'ag_001',
       operator_id: 'opr_1',
+      name: 'Test Agent 1',
       role: 'STAFF',
       token_hash: 'sha256hash1',
       expires_at: Date.now() + 3600_000,
@@ -227,6 +228,7 @@ describe('Agent Session Cache', () => {
     await cacheAgentSession({
       agent_id: 'ag_expired',
       operator_id: 'opr_1',
+      name: 'Expired Agent',
       role: 'STAFF',
       token_hash: 'sha256hash_exp',
       expires_at: Date.now() - 1000,
@@ -237,8 +239,8 @@ describe('Agent Session Cache', () => {
   });
 
   it('cacheAgentSession replaces existing session for same agent', async () => {
-    await cacheAgentSession({ agent_id: 'ag_002', operator_id: 'opr_1', role: 'STAFF', token_hash: 'hash_v1', expires_at: Date.now() + 3600_000, cached_at: Date.now() });
-    await cacheAgentSession({ agent_id: 'ag_002', operator_id: 'opr_1', role: 'SUPERVISOR', token_hash: 'hash_v2', expires_at: Date.now() + 7200_000, cached_at: Date.now() });
+    await cacheAgentSession({ agent_id: 'ag_002', operator_id: 'opr_1', name: 'Agent 002', role: 'STAFF', token_hash: 'hash_v1', expires_at: Date.now() + 3600_000, cached_at: Date.now() });
+    await cacheAgentSession({ agent_id: 'ag_002', operator_id: 'opr_1', name: 'Agent 002', role: 'SUPERVISOR', token_hash: 'hash_v2', expires_at: Date.now() + 7200_000, cached_at: Date.now() });
     const session = await getAgentSession('ag_002');
     expect(session!.role).toBe('SUPERVISOR');
     expect(session!.token_hash).toBe('hash_v2');

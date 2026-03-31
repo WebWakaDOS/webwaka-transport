@@ -828,7 +828,7 @@ operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 
       return c.json({ success: false, error: 'Forbidden — this trip belongs to a different operator' }, 403);
     }
 
-    const [routeRow, bookingsResult, seatsResult, driverRow] = await Promise.all([
+    const [routeRow, bookingsResult, seatsResult, driverRow, agentSalesResult] = await Promise.all([
       db.prepare(
         `SELECT origin, destination, base_fare FROM routes WHERE id = ?`
       ).bind(trip.route_id).first<{ origin: string; destination: string; base_fare: number }>(),
@@ -844,6 +844,15 @@ operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 
         ? db.prepare(`SELECT id, name, phone, license_number FROM drivers WHERE id = ?`)
             .bind(trip.driver_id).first<{ id: string; name: string; phone: string; license_number: string | null }>()
         : Promise.resolve(null),
+      // P07-T5: Include agent-sold tickets in manifest for FRSC compliance
+      db.prepare(
+        `SELECT st.id, st.agent_id, st.seat_ids, st.passenger_names, st.total_amount, st.payment_method, st.passenger_id_type, st.created_at,
+                a.name AS agent_name
+         FROM sales_transactions st
+         JOIN agents a ON st.agent_id = a.id
+         WHERE st.trip_id = ? AND st.deleted_at IS NULL AND st.payment_status = 'completed'
+         ORDER BY st.created_at ASC`
+      ).bind(id).all<{ id: string; agent_id: string; agent_name: string; seat_ids: string; passenger_names: string; total_amount: number; payment_method: string; passenger_id_type: string | null; created_at: number }>(),
     ]);
 
     // Pre-load seat number lookup for all seats on this trip
@@ -893,6 +902,28 @@ operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 
       .filter(b => b.payment_status === 'paid' || b.status === 'confirmed')
       .reduce((sum, b) => sum + b.total_amount, 0);
 
+    // Build agent sales summary for manifest (P07-T5 FRSC compliance)
+    const agentSales = agentSalesResult.results.map(txn => {
+      let seatIds: string[] = [];
+      let passengerNames: string[] = [];
+      try { seatIds = JSON.parse(txn.seat_ids) as string[]; } catch { seatIds = []; }
+      try { passengerNames = JSON.parse(txn.passenger_names) as string[]; } catch { passengerNames = []; }
+      const seatNumbers = seatIds.map(sid => seatNumberMap.get(sid) ?? sid).join(', ');
+      return {
+        transaction_id: txn.id,
+        agent_id: txn.agent_id,
+        agent_name: txn.agent_name,
+        seat_ids: seatIds,
+        seat_numbers: seatNumbers,
+        passenger_names: passengerNames,
+        passenger_id_type: txn.passenger_id_type,
+        payment_method: txn.payment_method,
+        total_amount: txn.total_amount,
+        sold_at: txn.created_at,
+      };
+    });
+    const agentRevenue = agentSalesResult.results.reduce((sum, t) => sum + t.total_amount, 0);
+
     // P05-T4: CSV content negotiation
     const acceptHeader = c.req.header('Accept') ?? '';
     if (acceptHeader.includes('text/csv')) {
@@ -915,6 +946,7 @@ operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 
       });
     }
 
+    const totalPassengers = passengers.length + agentSales.length;
     return c.json({
       success: true,
       data: {
@@ -931,14 +963,19 @@ operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 
             : null,
         },
         passengers,
+        agent_sales: agentSales,
         summary: {
           total_bookings: passengers.length,
+          total_agent_sales: agentSales.length,
+          total_passengers: totalPassengers,
           total_boarded: passengers.filter(p => p.boarded_at !== null).length,
           total_seats: seatsResult.results.length,
           load_factor: seatsResult.results.length > 0
-            ? Math.round((passengers.length / seatsResult.results.length) * 100)
+            ? Math.round((totalPassengers / seatsResult.results.length) * 100)
             : 0,
           confirmed_revenue_kobo: confirmedRevenue,
+          agent_revenue_kobo: agentRevenue,
+          total_revenue_kobo: confirmedRevenue + agentRevenue,
         },
       },
     });

@@ -186,6 +186,8 @@ export interface DbSalesTransaction {
   payment_status: string;
   sync_status: string;
   receipt_id: string;
+  passenger_id_type: string | null;
+  passenger_id_hash: string | null;
   created_at: number;
   synced_at: number | null;
   deleted_at: number | null;
@@ -200,6 +202,7 @@ export interface DbReceipt {
   seat_numbers: string;
   total_amount: number;
   payment_method: string;
+  qr_code: string | null;
   issued_at: number;
 }
 

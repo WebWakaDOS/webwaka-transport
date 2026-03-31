@@ -85,11 +85,15 @@ export interface AgentSession {
   id?: number;
   agent_id: string;
   operator_id: string;
+  name: string;           // Display name for multi-agent switcher UI
   role: string;
   token_hash: string;     // SHA-256 of the JWT (not stored plaintext)
   expires_at: number;     // epoch ms
   cached_at: number;
 }
+
+/** Offline grace period: sessions remain valid offline for 8 h after JWT expiry */
+export const OFFLINE_GRACE_MS = 8 * 60 * 60 * 1_000;
 
 /** Conflict log: records sync conflicts for auditing / manual resolution */
 export interface ConflictRecord {
@@ -436,16 +440,33 @@ export async function cacheAgentSession(session: Omit<AgentSession, 'id'>): Prom
   return db.agent_sessions.add(session);
 }
 
-export async function getAgentSession(agent_id: string): Promise<AgentSession | undefined> {
+export async function getAgentSession(
+  agent_id: string,
+  opts: { offline?: boolean } = {}
+): Promise<AgentSession | undefined> {
   const now = Date.now();
   const session = await getOfflineDB().agent_sessions
     .where('agent_id').equals(agent_id).first();
   if (!session) return undefined;
-  if (session.expires_at < now) {
+
+  // Online: strict JWT expiry
+  // Offline: grant up to OFFLINE_GRACE_MS beyond expiry so agents can keep working
+  const effectiveExpiry = opts.offline
+    ? session.expires_at + OFFLINE_GRACE_MS
+    : session.expires_at;
+
+  if (effectiveExpiry < now) {
     if (session.id !== undefined) await getOfflineDB().agent_sessions.delete(session.id);
     return undefined;
   }
   return session;
+}
+
+/** Return all non-expired agent sessions — used by the multi-agent switcher */
+export async function listAgentSessions(): Promise<AgentSession[]> {
+  const now = Date.now();
+  const all = await getOfflineDB().agent_sessions.toArray();
+  return all.filter(s => s.expires_at + OFFLINE_GRACE_MS > now);
 }
 
 // ============================================================

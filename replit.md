@@ -132,6 +132,53 @@ npx tsc --noEmit # TypeScript strict mode check (0 errors)
 - longitude ∈ [-180, 180]
 Returns HTTP 400 for out-of-range values.
 
+## P07-TRANSPORT: Float Reconciliation, Thermal Receipt, Multi-Agent Sessions, Bus Parks, Passenger ID (complete)
+
+### Migration 013_p07_agent_ops
+Adds to D1 schema:
+- `sales_transactions.passenger_id_type TEXT` — NIN/BVN/passport/drivers_license (optional)
+- `sales_transactions.passenger_id_hash TEXT` — SHA-256 of the raw ID, never stored plaintext
+- `receipts.qr_code TEXT` — format `txnId:seatId1,seatId2,...` for boarding scan validation
+
+### P07-T1: Float Reconciliation (`src/api/agent-sales.ts`)
+Three new endpoints on `/api/agent-sales/reconciliation`:
+- `POST` — agent submits end-of-day cash float. Auto-calculates `expected_kobo` (sum of cash transactions for the date), computes `discrepancy_kobo = submitted - expected`, stores as `pending`. Duplicate submissions on same date return 409.
+- `GET` — supervisor queries reconciliations with agent_id/status/period_date filters.
+- `PATCH /:id` — supervisor approves or rejects a pending reconciliation.
+
+**Frontend** (`src/app.tsx` `AgentPOSModule`): "End of Day" button opens a collapsible panel with a cash amount input. After submit, shows a 3-cell grid: Expected | Submitted | Discrepancy, with balanced/shortage/overage messaging.
+
+### P07-T2: Thermal Receipt (`src/components/receipt.tsx`)
+New `ReceiptModal` component renders a thermal-style receipt with:
+- Route + departure time header in dark blue
+- Seats, passengers, payment info, agent name, receipt ID
+- 160×160 QR code canvas rendered via `qrcode` lib (async, lazy-loaded)
+- Print button (`window.print()`) with `@media print` CSS hiding everything except the receipt card
+- Share button using Web Share API → falls back to WhatsApp deep link
+
+After every successful online sale, `AgentPOSModule` opens this modal automatically.
+
+### P07-T3: Multi-Agent Device Session Management (`src/core/offline/db.ts`)
+- `AgentSession` gains `name: string` field for display in switcher UI
+- `OFFLINE_GRACE_MS = 8h` — sessions remain valid offline for 8 hours beyond JWT expiry
+- `getAgentSession(id, { offline: true })` applies the grace period
+- `listAgentSessions()` — returns all sessions within the grace window, used by the POS header to detect multiple cached agents
+- **Switcher UI**: if >1 cached session exists, a "Switch Agent" button appears in the POS header and calls `logout()` to force re-authentication as a different agent
+
+### P07-T4: Bus Park Management (`src/api/agent-sales.ts`)
+Four new endpoints:
+- `GET /api/agent-sales/parks` — tenant-scoped list; STAFF+
+- `POST /api/agent-sales/parks` — create park with name/city/state/lat/lng; TENANT_ADMIN+
+- `POST /api/agent-sales/parks/:id/agents` — assign agent to park; SUPERVISOR+
+- `DELETE /api/agent-sales/parks/:id/agents/:agentId` — unassign; SUPERVISOR+
+
+**Frontend**: park selector dropdown auto-loads parks when online; `park_id` is captured per transaction (optional).
+
+### P07-T5: Passenger ID Capture (`src/api/agent-sales.ts` + `src/api/operator-management.ts`)
+- `POST /transactions` now accepts `passenger_id_type` (NIN/BVN/passport/drivers_license) and `passenger_id_number` (raw, never stored)
+- The raw number is SHA-256 hashed in the Worker via `crypto.subtle.digest` before inserting into `passenger_id_hash`
+- FRSC compliance: `GET /api/operator/trips/:id/manifest` now also queries `sales_transactions` for the trip and returns an `agent_sales` array alongside `passengers` (bookings). Each agent sale includes `passenger_id_type` (not the hash). The manifest `summary` now includes `total_agent_sales`, `total_passengers`, `agent_revenue_kobo`, `total_revenue_kobo`.
+
 ## Phase 6: Operator Context Hardening + SyncEngine Auth + Agent POS Trip Selector (complete)
 
 ### `src/core/auth/context.tsx` — SyncEngine auth wiring
