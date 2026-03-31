@@ -791,6 +791,24 @@ export class ApiClient {
       ...(operatorId ? { operator_id: operatorId } : {}),
     });
   }
+
+  // ---- P08-T5: Group Bookings ----
+
+  async createGroupBooking(body: {
+    trip_id: string; customer_id: string; group_name: string;
+    leader_name: string; leader_phone: string;
+    seat_ids: string[]; passenger_names: string[];
+    seat_class?: string; payment_method: string; agent_id: string;
+    total_amount_kobo?: number;
+  }): Promise<{ group_booking_id: string; booking_id: string; total_amount: number; payment_reference: string }> {
+    const res = await this.request('POST', '/api/booking/group-bookings', body);
+    return res as { group_booking_id: string; booking_id: string; total_amount: number; payment_reference: string };
+  }
+
+  async getGroupBooking(id: string): Promise<Record<string, unknown>> {
+    const res = await this.request('GET', `/api/booking/group-bookings/${id}`);
+    return res as Record<string, unknown>;
+  }
 }
 
 export const api = new ApiClient();

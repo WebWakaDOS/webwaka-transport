@@ -10,6 +10,45 @@ import type { AppContext, DbBooking, DbCustomer } from './types';
 import { genId, parsePagination, metaResponse, requireFields } from './types';
 import { publishEvent } from '../core/events/index';
 import { sendSms } from '../lib/sms.js';
+import { getOperatorConfig } from '../lib/operator-config.js';
+import { initiatePaystackRefund } from '../lib/payments.js';
+
+// ============================================================
+// P08-T2: Fare computation helper — applies class multipliers + time multipliers
+// ============================================================
+interface FareMatrix {
+  standard: number; window: number; vip: number; front: number;
+  time_multipliers?: {
+    peak_hours?: number[]; peak_multiplier?: number;
+    peak_days?: number[]; peak_day_multiplier?: number;
+  };
+}
+
+function computeFareByClass(
+  baseFare: number,
+  fareMatrix: FareMatrix | null,
+  refTimeMs: number,
+): Record<string, number> {
+  const classMultipliers: Record<string, number> = {
+    standard: fareMatrix?.standard ?? 1.0,
+    window: fareMatrix?.window ?? 1.0,
+    vip: fareMatrix?.vip ?? 1.0,
+    front: fareMatrix?.front ?? 1.0,
+  };
+  let timeMult = 1.0;
+  if (fareMatrix?.time_multipliers) {
+    const tm = fareMatrix.time_multipliers;
+    const hour = new Date(refTimeMs).getUTCHours();
+    const day = new Date(refTimeMs).getUTCDay();
+    if (tm.peak_hours?.includes(hour)) timeMult = Math.max(timeMult, tm.peak_multiplier ?? 1.0);
+    if (tm.peak_days?.includes(day)) timeMult = Math.max(timeMult, tm.peak_day_multiplier ?? 1.0);
+  }
+  const result: Record<string, number> = {};
+  for (const [cls, mult] of Object.entries(classMultipliers)) {
+    result[cls] = Math.round(baseFare * mult * timeMult);
+  }
+  return result;
+}
 
 export const bookingPortalRouter = new Hono<AppContext>();
 
@@ -43,7 +82,7 @@ bookingPortalRouter.get('/trips/search', async (c) => {
   const { origin, destination, date } = c.req.query();
   const db = c.env.DB;
 
-  let query = `SELECT t.id, t.departure_time, t.state, r.origin, r.destination, r.base_fare,
+  let query = `SELECT t.id, t.departure_time, t.state, r.origin, r.destination, r.base_fare, r.fare_matrix,
     o.name as operator_name,
     COUNT(CASE WHEN s.status = 'available' THEN 1 END) as available_seats
     FROM trips t
@@ -63,8 +102,20 @@ bookingPortalRouter.get('/trips/search', async (c) => {
   query += ` GROUP BY t.id HAVING available_seats > 0 ORDER BY t.departure_time ASC`;
 
   try {
-    const result = await db.prepare(query).bind(...params).all();
-    return c.json({ success: true, data: result.results });
+    const result = await db.prepare(query).bind(...params).all<{
+      id: string; departure_time: number; state: string; origin: string; destination: string;
+      base_fare: number; fare_matrix: string | null; operator_name: string; available_seats: number;
+    }>();
+
+    // P08-T2: Enrich each trip with effective fare by class
+    const enriched = result.results.map(trip => {
+      const fareMatrix: FareMatrix | null = trip.fare_matrix ? JSON.parse(trip.fare_matrix) as FareMatrix : null;
+      const effective_fare_by_class = computeFareByClass(trip.base_fare, fareMatrix, trip.departure_time);
+      const effective_fare = Math.min(...Object.values(effective_fare_by_class)); // cheapest class
+      return { ...trip, fare_matrix: undefined, effective_fare_by_class, effective_fare };
+    });
+
+    return c.json({ success: true, data: enriched });
   } catch {
     return c.json({ success: false, error: 'Failed to search trips' }, 500);
   }
@@ -155,11 +206,39 @@ bookingPortalRouter.post('/bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN'
     if (!customer) return c.json({ success: false, error: 'Customer not found or NDPR consent not given' }, 404);
 
     const trip = await db.prepare(
-      `SELECT t.*, r.base_fare FROM trips t JOIN routes r ON t.route_id = r.id WHERE t.id = ?`
-    ).bind(trip_id).first<{ id: string; base_fare: number; state: string }>();
+      `SELECT t.id, t.state, t.operator_id, t.departure_time, r.base_fare, r.fare_matrix
+       FROM trips t JOIN routes r ON t.route_id = r.id WHERE t.id = ?`
+    ).bind(trip_id).first<{ id: string; state: string; operator_id: string; departure_time: number; base_fare: number; fare_matrix: string | null }>();
     if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
 
-    const total_amount = trip.base_fare * seat_ids.length;
+    // P08-T2: Compute expected fare using seat classes and fare matrix
+    const seatRows = await db.prepare(
+      `SELECT id, seat_class FROM seats WHERE id IN (${seat_ids.map(() => '?').join(',')}) AND trip_id = ?`
+    ).bind(...seat_ids, trip_id).all<{ id: string; seat_class: string }>();
+
+    if (seatRows.results.length !== seat_ids.length) {
+      return c.json({ success: false, error: 'One or more seat IDs not found for this trip' }, 404);
+    }
+
+    const fareMatrix: FareMatrix | null = trip.fare_matrix ? JSON.parse(trip.fare_matrix) as FareMatrix : null;
+    const fareByClass = computeFareByClass(trip.base_fare, fareMatrix, trip.departure_time);
+    const expected_kobo = seatRows.results.reduce((sum, seat) => {
+      return sum + (fareByClass[seat.seat_class] ?? fareByClass['standard'] ?? trip.base_fare);
+    }, 0);
+
+    // Validate submitted total if provided (±2% tolerance)
+    const body_amount = (body as Record<string, unknown>).total_amount_kobo as number | undefined;
+    if (body_amount !== undefined) {
+      const tolerance = Math.round(expected_kobo * 0.02);
+      if (Math.abs(body_amount - expected_kobo) > tolerance) {
+        return c.json({
+          success: false, error: 'fare_mismatch',
+          expected_kobo, submitted_kobo: body_amount,
+        }, 422);
+      }
+    }
+
+    const total_amount = body_amount ?? expected_kobo;
     // P03-T3: Paystack-compatible reference using waka_ prefix + 16-char random
     const payment_reference = `waka_${nanoid('', 16)}`;
     const id = genId('bkg');
@@ -171,7 +250,7 @@ bookingPortalRouter.post('/bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN'
 
     return c.json({
       success: true,
-      data: { id, customer_id, trip_id, seat_ids, total_amount, payment_method, payment_reference, status: 'pending' },
+      data: { id, customer_id, trip_id, seat_ids, total_amount, expected_kobo, payment_method, payment_reference, status: 'pending' },
     }, 201);
   } catch {
     return c.json({ success: false, error: 'Failed to create booking' }, 500);
@@ -303,7 +382,7 @@ bookingPortalRouter.patch('/bookings/:id/confirm', requireRole(['SUPER_ADMIN', '
 });
 
 // ============================================================
-// PATCH /bookings/:id/cancel — cancel a booking
+// PATCH /bookings/:id/cancel — cancel + P08-T3 policy-based refund
 // ============================================================
 bookingPortalRouter.patch('/bookings/:id/cancel', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'CUSTOMER']), async (c) => {
   const id = c.req.param('id');
@@ -312,25 +391,79 @@ bookingPortalRouter.patch('/bookings/:id/cancel', requireRole(['SUPER_ADMIN', 'T
 
   try {
     const booking = await db.prepare(
-      `SELECT * FROM bookings WHERE id = ?`
-    ).bind(id).first<DbBooking>();
+      `SELECT b.*, t.departure_time, t.operator_id FROM bookings b
+       JOIN trips t ON b.trip_id = t.id
+       WHERE b.id = ?`
+    ).bind(id).first<DbBooking & { departure_time: number; operator_id: string }>();
 
     if (!booking) return c.json({ success: false, error: 'Booking not found' }, 404);
     if (booking.status === 'cancelled') return c.json({ success: false, error: 'Already cancelled' }, 409);
 
+    // P08-T3: Compute refund amount from cancellation policy
+    const opConfig = await getOperatorConfig(c.env, booking.operator_id);
+    const hoursUntilDeparture = (booking.departure_time - now) / 3_600_000;
+    const { free_before_hours, half_refund_before_hours } = opConfig.cancellation_policy;
+
+    let refund_amount_kobo = 0;
+    if (hoursUntilDeparture > free_before_hours) {
+      refund_amount_kobo = booking.total_amount; // full refund
+    } else if (hoursUntilDeparture > half_refund_before_hours) {
+      refund_amount_kobo = Math.floor(booking.total_amount / 2); // half refund
+    }
+
     const seatIds = JSON.parse(booking.seat_ids) as string[];
+
+    // Build base update — always cancel the booking
+    let refund_reference: string | null = null;
+    let manual_refund_required = 0;
+
+    // Initiate automated refund for online payment methods
+    if (refund_amount_kobo > 0 && booking.payment_status === 'completed') {
+      const onlineMethods = ['paystack', 'flutterwave'];
+      if (onlineMethods.includes(booking.payment_method) && booking.payment_reference) {
+        try {
+          refund_reference = await initiatePaystackRefund(booking.payment_reference, refund_amount_kobo, c.env);
+        } catch (err) {
+          console.warn('[cancel] Paystack refund failed:', err);
+          // non-fatal — log and proceed with cancellation
+        }
+      } else if (booking.payment_method === 'cash') {
+        manual_refund_required = 1;
+      }
+    }
+
     await db.batch([
       db.prepare(
-        `UPDATE bookings SET status = 'cancelled', cancelled_at = ? WHERE id = ?`
-      ).bind(now, id),
+        `UPDATE bookings
+         SET status = 'cancelled', cancelled_at = ?,
+             refund_amount_kobo = ?, refund_reference = ?, manual_refund_required = ?
+         WHERE id = ?`
+      ).bind(now, refund_amount_kobo, refund_reference, manual_refund_required, id),
       ...seatIds.map(seatId =>
         db.prepare(
-          `UPDATE seats SET status = ?, reserved_by = NULL, reservation_token = NULL, confirmed_by = NULL, updated_at = ? WHERE id = ?`
-        ).bind('available', now, seatId)
+          `UPDATE seats SET status = 'available', reserved_by = NULL, reservation_token = NULL, confirmed_by = NULL, updated_at = ? WHERE id = ?`
+        ).bind(now, seatId)
       ),
     ]);
 
-    return c.json({ success: true, data: { id, status: 'cancelled', cancelled_at: now } });
+    // Publish refund event if applicable
+    if (refund_reference) {
+      await publishEvent(db, {
+        event_type: 'booking.refunded',
+        aggregate_id: id,
+        aggregate_type: 'booking',
+        payload: { booking_id: id, refund_reference, refund_amount_kobo },
+        timestamp: now,
+      }).catch(() => {});
+    }
+
+    // P08-T4: Notify the first waitlisted customer for this trip after seats are freed
+    await notifyWaitlist(db, booking.trip_id, c.env).catch(() => {});
+
+    return c.json({
+      success: true,
+      data: { id, status: 'cancelled', cancelled_at: now, refund_amount_kobo, refund_reference, manual_refund_required },
+    });
   } catch {
     return c.json({ success: false, error: 'Failed to cancel booking' }, 500);
   }
@@ -361,6 +494,306 @@ bookingPortalRouter.get('/bookings', async (c) => {
     return c.json({ success: true, data: result.results, meta: metaResponse(result.results.length, limit, offset) });
   } catch {
     return c.json({ success: false, error: 'Failed to fetch bookings' }, 500);
+  }
+});
+
+// ============================================================
+// P08-T4: Waitlist — helper to notify first queued customer after seats freed
+// ============================================================
+type D1Database = AppContext['Bindings']['DB'];
+
+interface WaitlistRow {
+  id: string; trip_id: string; customer_id: string; seat_class: string;
+  position: number; notified_at: number | null; expires_at: number | null;
+}
+
+async function notifyWaitlist(db: D1Database, trip_id: string, env: AppContext['Bindings']) {
+  type WL = { id: string; customer_id: string; seat_class: string };
+  const entry = await db.prepare(
+    `SELECT wl.id, wl.customer_id, wl.seat_class FROM waiting_list wl
+     WHERE wl.trip_id = ? AND wl.deleted_at IS NULL AND wl.notified_at IS NULL
+     ORDER BY wl.position ASC LIMIT 1`
+  ).bind(trip_id).first<WL>();
+  if (!entry) return;
+
+  const seat = await db.prepare(
+    `SELECT id FROM seats WHERE trip_id = ? AND seat_class = ? AND status = 'available' LIMIT 1`
+  ).bind(trip_id, entry.seat_class).first<{ id: string }>();
+  if (!seat) return;
+
+  const customer = await db.prepare(
+    `SELECT phone FROM customers WHERE id = ?`
+  ).bind(entry.customer_id).first<{ phone: string }>();
+
+  const now = Date.now();
+  const expires_at = now + 30 * 60_000;
+  await db.prepare(
+    `UPDATE waiting_list SET notified_at = ?, expires_at = ? WHERE id = ?`
+  ).bind(now, expires_at, entry.id).run();
+
+  if (customer?.phone) {
+    await sendSms(
+      customer.phone,
+      `WebWaka: A ${entry.seat_class} seat is available on your waitlisted trip! Book within 30 minutes before it's released.`,
+      env,
+    ).catch(() => {});
+  }
+}
+
+// ============================================================
+// P08-T4: POST /trips/:id/waitlist — join a waiting list
+// ============================================================
+bookingPortalRouter.post('/trips/:id/waitlist', requireRole(['CUSTOMER', 'STAFF', 'TENANT_ADMIN', 'SUPER_ADMIN']), async (c) => {
+  const trip_id = c.req.param('id');
+  const body = await c.req.json() as { customer_id?: string; seat_class?: string };
+  const { customer_id, seat_class } = body;
+  const db = c.env.DB;
+  const now = Date.now();
+  const missingField = requireFields(body as Record<string, unknown>, ['customer_id', 'seat_class']);
+  if (missingField) return c.json({ success: false, error: missingField }, 400);
+
+  const VALID_CLASSES = ['standard', 'window', 'vip', 'front'];
+  if (!VALID_CLASSES.includes(seat_class!)) {
+    return c.json({ success: false, error: `seat_class must be one of: ${VALID_CLASSES.join(', ')}` }, 400);
+  }
+
+  try {
+    const trip = await db.prepare(`SELECT id FROM trips WHERE id = ? AND deleted_at IS NULL`).bind(trip_id).first<{ id: string }>();
+    if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
+
+    // Check if already on waitlist
+    const existing = await db.prepare(
+      `SELECT id FROM waiting_list WHERE trip_id = ? AND customer_id = ? AND deleted_at IS NULL`
+    ).bind(trip_id, customer_id).first();
+    if (existing) return c.json({ success: false, error: 'Already on waitlist for this trip' }, 409);
+
+    // Get next position
+    const posRow = await db.prepare(
+      `SELECT COALESCE(MAX(position), 0) + 1 as next_pos FROM waiting_list WHERE trip_id = ? AND deleted_at IS NULL`
+    ).bind(trip_id).first<{ next_pos: number }>();
+    const position = posRow?.next_pos ?? 1;
+
+    const wl_id = genId('wl');
+    await db.prepare(
+      `INSERT INTO waiting_list (id, trip_id, customer_id, seat_class, position, created_at) VALUES (?, ?, ?, ?, ?, ?)`
+    ).bind(wl_id, trip_id, customer_id, seat_class, position, now).run();
+
+    return c.json({ success: true, data: { id: wl_id, trip_id, customer_id, seat_class, position } }, 201);
+  } catch {
+    return c.json({ success: false, error: 'Failed to join waitlist' }, 500);
+  }
+});
+
+// ============================================================
+// P08-T4: GET /trips/:id/waitlist — list all entries (STAFF+)
+// ============================================================
+bookingPortalRouter.get('/trips/:id/waitlist', requireRole(['STAFF', 'TENANT_ADMIN', 'SUPER_ADMIN']), async (c) => {
+  const trip_id = c.req.param('id');
+  const db = c.env.DB;
+  try {
+    const rows = await db.prepare(
+      `SELECT wl.*, c.full_name, c.phone FROM waiting_list wl
+       JOIN customers c ON wl.customer_id = c.id
+       WHERE wl.trip_id = ? AND wl.deleted_at IS NULL
+       ORDER BY wl.position ASC`
+    ).bind(trip_id).all<WaitlistRow & { full_name: string; phone: string }>();
+    return c.json({ success: true, data: rows.results });
+  } catch {
+    return c.json({ success: false, error: 'Failed to fetch waitlist' }, 500);
+  }
+});
+
+// ============================================================
+// P08-T4: DELETE /trips/:id/waitlist/:wl_id — leave the waiting list (soft delete)
+// ============================================================
+bookingPortalRouter.delete('/trips/:id/waitlist/:wl_id', requireRole(['CUSTOMER', 'STAFF', 'TENANT_ADMIN', 'SUPER_ADMIN']), async (c) => {
+  const { id: trip_id, wl_id } = c.req.param() as { id: string; wl_id: string };
+  const db = c.env.DB;
+  const now = Date.now();
+  try {
+    const entry = await db.prepare(
+      `SELECT id FROM waiting_list WHERE id = ? AND trip_id = ? AND deleted_at IS NULL`
+    ).bind(wl_id, trip_id).first();
+    if (!entry) return c.json({ success: false, error: 'Waitlist entry not found' }, 404);
+    await db.prepare(`UPDATE waiting_list SET deleted_at = ? WHERE id = ?`).bind(now, wl_id).run();
+    return c.json({ success: true, data: { id: wl_id, removed: true } });
+  } catch {
+    return c.json({ success: false, error: 'Failed to remove waitlist entry' }, 500);
+  }
+});
+
+// ============================================================
+// P08-T5: POST /group-bookings — create a group booking (STAFF+)
+// One booking covers all seats; group_bookings stores group metadata
+// ============================================================
+bookingPortalRouter.post('/group-bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
+  const body = await c.req.json() as Record<string, unknown>;
+  const {
+    trip_id, customer_id, group_name, leader_name, leader_phone,
+    seat_ids, passenger_names, seat_class, payment_method, agent_id,
+    total_amount_kobo,
+  } = body as {
+    trip_id?: string; customer_id?: string; group_name?: string;
+    leader_name?: string; leader_phone?: string;
+    seat_ids?: string[]; passenger_names?: string[]; seat_class?: string;
+    payment_method?: string; agent_id?: string; total_amount_kobo?: number;
+  };
+
+  const missing = requireFields(body as Record<string, unknown>, ['trip_id', 'customer_id', 'group_name', 'leader_name', 'leader_phone', 'payment_method', 'agent_id']);
+  if (missing) return c.json({ success: false, error: missing }, 400);
+  if (!Array.isArray(seat_ids) || seat_ids.length === 0) {
+    return c.json({ success: false, error: 'seat_ids must be a non-empty array' }, 400);
+  }
+  if (!Array.isArray(passenger_names) || passenger_names.length !== seat_ids.length) {
+    return c.json({ success: false, error: 'passenger_names must have one entry per seat' }, 400);
+  }
+  const VALID_CLASSES = ['standard', 'window', 'vip', 'front'];
+  if (seat_class && !VALID_CLASSES.includes(seat_class)) {
+    return c.json({ success: false, error: `seat_class must be one of: ${VALID_CLASSES.join(', ')}` }, 400);
+  }
+
+  const db = c.env.DB;
+  const now = Date.now();
+  const jwtUser = c.get('user');
+
+  try {
+    const trip = await db.prepare(
+      `SELECT t.id, t.state, t.operator_id, t.departure_time, r.base_fare, r.fare_matrix
+       FROM trips t JOIN routes r ON t.route_id = r.id WHERE t.id = ?`
+    ).bind(trip_id).first<{ id: string; state: string; operator_id: string; departure_time: number; base_fare: number; fare_matrix: string | null }>();
+    if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
+    if (!['scheduled', 'boarding'].includes(trip.state)) {
+      return c.json({ success: false, error: `Cannot book on a trip in '${trip.state}' state` }, 409);
+    }
+
+    // Verify seats belong to this trip
+    const seatRows = await db.prepare(
+      `SELECT id, seat_class FROM seats WHERE id IN (${seat_ids!.map(() => '?').join(',')}) AND trip_id = ? AND status = 'available'`
+    ).bind(...seat_ids!, trip_id).all<{ id: string; seat_class: string }>();
+    if (seatRows.results.length !== seat_ids!.length) {
+      return c.json({ success: false, error: 'One or more seats not available on this trip' }, 409);
+    }
+
+    // Compute expected fare
+    const fareMatrix: FareMatrix | null = trip.fare_matrix ? JSON.parse(trip.fare_matrix) as FareMatrix : null;
+    const fareByClass = computeFareByClass(trip.base_fare, fareMatrix, trip.departure_time);
+    const effectiveSeatClass = seat_class ?? 'standard';
+    const perSeatFare = fareByClass[effectiveSeatClass] ?? trip.base_fare;
+    const expected_kobo = perSeatFare * seat_ids!.length;
+
+    if (total_amount_kobo !== undefined) {
+      const tolerance = Math.round(expected_kobo * 0.02);
+      if (Math.abs(total_amount_kobo - expected_kobo) > tolerance) {
+        return c.json({ success: false, error: 'fare_mismatch', expected_kobo, submitted_kobo: total_amount_kobo }, 422);
+      }
+    }
+    const total_amount = total_amount_kobo ?? expected_kobo;
+
+    const booking_id = genId('bkg');
+    const group_id = genId('grp');
+    const payment_reference = `waka_${nanoid('', 16)}`;
+
+    await db.batch([
+      db.prepare(
+        `INSERT INTO bookings (id, customer_id, trip_id, seat_ids, passenger_names, total_amount, status, payment_status, payment_method, payment_reference, group_booking_id, is_guest, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'confirmed', 'pending', ?, ?, ?, 0, ?)`
+      ).bind(booking_id, customer_id, trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, payment_method, payment_reference, group_id, now),
+      db.prepare(
+        `INSERT INTO group_bookings (id, operator_id, agent_id, trip_id, booking_id, group_name, leader_name, leader_phone, seat_count, seat_class, total_amount_kobo, payment_method, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(group_id, trip.operator_id, agent_id ?? jwtUser?.id ?? 'unknown', trip_id, booking_id, group_name, leader_name, leader_phone, seat_ids!.length, effectiveSeatClass, total_amount, payment_method, now),
+      ...seat_ids!.map(seatId =>
+        db.prepare(
+          `UPDATE seats SET status = 'confirmed', confirmed_by = ?, updated_at = ? WHERE id = ?`
+        ).bind(booking_id, now, seatId)
+      ),
+    ]);
+
+    return c.json({
+      success: true,
+      data: { group_booking_id: group_id, booking_id, trip_id, seat_count: seat_ids!.length, total_amount, payment_reference },
+    }, 201);
+  } catch {
+    return c.json({ success: false, error: 'Failed to create group booking' }, 500);
+  }
+});
+
+// ============================================================
+// P08-T5: GET /group-bookings/:id — fetch group booking details (STAFF+)
+// ============================================================
+bookingPortalRouter.get('/group-bookings/:id', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
+  const id = c.req.param('id');
+  const db = c.env.DB;
+  try {
+    const group = await db.prepare(
+      `SELECT gb.*, b.status as booking_status, b.seat_ids, b.passenger_names, b.payment_status, b.payment_reference
+       FROM group_bookings gb
+       JOIN bookings b ON gb.booking_id = b.id
+       WHERE gb.id = ?`
+    ).bind(id).first();
+    if (!group) return c.json({ success: false, error: 'Group booking not found' }, 404);
+    return c.json({ success: true, data: group });
+  } catch {
+    return c.json({ success: false, error: 'Failed to fetch group booking' }, 500);
+  }
+});
+
+// ============================================================
+// P08-T5: PATCH /group-bookings/:id/cancel — cancel group booking (STAFF+)
+// ============================================================
+bookingPortalRouter.patch('/group-bookings/:id/cancel', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
+  const id = c.req.param('id');
+  const db = c.env.DB;
+  const now = Date.now();
+  try {
+    const group = await db.prepare(
+      `SELECT gb.booking_id, gb.trip_id, b.status, b.seat_ids, b.total_amount, b.payment_status,
+              b.payment_method, b.payment_reference, t.departure_time, t.operator_id
+       FROM group_bookings gb
+       JOIN bookings b ON gb.booking_id = b.id
+       JOIN trips t ON gb.trip_id = t.id
+       WHERE gb.id = ?`
+    ).bind(id).first<{
+      booking_id: string; trip_id: string; status: string; seat_ids: string; total_amount: number;
+      payment_status: string; payment_method: string; payment_reference: string | null;
+      departure_time: number; operator_id: string;
+    }>();
+    if (!group) return c.json({ success: false, error: 'Group booking not found' }, 404);
+    if (group.status === 'cancelled') return c.json({ success: false, error: 'Already cancelled' }, 409);
+
+    const opConfig = await getOperatorConfig(c.env, group.operator_id);
+    const hoursUntilDeparture = (group.departure_time - now) / 3_600_000;
+    const { free_before_hours, half_refund_before_hours } = opConfig.cancellation_policy;
+    let refund_amount_kobo = 0;
+    if (hoursUntilDeparture > free_before_hours) {
+      refund_amount_kobo = group.total_amount;
+    } else if (hoursUntilDeparture > half_refund_before_hours) {
+      refund_amount_kobo = Math.floor(group.total_amount / 2);
+    }
+
+    let refund_reference: string | null = null;
+    let manual_refund_required = 0;
+    if (refund_amount_kobo > 0 && group.payment_status === 'completed') {
+      if (['paystack', 'flutterwave'].includes(group.payment_method) && group.payment_reference) {
+        try { refund_reference = await initiatePaystackRefund(group.payment_reference, refund_amount_kobo, c.env); } catch { /* non-fatal */ }
+      } else if (group.payment_method === 'cash') { manual_refund_required = 1; }
+    }
+
+    const seatIds = JSON.parse(group.seat_ids) as string[];
+    await db.batch([
+      db.prepare(
+        `UPDATE bookings SET status = 'cancelled', cancelled_at = ?, refund_amount_kobo = ?, refund_reference = ?, manual_refund_required = ? WHERE id = ?`
+      ).bind(now, refund_amount_kobo, refund_reference, manual_refund_required, group.booking_id),
+      ...seatIds.map(seatId =>
+        db.prepare(`UPDATE seats SET status = 'available', confirmed_by = NULL, updated_at = ? WHERE id = ?`).bind(now, seatId)
+      ),
+    ]);
+
+    await notifyWaitlist(db, group.trip_id, c.env).catch(() => {});
+
+    return c.json({ success: true, data: { group_id: id, booking_id: group.booking_id, status: 'cancelled', refund_amount_kobo, refund_reference, manual_refund_required } });
+  } catch {
+    return c.json({ success: false, error: 'Failed to cancel group booking' }, 500);
   }
 });
 

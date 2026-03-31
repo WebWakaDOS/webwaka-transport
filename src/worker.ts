@@ -42,6 +42,7 @@ import {
   sweepAbandonedBookings,
   sweepExpiredPII,
   purgeExpiredFinancialData,
+  sweepExpiredWaitlistNotifications,
 } from './lib/sweepers.js';
 import { notificationsRouter } from './api/notifications.js';
 
@@ -369,6 +370,7 @@ export async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionC
     drainEventBus(env),
     sweepExpiredReservations(env),
     sweepAbandonedBookings(env),
+    sweepExpiredWaitlistNotifications(env),
   ]));
 
   // Run daily NDPR sweepers only at midnight UTC (C-002)

@@ -554,6 +554,36 @@ const MIGRATIONS: Migration[] = [
       `ALTER TABLE trips ADD COLUMN departure_park_id TEXT`,
     ],
   },
+  {
+    name: '014_p08_revenue',
+    statements: [
+      // P08-T3: Cancellation refund tracking on bookings
+      `ALTER TABLE bookings ADD COLUMN refund_reference TEXT`,
+      `ALTER TABLE bookings ADD COLUMN refund_amount_kobo INTEGER`,
+      `ALTER TABLE bookings ADD COLUMN manual_refund_required INTEGER DEFAULT 0`,
+      // P08-T5: Link bookings to group booking records
+      `ALTER TABLE bookings ADD COLUMN group_booking_id TEXT`,
+      // P08-T5: Group bookings table
+      `CREATE TABLE IF NOT EXISTS group_bookings (
+        id TEXT PRIMARY KEY,
+        operator_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        trip_id TEXT NOT NULL REFERENCES trips(id),
+        booking_id TEXT NOT NULL REFERENCES bookings(id),
+        group_name TEXT NOT NULL,
+        leader_name TEXT NOT NULL,
+        leader_phone TEXT NOT NULL,
+        seat_count INTEGER NOT NULL,
+        seat_class TEXT NOT NULL DEFAULT 'standard',
+        total_amount_kobo INTEGER NOT NULL,
+        payment_method TEXT NOT NULL,
+        receipt_id TEXT,
+        created_at INTEGER NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_group_bookings_trip ON group_bookings(trip_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_group_bookings_agent ON group_bookings(agent_id)`,
+    ],
+  },
 ];
 
 export const adminRouter = new Hono<{ Bindings: AdminEnv }>();

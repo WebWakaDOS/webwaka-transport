@@ -475,6 +475,79 @@ export async function purgeExpiredFinancialData(env: Env): Promise<void> {
   }
 }
 
+// ============================================================
+// P08-T4: Waitlist notification expiry sweeper
+// Re-opens seats and advances queue when a notified customer fails to book within 30 min
+// ============================================================
+export async function sweepExpiredWaitlistNotifications(env: Env): Promise<void> {
+  const db = env.DB;
+  const now = Date.now();
+
+  try {
+    const expired = await db.prepare(
+      `SELECT wl.id, wl.trip_id, wl.customer_id, wl.seat_class
+       FROM waiting_list wl
+       WHERE wl.deleted_at IS NULL
+         AND wl.notified_at IS NOT NULL
+         AND wl.expires_at IS NOT NULL
+         AND wl.expires_at < ?`
+    ).bind(now).all<{ id: string; trip_id: string; customer_id: string; seat_class: string }>();
+
+    if (!expired.results || expired.results.length === 0) return;
+
+    console.log(`[WaitlistSweeper] Expiring ${expired.results.length} stale waitlist notifications`);
+
+    for (const wl of expired.results) {
+      try {
+        await db.prepare(
+          `UPDATE waiting_list SET deleted_at = ? WHERE id = ?`
+        ).bind(now, wl.id).run();
+
+        // Find next un-notified entry for the same trip + class
+        type WL = { id: string; customer_id: string };
+        const next = await db.prepare(
+          `SELECT id, customer_id FROM waiting_list
+           WHERE trip_id = ? AND seat_class = ? AND deleted_at IS NULL AND notified_at IS NULL
+           ORDER BY position ASC LIMIT 1`
+        ).bind(wl.trip_id, wl.seat_class).first<WL>();
+
+        if (next) {
+          const seat = await db.prepare(
+            `SELECT id FROM seats WHERE trip_id = ? AND seat_class = ? AND status = 'available' LIMIT 1`
+          ).bind(wl.trip_id, wl.seat_class).first<{ id: string }>();
+
+          if (seat) {
+            const expires_at = now + 30 * 60_000;
+            await db.prepare(
+              `UPDATE waiting_list SET notified_at = ?, expires_at = ? WHERE id = ?`
+            ).bind(now, expires_at, next.id).run();
+
+            const customer = await db.prepare(
+              `SELECT phone FROM customers WHERE id = ?`
+            ).bind(next.customer_id).first<{ phone: string }>();
+
+            if (customer?.phone && !customer.phone.startsWith('NDPR_')) {
+              await sendSms(
+                customer.phone,
+                `WebWaka: A ${wl.seat_class} seat on your waitlisted trip is now available! Book within 30 minutes.`,
+                env,
+              ).catch(() => {});
+            }
+          }
+        }
+
+        console.log(`[WaitlistSweeper] Expired waitlist entry ${wl.id}`);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[WaitlistSweeper] Failed for entry ${wl.id}: ${msg}`);
+      }
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[WaitlistSweeper] Error: ${msg}`);
+  }
+}
+
 async function deliverToConsumer(endpointUrl: string, evt: Record<string, unknown>): Promise<void> {
   const response = await fetch(endpointUrl, {
     method: 'POST',

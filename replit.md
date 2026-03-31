@@ -9,6 +9,13 @@ WebWaka Transport is the Transportation & Mobility vertical suite (Part 10.3) of
 - **TRN-3**: Customer Booking Portal — public-facing trip search and booking
 - **TRN-4**: Operator Management — tools for transport companies to manage routes/vehicles
 
+## P08-TRANSPORT Revenue Features (complete)
+- **T1 Seat Templates**: PUT /vehicles/:id/template; trip creation uses template to generate class-aware seats; GET /trips/:id/availability returns seat_layout + seat_class per seat
+- **T2 Fare Matrix**: PUT /routes/:id/fare-matrix (multipliers 1.0–5.0 per class + time_multipliers); GET /trips/search returns effective_fare_by_class; POST /bookings validates total_amount_kobo ±2% tolerance
+- **T3 Cancellation + Refunds**: PATCH /bookings/:id/cancel computes refund from operator cancellation policy (full/half/no refund); initiates Paystack automated refund or flags manual_refund_required for cash; publishes booking.refunded event
+- **T4 Waiting List**: POST/GET/DELETE /trips/:id/waitlist; sweepExpiredWaitlistNotifications in cron advances queue with SMS on cancellation; 30-min hold window
+- **T5 Group Bookings**: POST /group-bookings (STAFF+), GET /group-bookings/:id, PATCH /group-bookings/:id/cancel with refund policy; Agent POS includes Group Booking sub-tab UI with seat selector, class, leader info, confirmation display
+
 ## Tech Stack
 - **Frontend**: React 19 + TypeScript + Vite (PWA, mobile-first, port 5000)
 - **Backend**: Cloudflare Workers + Hono framework

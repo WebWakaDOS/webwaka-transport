@@ -263,6 +263,17 @@ function AgentPOSModule({ online }: { online: boolean }) {
   // P07-T3: Session switcher
   const [agentSessions, setAgentSessions] = useState<{ agent_id: string; name: string; expires_at: number }[]>([]);
 
+  // P08-T5: POS mode toggle — individual sale vs. group booking
+  const [posMode, setPosMode] = useState<'sale' | 'group'>('sale');
+  const [grpName, setGrpName] = useState('');
+  const [grpLeaderName, setGrpLeaderName] = useState('');
+  const [grpLeaderPhone, setGrpLeaderPhone] = useState('');
+  const [grpSeatClass, setGrpSeatClass] = useState<'standard' | 'window' | 'vip' | 'front'>('standard');
+  const [grpPassengers, setGrpPassengers] = useState(''); // comma-separated
+  const [grpSuccess, setGrpSuccess] = useState<{ group_booking_id: string; total_amount: number; payment_reference: string } | null>(null);
+  const [grpError, setGrpError] = useState('');
+  const [grpSubmitting, setGrpSubmitting] = useState(false);
+
   // Load active trips
   useEffect(() => {
     if (!online) return;
@@ -430,6 +441,40 @@ function AgentPOSModule({ online }: { online: boolean }) {
   const formatKobo = (k: number) =>
     new Intl.NumberFormat('en-NG', { style: 'currency', currency: 'NGN' }).format(k / 100);
 
+  // P08-T5: Group booking submission
+  const handleGroupSale = async () => {
+    if (!tripId || selectedSeats.length === 0 || !grpName || !grpLeaderName || !grpLeaderPhone) return;
+    setGrpSubmitting(true);
+    setGrpError('');
+    setGrpSuccess(null);
+    const passArr = grpPassengers
+      ? grpPassengers.split(',').map(p => p.trim()).filter(Boolean)
+      : Array.from({ length: selectedSeats.length }, (_, i) => `Passenger ${i + 1}`);
+    // Pad passenger names to seat count if insufficient
+    while (passArr.length < selectedSeats.length) passArr.push(`Passenger ${passArr.length + 1}`);
+    try {
+      const result = await api.createGroupBooking({
+        trip_id: tripId,
+        customer_id: user?.id ?? '',
+        group_name: grpName,
+        leader_name: grpLeaderName,
+        leader_phone: grpLeaderPhone,
+        seat_ids: selectedSeats,
+        passenger_names: passArr.slice(0, selectedSeats.length),
+        seat_class: grpSeatClass,
+        payment_method: method,
+        agent_id: user?.id ?? 'agent',
+      });
+      setGrpSuccess(result);
+      setGrpName(''); setGrpLeaderName(''); setGrpLeaderPhone(''); setGrpPassengers('');
+      setSelectedSeats([]); setTripId('');
+    } catch (e) {
+      setGrpError(e instanceof Error ? e.message : 'Group booking failed');
+    } finally {
+      setGrpSubmitting(false);
+    }
+  };
+
   return (
     <div style={{ padding: 16 }}>
       {/* P07-T3: Session switcher header */}
@@ -567,13 +612,31 @@ function AgentPOSModule({ online }: { online: boolean }) {
         </div>
       )}
 
-      {error && (
+      {/* P08-T5: POS mode sub-tabs */}
+      <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+        {(['sale', 'group'] as const).map(mode => (
+          <button
+            key={mode}
+            onClick={() => { setPosMode(mode); setGrpError(''); setGrpSuccess(null); }}
+            style={{
+              flex: 1, padding: '8px 4px', borderRadius: 8, border: '2px solid',
+              borderColor: posMode === mode ? '#2563eb' : '#e2e8f0',
+              background: posMode === mode ? '#eff6ff' : '#fff',
+              fontWeight: posMode === mode ? 700 : 400, fontSize: 12, cursor: 'pointer',
+            }}
+          >
+            {mode === 'sale' ? '🎟 Individual Sale' : '👥 Group Booking'}
+          </button>
+        ))}
+      </div>
+
+      {error && posMode === 'sale' && (
         <div style={{ padding: '10px 14px', background: '#fee2e2', borderRadius: 8, color: '#b91c1c', fontSize: 13, marginBottom: 12 }}>
           {error}
         </div>
       )}
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ display: posMode === 'sale' ? 'flex' : 'none', flexDirection: 'column', gap: 10 }}>
         {/* P07-T4: Park selector */}
         {parks.length > 0 && (
           <select value={parkId} onChange={e => setParkId(e.target.value)} style={inputStyle}>
@@ -695,6 +758,105 @@ function AgentPOSModule({ online }: { online: boolean }) {
           {submitting ? t('loading') : t('sale_complete')}
         </button>
       </div>
+
+      {/* P08-T5: Group Booking Form */}
+      {posMode === 'group' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {grpSuccess ? (
+            <div style={{ padding: 16, background: '#f0fdf4', border: '1px solid #86efac', borderRadius: 10 }}>
+              <div style={{ fontWeight: 700, color: '#16a34a', fontSize: 14, marginBottom: 6 }}>Group Booking Confirmed!</div>
+              <div style={{ fontSize: 12, color: '#374151' }}>
+                <div>Ref: <strong>{grpSuccess.payment_reference}</strong></div>
+                <div>ID: <strong>{grpSuccess.group_booking_id}</strong></div>
+                <div>Total: <strong>{formatKobo(grpSuccess.total_amount)}</strong></div>
+              </div>
+              <button onClick={() => setGrpSuccess(null)} style={{ ...primaryBtnStyle, marginTop: 10, background: '#16a34a', borderColor: '#16a34a' }}>
+                New Group Booking
+              </button>
+            </div>
+          ) : (
+            <>
+              {grpError && (
+                <div style={{ padding: '8px 12px', background: '#fee2e2', borderRadius: 6, color: '#b91c1c', fontSize: 12 }}>
+                  {grpError}
+                </div>
+              )}
+              {/* Trip selector — shared with individual sale */}
+              {online && trips.length > 0 ? (
+                <select value={tripId} onChange={e => setTripId(e.target.value)} style={inputStyle}>
+                  <option value="">-- Select Trip --</option>
+                  {trips.map(tr => (
+                    <option key={tr.id} value={tr.id}>
+                      {tr.origin ?? tr.route_id} → {tr.destination ?? ''} · {new Date(tr.departure_time).toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' })} · {tr.available_seats ?? '?'} avail
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input placeholder="Trip ID" value={tripId} onChange={e => setTripId(e.target.value)} style={inputStyle} />
+              )}
+              {/* Seat selector */}
+              {tripId && seatAvailability && (
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: '#475569', marginBottom: 6 }}>Select Seats — {selectedSeats.length} selected</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 5 }}>
+                    {seatAvailability.seats.map(seat => {
+                      const isAvail = seat.status === 'available';
+                      const isSel = selectedSeats.includes(seat.id);
+                      return (
+                        <button
+                          key={seat.id}
+                          disabled={!isAvail && !isSel}
+                          onClick={() => toggleSeat(seat.id)}
+                          style={{
+                            padding: '7px 4px', borderRadius: 6, border: '1.5px solid',
+                            borderColor: isSel ? '#16a34a' : isAvail ? '#cbd5e1' : '#f1f5f9',
+                            background: isSel ? '#f0fdf4' : isAvail ? '#fff' : '#f8fafc',
+                            color: isSel ? '#16a34a' : isAvail ? '#0f172a' : '#cbd5e1',
+                            fontSize: 11, cursor: isAvail || isSel ? 'pointer' : 'not-allowed', fontWeight: isSel ? 700 : 400,
+                          }}
+                        >
+                          {seat.seat_number}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              {/* Group info */}
+              <input placeholder="Group Name (e.g. ABC School Trip)" value={grpName} onChange={e => setGrpName(e.target.value)} style={inputStyle} />
+              <input placeholder="Leader Name" value={grpLeaderName} onChange={e => setGrpLeaderName(e.target.value)} style={inputStyle} />
+              <input placeholder="Leader Phone (e.g. 08012345678)" value={grpLeaderPhone} onChange={e => setGrpLeaderPhone(e.target.value)} style={inputStyle} type="tel" />
+              <input placeholder="Passenger Names (comma-separated, optional)" value={grpPassengers} onChange={e => setGrpPassengers(e.target.value)} style={inputStyle} />
+              {/* Seat class */}
+              <select value={grpSeatClass} onChange={e => setGrpSeatClass(e.target.value as typeof grpSeatClass)} style={inputStyle}>
+                {(['standard', 'window', 'vip', 'front'] as const).map(sc => (
+                  <option key={sc} value={sc}>{sc.charAt(0).toUpperCase() + sc.slice(1)}</option>
+                ))}
+              </select>
+              {/* Payment method */}
+              <div style={{ display: 'flex', gap: 8 }}>
+                {(['cash', 'mobile_money', 'card'] as const).map(m => (
+                  <button key={m} onClick={() => setMethod(m)} style={{
+                    flex: 1, padding: '10px 4px', borderRadius: 8, border: '2px solid',
+                    borderColor: method === m ? '#2563eb' : '#e2e8f0',
+                    background: method === m ? '#eff6ff' : '#fff',
+                    fontWeight: method === m ? 700 : 400, fontSize: 12, cursor: 'pointer',
+                  }}>
+                    {t(m)}
+                  </button>
+                ))}
+              </div>
+              <button
+                onClick={() => void handleGroupSale()}
+                disabled={grpSubmitting || !tripId || selectedSeats.length === 0 || !grpName || !grpLeaderName || !grpLeaderPhone}
+                style={primaryBtnStyle}
+              >
+                {grpSubmitting ? 'Booking…' : `Confirm Group Booking (${selectedSeats.length} seats)`}
+              </button>
+            </>
+          )}
+        </div>
+      )}
 
       {/* P07-T2: Thermal Receipt Modal */}
       {receiptModal && (

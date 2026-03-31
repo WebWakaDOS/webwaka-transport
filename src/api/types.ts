@@ -73,6 +73,7 @@ export interface DbVehicle {
   model: string | null;
   total_seats: number;
   status: string;
+  seat_template: string | null;
   created_at: number;
   updated_at: number;
   deleted_at: number | null;
@@ -119,6 +120,7 @@ export interface DbSeat {
   id: string;
   trip_id: string;
   seat_number: string;
+  seat_class: string;
   status: string;
   reserved_by: string | null;
   reservation_token: string | null;
@@ -147,6 +149,10 @@ export interface DbBooking {
   deleted_at: number | null;
   payment_provider: string | null;
   paid_at: number | null;
+  refund_reference: string | null;
+  refund_amount_kobo: number | null;
+  manual_refund_required: number | null;
+  group_booking_id: string | null;
 }
 
 export interface DbCustomer {

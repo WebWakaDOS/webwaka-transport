@@ -189,6 +189,48 @@ operatorManagementRouter.patch('/routes/:id', requireRole(['SUPER_ADMIN', 'TENAN
 });
 
 // ============================================================
+// P08-T2: PUT /routes/:id/fare-matrix — set seat-class pricing (TENANT_ADMIN+)
+// ============================================================
+operatorManagementRouter.put('/routes/:id/fare-matrix', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+  const id = c.req.param('id');
+  const body = await c.req.json() as Record<string, unknown>;
+  const db = c.env.DB;
+  const jwtUser = c.get('user');
+  const isSuperAdmin = jwtUser?.role === 'SUPER_ADMIN';
+
+  const { standard, window: win, vip, front, time_multipliers } = body as {
+    standard: number; window: number; vip: number; front: number;
+    time_multipliers?: {
+      peak_hours?: number[]; peak_multiplier?: number;
+      peak_days?: number[]; peak_day_multiplier?: number;
+    };
+  };
+
+  // All class multipliers must be 1.0–5.0
+  for (const [key, val] of Object.entries({ standard, window: win, vip, front })) {
+    if (typeof val !== 'number' || val < 1.0 || val > 5.0) {
+      return c.json({ success: false, error: `${key} multiplier must be a number between 1.0 and 5.0` }, 400);
+    }
+  }
+
+  try {
+    const route = await db.prepare(
+      `SELECT id, operator_id FROM routes WHERE id = ? AND deleted_at IS NULL`
+    ).bind(id).first<{ id: string; operator_id: string }>();
+    if (!route) return c.json({ success: false, error: 'Route not found' }, 404);
+    if (!isSuperAdmin && jwtUser?.operatorId && route.operator_id !== jwtUser.operatorId) {
+      return c.json({ success: false, error: 'Forbidden' }, 403);
+    }
+
+    const fareMatrix = { standard, window: win, vip, front, ...(time_multipliers ? { time_multipliers } : {}) };
+    await db.prepare(`UPDATE routes SET fare_matrix = ? WHERE id = ?`).bind(JSON.stringify(fareMatrix), id).run();
+    return c.json({ success: true, data: { route_id: id, fare_matrix: fareMatrix } });
+  } catch {
+    return c.json({ success: false, error: 'Failed to update fare matrix' }, 500);
+  }
+});
+
+// ============================================================
 // VEHICLES
 // ============================================================
 
@@ -274,6 +316,60 @@ operatorManagementRouter.patch('/vehicles/:id', requireRole(['SUPER_ADMIN', 'TEN
     return c.json({ success: true, data: { id, updated_at: now } });
   } catch {
     return c.json({ success: false, error: 'Failed to update vehicle' }, 500);
+  }
+});
+
+// ============================================================
+// P08-T1: PUT /vehicles/:id/template — save seat layout template (TENANT_ADMIN+)
+// ============================================================
+operatorManagementRouter.put('/vehicles/:id/template', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+  const id = c.req.param('id');
+  const body = await c.req.json() as Record<string, unknown>;
+  const db = c.env.DB;
+  const jwtUser = c.get('user');
+  const isSuperAdmin = jwtUser?.role === 'SUPER_ADMIN';
+
+  const { rows, columns, aisle_after_column, seats } = body as {
+    rows: number; columns: number; aisle_after_column?: number;
+    seats: Array<{ number: string; row: number; column: number; class: string }>;
+  };
+
+  const VALID_SEAT_CLASSES = ['standard', 'window', 'vip', 'front'];
+
+  if (!Number.isInteger(rows) || rows <= 0) {
+    return c.json({ success: false, error: 'rows must be a positive integer' }, 400);
+  }
+  if (!Number.isInteger(columns) || columns <= 0) {
+    return c.json({ success: false, error: 'columns must be a positive integer' }, 400);
+  }
+  if (!Array.isArray(seats) || seats.length === 0) {
+    return c.json({ success: false, error: 'seats must be a non-empty array' }, 400);
+  }
+
+  const seatNumbers = seats.map(s => s.number);
+  if (new Set(seatNumbers).size !== seatNumbers.length) {
+    return c.json({ success: false, error: 'Duplicate seat numbers found in template' }, 400);
+  }
+  for (const seat of seats) {
+    if (!VALID_SEAT_CLASSES.includes(seat.class)) {
+      return c.json({ success: false, error: `seat class must be one of: ${VALID_SEAT_CLASSES.join(', ')}` }, 400);
+    }
+  }
+
+  try {
+    const vehicle = await db.prepare(
+      `SELECT id, operator_id FROM vehicles WHERE id = ? AND deleted_at IS NULL`
+    ).bind(id).first<{ id: string; operator_id: string }>();
+    if (!vehicle) return c.json({ success: false, error: 'Vehicle not found' }, 404);
+    if (!isSuperAdmin && jwtUser?.operatorId && vehicle.operator_id !== jwtUser.operatorId) {
+      return c.json({ success: false, error: 'Forbidden' }, 403);
+    }
+
+    const template = { rows, columns, aisle_after_column: aisle_after_column ?? null, seats };
+    await db.prepare(`UPDATE vehicles SET seat_template = ? WHERE id = ?`).bind(JSON.stringify(template), id).run();
+    return c.json({ success: true, data: { vehicle_id: id, template } });
+  } catch {
+    return c.json({ success: false, error: 'Failed to save seat template' }, 500);
   }
 });
 

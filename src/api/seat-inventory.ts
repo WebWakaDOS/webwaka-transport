@@ -75,12 +75,35 @@ seatInventoryRouter.post('/trips', async (c) => {
   const now = Date.now();
 
   try {
-    const seatStmt = db.prepare(
-      `INSERT INTO seats (id, trip_id, seat_number, status, version, created_at, updated_at) VALUES (?, ?, ?, 'available', 0, ?, ?)`
-    );
-    const seatInserts = Array.from({ length: total_seats }, (_, i) =>
-      seatStmt.bind(`${id}_s${i + 1}`, id, String(i + 1).padStart(2, '0'), now, now)
-    );
+    // P08-T1: Fetch vehicle's seat_template to use for seat generation
+    const vehicle = await db.prepare(
+      `SELECT total_seats, seat_template FROM vehicles WHERE id = ? AND deleted_at IS NULL`
+    ).bind(vehicle_id).first<{ total_seats: number; seat_template: string | null }>();
+
+    let seatInserts: ReturnType<typeof db.prepare>[];
+    let actualSeatCount = total_seats;
+
+    if (vehicle?.seat_template) {
+      // Template-based: generate seats from the vehicle's layout definition
+      type TemplateSeat = { number: string; row: number; column: number; class: string };
+      const template = JSON.parse(vehicle.seat_template) as { seats: TemplateSeat[] };
+      actualSeatCount = template.seats.length;
+      seatInserts = template.seats.map(s =>
+        db.prepare(
+          `INSERT INTO seats (id, trip_id, seat_number, seat_class, status, version, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'available', 0, ?, ?)`
+        ).bind(`${id}_s${s.number}`, id, s.number, s.class, now, now)
+      );
+    } else {
+      // Fallback: sequential integer seats, all standard class
+      const seatStmt = db.prepare(
+        `INSERT INTO seats (id, trip_id, seat_number, seat_class, status, version, created_at, updated_at)
+         VALUES (?, ?, ?, 'standard', 'available', 0, ?, ?)`
+      );
+      seatInserts = Array.from({ length: total_seats }, (_, i) =>
+        seatStmt.bind(`${id}_s${i + 1}`, id, String(i + 1).padStart(2, '0'), now, now)
+      );
+    }
 
     // Single atomic batch: trip row + all seat rows together
     await db.batch([
@@ -91,7 +114,7 @@ seatInventoryRouter.post('/trips', async (c) => {
       ...seatInserts,
     ]);
 
-    return c.json({ success: true, data: { id, operator_id, route_id, total_seats, state: 'scheduled' } }, 201);
+    return c.json({ success: true, data: { id, operator_id, route_id, total_seats: actualSeatCount, state: 'scheduled' } }, 201);
   } catch {
     return c.json({ success: false, error: 'Failed to create trip' }, 500);
   }
@@ -106,9 +129,12 @@ seatInventoryRouter.get('/trips/:id/availability', async (c) => {
   const now = Date.now();
 
   try {
+    // P08-T1: Also fetch vehicle's seat_template for layout rendering
     const trip = await db.prepare(
-      `SELECT id FROM trips WHERE id = ? AND deleted_at IS NULL`
-    ).bind(tripId).first<{ id: string }>();
+      `SELECT t.id, v.seat_template FROM trips t
+       LEFT JOIN vehicles v ON t.vehicle_id = v.id AND v.deleted_at IS NULL
+       WHERE t.id = ? AND t.deleted_at IS NULL`
+    ).bind(tripId).first<{ id: string; seat_template: string | null }>();
     if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
 
     await db.prepare(
@@ -125,6 +151,9 @@ seatInventoryRouter.get('/trips/:id/availability', async (c) => {
       return acc;
     }, {});
 
+    // Parse seat_layout JSON (may be null for legacy trips)
+    const seat_layout = trip.seat_template ? JSON.parse(trip.seat_template) : null;
+
     return c.json({
       success: true,
       data: {
@@ -134,7 +163,8 @@ seatInventoryRouter.get('/trips/:id/availability', async (c) => {
         reserved: counts['reserved'] ?? 0,
         confirmed: counts['confirmed'] ?? 0,
         blocked: counts['blocked'] ?? 0,
-        seats: seats.results,
+        seat_layout,
+        seats: seats.results, // each seat includes seat_class
       },
     });
   } catch {

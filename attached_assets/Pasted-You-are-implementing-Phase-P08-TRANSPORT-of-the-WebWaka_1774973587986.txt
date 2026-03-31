@@ -1,0 +1,122 @@
+You are implementing Phase P08-TRANSPORT of the WebWaka platform.
+Target repo: webwaka-transport
+
+This phase builds the revenue features: seat templates, class-based pricing, automated refunds, waiting list, and group bookings. Read webwaka-implementation-plan.md for full context.
+
+=== TASK P08-T1: Vehicle Seat Configuration Templates ===
+File: src/api/operator-management.ts
+File: src/api/seat-inventory.ts
+
+1. Add PUT /api/operator/vehicles/:id/template (TENANT_ADMIN+):
+- Body is a JSON object with shape:
+{ rows: number, columns: number, aisle_after_column: number, seats: [{ number: string, row: number, column: number, class: 'standard'|'window'|'vip'|'front' }] }
+- Validate: all seat numbers unique, class values in allowed set, seat count = rows * columns (minus any intentionally excluded positions)
+- UPDATE vehicles SET seat_template = ? WHERE id = ? AND operator_id = ?
+- Return 200 with the template
+
+2. In POST /api/seat-inventory/trips (trip creation):
+- After determining the vehicle, fetch vehicle.seat_template
+- If seat_template is present: parse it and generate seats from the template using the template's seat definitions (number, class from template)
+- If no seat_template: fall back to the existing sequential integer seat generation with class = 'standard'
+- The seat_class column already exists on seats
+
+3. Extend GET /api/seat-inventory/trips/:id/availability response to include:
+- seat_layout: the vehicle's seat_template object (for frontend visual rendering)
+- Each seat in the seats array includes seat_class
+
+=== TASK P08-T2: Seat Class Pricing ===
+File: src/api/operator-management.ts
+File: src/api/booking-portal.ts
+
+1. Add PUT /api/operator/routes/:id/fare-matrix (TENANT_ADMIN+):
+- Body: { standard: number (multiplier), window: number, vip: number, front: number, time_multipliers?: { peak_hours: number[], peak_multiplier: number, peak_days: number[], peak_day_multiplier: number } }
+- All multipliers must be >= 1.0 and <= 5.0
+- UPDATE routes SET fare_matrix = ? WHERE id = ? AND operator_id = ?
+- Return 200
+
+2. In GET /api/booking/trips/search, for each trip:
+- Load the route's fare_matrix
+- Compute effective_fare_by_class: { standard: base_fare * class_mult, window: ..., vip: ..., front: ... }
+- Apply time_multipliers: check if current query time (or departure time?) is in peak_hours / peak_days
+- Return effective_fare_by_class in the trip search result
+- Also return the lowest available fare as effective_fare (for sorting by cheapest)
+
+3. In POST /api/booking/bookings:
+- Validate total_amount_kobo against the computed fare for the selected seats and their classes
+- Allow ±2% tolerance for rounding
+- If outside tolerance: return 422 { error: 'fare_mismatch', expected_kobo: N, submitted_kobo: N }
+
+=== TASK P08-T3: Cancellation Policy with Automated Refund ===
+File: src/api/booking-portal.ts
+File: (create if not exists) src/lib/payments.ts
+
+1. Add initiatePaystackRefund(paymentReference: string, amountKobo: number, env: Env): Promise<string> to payments.ts:
+- POST https://api.paystack.co/refund with Authorization: Bearer {PAYSTACK_SECRET_KEY}
+- Body: { transaction: paymentReference, amount: amountKobo } (amount is optional if full refund)
+- Return refund reference string
+- Throw on non-200 response
+
+2. In PATCH /api/booking/bookings/:id/cancel:
+- Fetch the booking with trip departure_time
+- Get operator cancellation policy from operator config
+- Compute hours_until_departure = (departure_time - Date.now()) / 3_600_000
+- Determine refund_amount_kobo:
+* hours_until_departure > free_before_hours: refund = total_amount_kobo (full)
+* hours_until_departure > half_refund_before_hours: refund = Math.floor(total_amount_kobo / 2) (half)
+* else: refund = 0 (none)
+- Release seats (existing logic)
+- Set booking.status = 'cancelled', cancelled_at = now
+- If refund_amount_kobo > 0 AND payment_status = 'completed' AND payment_method IN ('paystack', 'flutterwave'):
+* Call initiatePaystackRefund(booking.payment_reference, refund_amount_kobo, env)
+* Store refund_reference and refund_amount_kobo on the booking
+* Publish booking:REFUNDED event
+- If payment was cash: set manual_refund_required = 1 on booking
+- Return 200 with { cancelled: true, refund_amount_kobo, refund_reference, manual_refund_required }
+
+3. Add refund_reference TEXT, refund_amount_kobo INTEGER, manual_refund_required INTEGER columns to bookings (migration 003).
+
+=== TASK P08-T4: Waiting List with Auto-Assignment ===
+File: src/api/booking-portal.ts
+File: src/lib/sweepers.ts
+
+1. Add POST /api/booking/trips/:id/waitlist (CUSTOMER role, authenticated):
+- Body: { seat_class: 'standard'|'window'|'vip'|'front' }
+- Check trip exists and has no available seats of requested class: SELECT COUNT(*) FROM seats WHERE trip_id = ? AND seat_class = ? AND status = 'available'
+- If seats available: return 400 { error: 'seats_available', message: 'Seats are available — book now!' }
+- Check customer not already on waitlist for this trip
+- Compute position: SELECT COALESCE(MAX(position), 0) + 1 FROM waiting_list WHERE trip_id = ? AND deleted_at IS NULL
+- INSERT into waiting_list with expires_at = Date.now() + 7*24*3600*1000 (waitlist expires in 7 days)
+- Return { position, trip_id, seat_class, message: 'You are #N on the waitlist.' }
+
+2. Add GET /api/booking/waitlist (CUSTOMER role) — returns active (non-deleted, non-expired) waitlist entries for the customer.
+
+3. Add DELETE /api/booking/trips/:id/waitlist (CUSTOMER role) — soft-deletes the customer's waitlist entry for the trip.
+
+4. In sweepExpiredReservations() and the cancel endpoint, after releasing seats, add:
+- Check waiting_list for this trip_id ordered by position ASC, limit 1, where notified_at IS NULL
+- If found: send SMS: "WebWaka: A {seat_class} seat just opened on your waitlisted trip {route} on {date}! You have 10 minutes to book: https://webwaka.ng/booking?trip={tripId}&class={seat_class}&priority=waitlist"
+- UPDATE waiting_list SET notified_at = ? WHERE id = ?
+
+=== TASK P08-T5: Group Booking Workflow ===
+File: src/api/agent-sales.ts
+Frontend: agent POS group booking mode
+
+1. Add POST /api/agent-sales/group-bookings (AGENT role+):
+- Body: { trip_id, seat_count: number, group_name: string, leader_name: string, leader_phone: string, seat_class: 'standard'|'vip', payment_method: 'cash'|'paystack'|'bank_transfer' }
+- Validate: seat_count ∈ [2, 50]. group_name non-empty. leader_phone valid Nigerian format.
+- Find available seats: SELECT id, seat_number FROM seats WHERE trip_id = ? AND seat_class = ? AND status = 'available' ORDER BY seat_number ASC LIMIT ?
+- If available count < seat_count: return 422 { error: 'insufficient_seats', available: N, requested: seat_count }
+- Generate group_booking_id: nanoid('grp', 16)
+- Use the reserve-batch endpoint logic (same atomic pattern from P02-T2) to hold all seats
+- Create one bookings record: passenger_names = Array(seat_count).fill(group_name + ' (Group)'), seat_ids = all reserved seat IDs, group_booking_id
+- Create one sales_transactions record for the total
+- Create one receipts record
+- Return { group_booking_id, booking_id, seat_numbers, total_amount_kobo, receipt_id }
+
+2. Add GET /api/agent-sales/group-bookings/:id — returns group booking detail.
+
+3. Frontend: add "Group Booking" tab in agent POS. Form with: trip selector, passenger count slider (2-50), group name, leader contact, seat class, payment method. After submission, show a combined receipt listing all seat numbers.
+
+=== DONE ===
+Run tsc --noEmit. Test fare matrix roundtrip. Test cancellation refund with a completed Paystack booking. Test group booking atomic reservation.
+```
