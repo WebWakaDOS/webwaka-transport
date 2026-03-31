@@ -1,0 +1,48 @@
+You are the QA agent for Phase P09-TRANSPORT of the WebWaka platform.
+Target repo: webwaka-transport
+
+Deeply verify P09-TRANSPORT (Fleet and Compliance). Fix every issue. Do not declare verified until all checks pass.
+
+=== VERIFICATION CHECKLIST ===
+
+--- P09-T1: Vehicle Maintenance ---
+1. Confirm POST /api/operator/vehicles/:id/maintenance validates service_date_ms is a positive integer and service_type is non-empty.
+2. Confirm it inserts into vehicle_maintenance_records.
+3. Confirm an immediate vehicle.maintenance_due_soon event is published if next_service_due_ms < now + 7 days.
+4. Confirm GET /api/operator/vehicles/:id/maintenance returns records ordered by service_date DESC.
+5. Confirm POST /api/operator/vehicles/:id/documents validates doc_type against the allowed set.
+6. Confirm GET /api/operator/vehicles/:id/documents returns documents with computed expiry_status: 'valid', 'expiring_soon' (< 30 days), or 'expired'.
+7. Confirm sweepVehicleMaintenanceDue is defined in sweepers.ts and wired to the daily cron in worker.ts.
+8. Confirm sweepVehicleDocumentExpiry is defined and wired to the daily cron.
+9. CRITICAL: Confirm that when assigning a vehicle to a trip, the system checks for expired roadworthiness certificate. Test: a vehicle with an expired doc should return 422 when assigned. Confirm the check is actually executed in the assignment code path.
+10. Check: the tenant scope is enforced on all vehicle maintenance endpoints — an operator cannot read another operator's maintenance records.
+
+--- P09-T2: Driver Documents ---
+1. Confirm POST /api/operator/drivers/:id/documents validates doc_type and expires_at_ms.
+2. Confirm GET /api/operator/drivers/:id/documents returns documents with expiry_status.
+3. Confirm sweepDriverDocumentExpiry is defined and wired to the daily cron.
+4. CRITICAL: Confirm that driver assignment to a trip checks for expired drivers_license. A driver with an expired license must return 422. Trace this check in the code.
+5. Check: does the expired document check apply to ALL document types, or only drivers_license? Per the plan, only drivers_license should block assignment. Confirm this is the behavior.
+
+--- P09-T3: Notification Center ---
+1. Confirm GET /api/operator/notifications returns events filtered by tenant_id and the correct actionable event types.
+2. Confirm the query filters to events from the last 7 days only.
+3. Confirm each event has a read_at field based on the notification_reads table.
+4. Confirm unread_count is computed correctly (events without a read_at entry for the current user).
+5. Confirm POST /api/operator/notifications/:eventId/read inserts into notification_reads and returns 200.
+6. Confirm the notification_reads table exists (created in migration 003).
+7. Frontend: confirm a notification badge is visible in the operator dashboard header.
+8. Frontend: confirm the badge count reflects unread notifications.
+9. Frontend: confirm SOS notifications (trip:SOS_ACTIVATED events) are displayed as a persistent red banner that cannot be dismissed.
+10. Frontend: confirm the notification panel auto-refreshes (polling or on-demand). Check that the polling does not fire more than once every 30 seconds (no infinite loop or aggressive polling).
+11. Check: the notifications endpoint requires TENANT_ADMIN+ role. A CUSTOMER or AGENT should receive 403. Confirm.
+
+--- FINAL CHECKS ---
+1. Run tsc --noEmit — zero errors.
+2. Confirm all three sweepers (sweepVehicleMaintenanceDue, sweepVehicleDocumentExpiry, sweepDriverDocumentExpiry) appear in the daily cron handler in worker.ts.
+3. Run migration 003 locally — no SQL errors.
+4. Start dev server. Open the operator dashboard. Confirm the notification badge appears (may show 0 if no events — it should not crash).
+5. Check that all compliance endpoints enforce tenant scoping (an operator cannot view another operator's vehicle or driver documents).
+
+Report every issue found and every fix applied.
+```

@@ -1851,6 +1851,17 @@ operatorManagementRouter.post('/vehicles/:id/maintenance', requireRole(['SUPER_A
     next_service_due_ms?: number; notes?: string;
   };
 
+  // T1.1: Validate types
+  if (typeof service_type !== 'string' || service_type.trim() === '') {
+    return c.json({ success: false, error: 'service_type must be a non-empty string' }, 400);
+  }
+  if (typeof service_date_ms !== 'number' || !Number.isInteger(service_date_ms) || service_date_ms <= 0) {
+    return c.json({ success: false, error: 'service_date_ms must be a positive integer (unix ms)' }, 400);
+  }
+  if (next_service_due_ms !== undefined && (typeof next_service_due_ms !== 'number' || !Number.isInteger(next_service_due_ms) || next_service_due_ms <= 0)) {
+    return c.json({ success: false, error: 'next_service_due_ms must be a positive integer (unix ms)' }, 400);
+  }
+
   const db = c.env.DB;
   const now = Date.now();
 
@@ -1860,6 +1871,10 @@ operatorManagementRouter.post('/vehicles/:id/maintenance', requireRole(['SUPER_A
   if (!vehicle) return c.json({ success: false, error: 'Vehicle not found' }, 404);
 
   const user = c.get('user');
+  // T1.10: Tenant ownership guard
+  if (user?.role !== 'SUPER_ADMIN' && user?.operatorId && vehicle.operator_id !== user.operatorId) {
+    return c.json({ success: false, error: 'Forbidden' }, 403);
+  }
   const id = genId('mnt');
   await db.prepare(
     `INSERT INTO vehicle_maintenance_records (id, vehicle_id, operator_id, service_type, service_date, next_service_due, notes, created_by, created_at)
@@ -1892,7 +1907,17 @@ operatorManagementRouter.post('/vehicles/:id/maintenance', requireRole(['SUPER_A
 operatorManagementRouter.get('/vehicles/:id/maintenance', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
   const vehicleId = c.req.param('id');
   const db = c.env.DB;
+  const user = c.get('user');
   try {
+    // T1.10: Tenant ownership guard — verify vehicle belongs to authenticated operator
+    const vehicle = await db.prepare(
+      `SELECT id, operator_id FROM vehicles WHERE id = ? AND deleted_at IS NULL`
+    ).bind(vehicleId).first<{ id: string; operator_id: string }>();
+    if (!vehicle) return c.json({ success: false, error: 'Vehicle not found' }, 404);
+    if (user?.role !== 'SUPER_ADMIN' && user?.operatorId && vehicle.operator_id !== user.operatorId) {
+      return c.json({ success: false, error: 'Forbidden' }, 403);
+    }
+
     const records = await db.prepare(
       `SELECT * FROM vehicle_maintenance_records WHERE vehicle_id = ? ORDER BY service_date DESC LIMIT 20`
     ).bind(vehicleId).all();
@@ -1921,14 +1946,22 @@ operatorManagementRouter.post('/vehicles/:id/documents', requireRole(['SUPER_ADM
   if (!VALID_DOC_TYPES.includes(doc_type)) {
     return c.json({ success: false, error: `doc_type must be one of: ${VALID_DOC_TYPES.join(', ')}` }, 400);
   }
+  if (typeof expires_at_ms !== 'number' || !Number.isInteger(expires_at_ms) || expires_at_ms <= 0) {
+    return c.json({ success: false, error: 'expires_at_ms must be a positive integer (unix ms)' }, 400);
+  }
 
   const db = c.env.DB;
   const now = Date.now();
+  const user = c.get('user');
 
   const vehicle = await db.prepare(
     `SELECT id, operator_id FROM vehicles WHERE id = ? AND deleted_at IS NULL`
   ).bind(vehicleId).first<{ id: string; operator_id: string }>();
   if (!vehicle) return c.json({ success: false, error: 'Vehicle not found' }, 404);
+  // T1.10: Tenant ownership guard
+  if (user?.role !== 'SUPER_ADMIN' && user?.operatorId && vehicle.operator_id !== user.operatorId) {
+    return c.json({ success: false, error: 'Forbidden' }, 403);
+  }
 
   const id = genId('vdc');
   await db.prepare(
@@ -1948,9 +1981,19 @@ operatorManagementRouter.post('/vehicles/:id/documents', requireRole(['SUPER_ADM
 operatorManagementRouter.get('/vehicles/:id/documents', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
   const vehicleId = c.req.param('id');
   const db = c.env.DB;
+  const user = c.get('user');
   const now = Date.now();
   const soonCutoff = now + 30 * 86_400_000;
   try {
+    // T1.10: Tenant ownership guard
+    const vehicle = await db.prepare(
+      `SELECT id, operator_id FROM vehicles WHERE id = ? AND deleted_at IS NULL`
+    ).bind(vehicleId).first<{ id: string; operator_id: string }>();
+    if (!vehicle) return c.json({ success: false, error: 'Vehicle not found' }, 404);
+    if (user?.role !== 'SUPER_ADMIN' && user?.operatorId && vehicle.operator_id !== user.operatorId) {
+      return c.json({ success: false, error: 'Forbidden' }, 403);
+    }
+
     const rows = await db.prepare(
       `SELECT * FROM vehicle_documents WHERE vehicle_id = ? ORDER BY expires_at ASC`
     ).bind(vehicleId).all<{ id: string; expires_at: number; [k: string]: unknown }>();
@@ -1984,14 +2027,22 @@ operatorManagementRouter.post('/drivers/:id/documents', requireRole(['SUPER_ADMI
   if (!VALID_DRIVER_DOC_TYPES.includes(doc_type)) {
     return c.json({ success: false, error: `doc_type must be one of: ${VALID_DRIVER_DOC_TYPES.join(', ')}` }, 400);
   }
+  if (typeof expires_at_ms !== 'number' || !Number.isInteger(expires_at_ms) || expires_at_ms <= 0) {
+    return c.json({ success: false, error: 'expires_at_ms must be a positive integer (unix ms)' }, 400);
+  }
 
   const db = c.env.DB;
   const now = Date.now();
+  const user = c.get('user');
 
   const driver = await db.prepare(
     `SELECT id, operator_id FROM drivers WHERE id = ? AND deleted_at IS NULL`
   ).bind(driverId).first<{ id: string; operator_id: string }>();
   if (!driver) return c.json({ success: false, error: 'Driver not found' }, 404);
+  // T2.5: Tenant ownership guard
+  if (user?.role !== 'SUPER_ADMIN' && user?.operatorId && driver.operator_id !== user.operatorId) {
+    return c.json({ success: false, error: 'Forbidden' }, 403);
+  }
 
   const id = genId('ddc');
   await db.prepare(
@@ -2011,9 +2062,19 @@ operatorManagementRouter.post('/drivers/:id/documents', requireRole(['SUPER_ADMI
 operatorManagementRouter.get('/drivers/:id/documents', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
   const driverId = c.req.param('id');
   const db = c.env.DB;
+  const user = c.get('user');
   const now = Date.now();
   const soonCutoff = now + 30 * 86_400_000;
   try {
+    // T2.5: Tenant ownership guard
+    const driver = await db.prepare(
+      `SELECT id, operator_id FROM drivers WHERE id = ? AND deleted_at IS NULL`
+    ).bind(driverId).first<{ id: string; operator_id: string }>();
+    if (!driver) return c.json({ success: false, error: 'Driver not found' }, 404);
+    if (user?.role !== 'SUPER_ADMIN' && user?.operatorId && driver.operator_id !== user.operatorId) {
+      return c.json({ success: false, error: 'Forbidden' }, 403);
+    }
+
     const rows = await db.prepare(
       `SELECT * FROM driver_documents WHERE driver_id = ? ORDER BY expires_at ASC`
     ).bind(driverId).all<{ id: string; expires_at: number; [k: string]: unknown }>();
