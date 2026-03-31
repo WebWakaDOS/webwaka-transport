@@ -511,7 +511,7 @@ function StepFirstTrip({ onComplete, addedData }: { onComplete: () => void; adde
   const [depTime, setDepTime] = useState('08:00');
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
-  const [done, setDone] = useState(false);
+  const [createdTrip, setCreatedTrip] = useState<{ routeLabel: string; vehicleLabel: string; departure: string } | null>(null);
 
   const createTrip = async () => {
     if (!routeId || !vehicleId) { setError('Route and vehicle are required'); return; }
@@ -524,20 +524,28 @@ function StepFirstTrip({ onComplete, addedData }: { onComplete: () => void; adde
         departure_time: departureMs,
         ...(driverId ? { driver_id: driverId } : {}),
       });
-      setDone(true);
+      const routeLabel = addedData.routeIds.find(r => r.routeId === routeId)?.label ?? routeId;
+      const vehicleLabel = addedData.vehicleIds.find(v => v.id === vehicleId)?.label ?? vehicleId;
+      const departure = new Date(`${depDate}T${depTime}:00`).toLocaleString('en-NG', {
+        dateStyle: 'medium', timeStyle: 'short', timeZone: 'Africa/Lagos',
+      });
+      setCreatedTrip({ routeLabel, vehicleLabel, departure });
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Failed to create trip');
     } finally { setCreating(false); }
   };
 
-  if (done) {
+  if (createdTrip) {
     return (
       <div style={{ textAlign: 'center', padding: '24px 0' }}>
-        <div style={{ fontSize: 60, marginBottom: 12 }}>🎉</div>
+        <div style={{ fontSize: 56, marginBottom: 12 }}>🎉</div>
         <h3 style={{ margin: '0 0 8px', fontSize: 18, color: '#16a34a' }}>You're all set!</h3>
-        <p style={{ margin: '0 0 24px', fontSize: 13, color: '#64748b' }}>
-          Your first trip has been created. Your fleet is ready to roll across Nigeria!
-        </p>
+        <div style={{ background: '#f0fdf4', border: '1.5px solid #86efac', borderRadius: 12, padding: '14px 16px', margin: '0 0 20px', textAlign: 'left' }}>
+          <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 8, color: '#15803d' }}>First Trip Created</div>
+          <div style={{ fontSize: 13, color: '#166534', marginBottom: 4 }}>Route: {createdTrip.routeLabel}</div>
+          <div style={{ fontSize: 13, color: '#166534', marginBottom: 4 }}>Vehicle: {createdTrip.vehicleLabel}</div>
+          <div style={{ fontSize: 13, color: '#166534' }}>Departure: {createdTrip.departure} (Lagos time)</div>
+        </div>
         <button onClick={onComplete} style={{ ...btnPrimary, background: '#16a34a' }}>
           Go to Dashboard →
         </button>

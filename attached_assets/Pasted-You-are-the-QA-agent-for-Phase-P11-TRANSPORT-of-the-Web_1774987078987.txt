@@ -1,0 +1,55 @@
+You are the QA agent for Phase P11-TRANSPORT of the WebWaka platform.
+Target repo: webwaka-transport
+
+Deeply verify P11-TRANSPORT (Operator Management and Platform Features). Fix every issue. Do not declare verified until all checks pass.
+
+=== VERIFICATION CHECKLIST ===
+
+--- P11-T1: Operator API Keys ---
+1. Confirm POST /api/operator/api-keys requires TENANT_ADMIN role (not SUPERVISOR, not STAFF).
+2. Confirm it generates a raw key in the format waka_live_{randomString}.
+3. CRITICAL: Confirm the raw key is returned ONCE in the response and is NOT stored in the database — only the SHA-256 hex hash is stored. Read the insert statement: it must store key_hash, not the raw key.
+4. Confirm the response includes a warning message telling the user to save the key.
+5. Confirm GET /api/operator/api-keys returns metadata but never returns key_hash in the response (it must be excluded from the SELECT or explicitly deleted from the response object).
+6. Confirm DELETE /api/operator/api-keys/:id sets revoked_at and returns 204 (not a hard delete).
+7. Confirm after revocation, a request using that key returns 401 (the verifyApiKey function checks revoked_at IS NULL).
+8. Confirm tenant scope: an operator can only manage their own API keys (operator_id on the api_keys table must match the authenticated operator).
+9. Confirm API key authentication works: make a request with Authorization: ApiKey waka_live_{validKey} and confirm it authenticates as the correct operator.
+
+--- P11-T2: Onboarding Wizard ---
+1. Confirm the onboarding wizard appears for new operators (those with no routes AND no vehicles).
+2. Confirm it does NOT appear for existing operators who already have routes and vehicles.
+3. Confirm all 7 steps are implemented. List each step and confirm:
+- Step 1 saves to the operator profile (PATCH or equivalent endpoint)
+- Step 2 calls POST /api/operator/vehicles
+- Step 3 calls POST /api/operator/routes
+- Step 4 is optional (can be skipped)
+- Step 5 calls POST /api/operator/drivers
+- Step 6 calls POST /api/operator/agents
+- Step 7 calls POST /api/seat-inventory/trips
+4. Confirm progress is saved to localStorage and an incomplete wizard resumes from the last step on next visit.
+5. Confirm a "Skip for now" button is available on optional steps (at minimum Steps 4, 5, 6) without blocking the wizard from proceeding.
+6. Confirm Step 7's "Create Trip" shows the newly created trip and offers a "Go to Dashboard" link.
+7. Check: what if an API call in a wizard step fails? The error message should be shown to the user, and they should be able to retry without losing their progress on previous steps.
+8. Check: if the user closes the browser mid-wizard, reopening the app shows the wizard at the last completed step.
+
+--- P11-T3: Multi-Stop Route Management ---
+1. Confirm POST /api/operator/routes/:id/stops validates at minimum 2 stops and unique sequence values.
+2. Confirm it deletes existing stops before inserting new ones (idempotent replacement).
+3. Confirm it sets route_stops_enabled=1 on the route.
+4. Confirm GET /api/operator/routes/:id/stops returns stops ordered by sequence.
+5. Confirm GET /api/booking/trips/search supports origin_stop and destination_stop query params.
+6. When both stop params are provided, confirm the segment fare is computed: fare_from_origin[destination_stop] - fare_from_origin[origin_stop]. A passenger booking Lagos → Ilorin on a Lagos→Abuja route should pay the Lagos→Ilorin segment fare, not the full Lagos→Abuja fare.
+7. Confirm POST /api/booking/bookings accepts and stores origin_stop_id and destination_stop_id.
+8. Confirm sequence validation: origin_stop must have a lower sequence number than destination_stop. Booking in reverse (Abuja → Lagos on a Lagos-to-Abuja route) must return 422.
+9. Check: routes without route_stops_enabled=1 should work exactly as before (no regression). Confirm standard single-origin single-destination search still works.
+
+--- FINAL CHECKS ---
+1. Run tsc --noEmit — zero errors.
+2. Start the dev server. Create a new API key via POST. Confirm it appears in GET list (without the hash). Use the key in a request header and confirm it authenticates.
+3. Clear localStorage and log in as a new operator with no routes/vehicles. Confirm the onboarding wizard appears.
+4. Create a route with 3 stops. Search for trips using origin_stop and destination_stop. Confirm the partial fare is returned.
+5. Grep for any place where raw API key values might be logged (console.log(key) etc.). Remove any such logs — API keys must never appear in logs.
+
+Report every issue found and every fix applied.
+```

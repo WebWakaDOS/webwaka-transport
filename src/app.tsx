@@ -2433,6 +2433,10 @@ function OperatorDashboardModule() {
     if (user?.role !== 'TENANT_ADMIN' || !user?.operator_id) { setWizardChecked(true); return; }
     const wasExited = localStorage.getItem('webwaka_onboarding_exited') === '1';
     if (wasExited) { setWizardChecked(true); return; }
+    // If the wizard was started but not finished (step saved), always resume it
+    const savedStep = localStorage.getItem('webwaka_onboarding_step');
+    if (savedStep) { setShowWizard(true); setWizardChecked(true); return; }
+    // For brand new operators: show wizard when there are no routes AND no vehicles yet
     Promise.all([
       api.getOperatorRoutes().catch(() => [] as Route[]),
       api.getVehicles().catch(() => [] as Vehicle[]),

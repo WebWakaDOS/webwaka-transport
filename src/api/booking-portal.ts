@@ -323,7 +323,7 @@ bookingPortalRouter.post('/bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN'
           ).bind(destination_stop_id, tripRoute?.route_id ?? '').first<{ id: string; sequence: number }>();
           if (!destStop) return c.json({ success: false, error: 'destination_stop_id not found on this route' }, 400);
           if (destStop.sequence <= origStop.sequence) {
-            return c.json({ success: false, error: 'destination stop must come after origin stop' }, 400);
+            return c.json({ success: false, error: 'destination stop must come after origin stop (reverse routing not permitted)' }, 422);
           }
           validatedDestStopId = destStop.id;
         }
