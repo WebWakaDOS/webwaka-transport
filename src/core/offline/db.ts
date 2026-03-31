@@ -443,23 +443,30 @@ export async function cacheAgentSession(session: Omit<AgentSession, 'id'>): Prom
 export async function getAgentSession(
   agent_id: string,
   opts: { offline?: boolean } = {}
-): Promise<AgentSession | undefined> {
+): Promise<(AgentSession & { gracePeriod: boolean }) | undefined> {
   const now = Date.now();
   const session = await getOfflineDB().agent_sessions
     .where('agent_id').equals(agent_id).first();
   if (!session) return undefined;
 
-  // Online: strict JWT expiry
-  // Offline: grant up to OFFLINE_GRACE_MS beyond expiry so agents can keep working
-  const effectiveExpiry = opts.offline
-    ? session.expires_at + OFFLINE_GRACE_MS
-    : session.expires_at;
+  const isExpired = session.expires_at < now;
 
-  if (effectiveExpiry < now) {
-    if (session.id !== undefined) await getOfflineDB().agent_sessions.delete(session.id);
-    return undefined;
+  if (opts.offline) {
+    // Offline: grant up to OFFLINE_GRACE_MS beyond JWT expiry
+    if (session.expires_at + OFFLINE_GRACE_MS < now) {
+      if (session.id !== undefined) await getOfflineDB().agent_sessions.delete(session.id);
+      return undefined;
+    }
+    // gracePeriod: true when JWT has expired but we are within the grace window
+    return { ...session, gracePeriod: isExpired };
+  } else {
+    // Online: strict JWT expiry
+    if (isExpired) {
+      if (session.id !== undefined) await getOfflineDB().agent_sessions.delete(session.id);
+      return undefined;
+    }
+    return { ...session, gracePeriod: false };
   }
-  return session;
 }
 
 /** Return all non-expired agent sessions — used by the multi-agent switcher */

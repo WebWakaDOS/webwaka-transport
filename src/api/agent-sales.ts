@@ -79,11 +79,12 @@ agentSalesRouter.post('/transactions', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN
 
   const {
     agent_id, trip_id, seat_ids, passenger_names, total_amount, payment_method,
-    passenger_id_type, passenger_id_number,
+    passenger_id_type, passenger_id_number, park_id,
   } = body as {
     agent_id: string; trip_id: string; seat_ids: string[]; passenger_names: string[];
     total_amount: number; payment_method: string;
     passenger_id_type?: string | null; passenger_id_number?: string | null;
+    park_id?: string | null;
   };
 
   if (!Number.isInteger(total_amount) || total_amount <= 0) {
@@ -91,6 +92,14 @@ agentSalesRouter.post('/transactions', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN
   }
   if (!Array.isArray(seat_ids) || seat_ids.length === 0) {
     return c.json({ success: false, error: 'seat_ids must be a non-empty array' }, 400);
+  }
+
+  // T5-7: Both passenger_id fields must be provided together or neither
+  if (passenger_id_number && !passenger_id_type) {
+    return c.json({ success: false, error: 'passenger_id_type is required when passenger_id_number is provided' }, 400);
+  }
+  if (passenger_id_type && !passenger_id_number) {
+    return c.json({ success: false, error: 'passenger_id_number is required when passenger_id_type is provided' }, 400);
   }
 
   // Validate passenger ID type if provided
@@ -144,9 +153,9 @@ agentSalesRouter.post('/transactions', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN
   try {
     await db.batch([
       db.prepare(
-        `INSERT INTO sales_transactions (id, agent_id, trip_id, seat_ids, passenger_names, total_amount, payment_method, payment_status, sync_status, receipt_id, passenger_id_type, passenger_id_hash, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', 'synced', ?, ?, ?, ?)`
-      ).bind(id, agent_id, trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, payment_method, receiptId, passenger_id_type ?? null, passenger_id_hash, now),
+        `INSERT INTO sales_transactions (id, agent_id, trip_id, seat_ids, passenger_names, total_amount, payment_method, payment_status, sync_status, receipt_id, passenger_id_type, passenger_id_hash, park_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', 'synced', ?, ?, ?, ?, ?)`
+      ).bind(id, agent_id, trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, payment_method, receiptId, passenger_id_type ?? null, passenger_id_hash, park_id ?? null, now),
       db.prepare(
         `INSERT INTO receipts (id, transaction_id, agent_id, trip_id, passenger_names, seat_numbers, total_amount, payment_method, qr_code, issued_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -186,11 +195,14 @@ agentSalesRouter.post('/transactions', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN
 // ============================================================
 agentSalesRouter.get('/transactions', async (c) => {
   const q = c.req.query();
-  const { agent_id, trip_id, sync_status } = q;
   const { limit, offset } = parsePagination(q);
   const db = c.env.DB;
 
-  let query = `SELECT st.* FROM sales_transactions st
+  // T5-6: Explicitly exclude passenger_id_hash — never return it in API responses
+  let query = `SELECT st.id, st.agent_id, st.trip_id, st.seat_ids, st.passenger_names,
+    st.total_amount, st.payment_method, st.payment_status, st.sync_status, st.receipt_id,
+    st.passenger_id_type, st.park_id, st.created_at, st.synced_at, st.deleted_at
+    FROM sales_transactions st
     JOIN agents a ON st.agent_id = a.id
     WHERE st.deleted_at IS NULL`;
   const params: unknown[] = [];
@@ -199,9 +211,11 @@ agentSalesRouter.get('/transactions', async (c) => {
   query = scoped.query;
   params.splice(0, params.length, ...scoped.params);
 
+  const { agent_id, trip_id, sync_status, park_id } = q;
   if (agent_id) { query += ` AND st.agent_id = ?`; params.push(agent_id); }
   if (trip_id) { query += ` AND st.trip_id = ?`; params.push(trip_id); }
   if (sync_status) { query += ` AND st.sync_status = ?`; params.push(sync_status); }
+  if (park_id) { query += ` AND st.park_id = ?`; params.push(park_id); }
   query += ` ORDER BY st.created_at DESC LIMIT ? OFFSET ?`;
   params.push(limit, offset);
 
@@ -426,8 +440,18 @@ agentSalesRouter.post('/parks/:id/agents', requireRole(['SUPER_ADMIN', 'TENANT_A
   const db = c.env.DB;
 
   try {
-    const park = await db.prepare(`SELECT id FROM bus_parks WHERE id = ? AND deleted_at IS NULL`).bind(parkId).first<{ id: string }>();
+    // T4-7: Fetch park and agent together to validate cross-operator assignment
+    const [park, agent] = await Promise.all([
+      db.prepare(`SELECT id, operator_id FROM bus_parks WHERE id = ? AND deleted_at IS NULL`).bind(parkId).first<{ id: string; operator_id: string }>(),
+      db.prepare(`SELECT id, operator_id FROM agents WHERE id = ? AND deleted_at IS NULL`).bind(agent_id).first<{ id: string; operator_id: string }>(),
+    ]);
     if (!park) return c.json({ success: false, error: 'Bus park not found' }, 404);
+    if (!agent) return c.json({ success: false, error: 'Agent not found' }, 404);
+
+    // T4-7: Agent and park must belong to the same operator
+    if (agent.operator_id !== park.operator_id) {
+      return c.json({ success: false, error: 'Agent and bus park must belong to the same operator' }, 403);
+    }
 
     await db.prepare(
       `INSERT OR IGNORE INTO agent_bus_parks (agent_id, park_id) VALUES (?, ?)`
@@ -500,7 +524,10 @@ agentSalesRouter.post('/reconciliation', requireRole(['SUPER_ADMIN', 'TENANT_ADM
   ).bind(agent_id, dateStart, dateEnd).first<{ expected: number }>();
 
   const expected_kobo = expectedRow?.expected ?? 0;
-  const discrepancy_kobo = submitted_kobo - expected_kobo;
+  // discrepancy = expected - submitted:
+  //   positive  → agent submitted LESS cash than expected (shortage)
+  //   negative  → agent submitted MORE cash than expected (overage)
+  const discrepancy_kobo = expected_kobo - submitted_kobo;
 
   const id = genId('rec');
   try {
@@ -509,6 +536,17 @@ agentSalesRouter.post('/reconciliation', requireRole(['SUPER_ADMIN', 'TENANT_ADM
        (id, agent_id, operator_id, period_date, expected_kobo, submitted_kobo, discrepancy_kobo, status, notes, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
     ).bind(id, agent_id, operator_id, period_date, expected_kobo, submitted_kobo, discrepancy_kobo, notes ?? null, now).run();
+
+    // T1-6: Publish reconciliation event (non-fatal)
+    try {
+      await publishEvent(db, {
+        event_type: 'agent.reconciliation.filed',
+        aggregate_id: id,
+        aggregate_type: 'float_reconciliation',
+        payload: { reconciliation_id: id, agent_id, operator_id, period_date, expected_kobo, submitted_kobo, discrepancy_kobo },
+        timestamp: now,
+      });
+    } catch { /* non-fatal */ }
 
     return c.json({
       success: true,
@@ -520,20 +558,34 @@ agentSalesRouter.post('/reconciliation', requireRole(['SUPER_ADMIN', 'TENANT_ADM
 });
 
 // ============================================================
-// P07-T1: GET /reconciliation — list float reconciliations (SUPERVISOR+)
+// P07-T1: GET /reconciliation — list float reconciliations
+// STAFF (agents) see only their own; SUPERVISOR+ see all for operator
 // ============================================================
-agentSalesRouter.get('/reconciliation', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR']), async (c) => {
+agentSalesRouter.get('/reconciliation', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR', 'STAFF']), async (c) => {
   const q = c.req.query();
   const { agent_id, status, period_date } = q;
   const { limit, offset } = parsePagination(q);
   const db = c.env.DB;
   const jwtUser = c.get('user');
   const isSuperAdmin = jwtUser?.role === 'SUPER_ADMIN';
+  const isAgent = jwtUser?.role === 'STAFF';
 
   let query = `SELECT * FROM float_reconciliation WHERE 1=1`;
   const params: unknown[] = [];
+
+  // Tenant scope: non-SUPER_ADMIN scoped to operator
   if (!isSuperAdmin && jwtUser?.operatorId) { query += ` AND operator_id = ?`; params.push(jwtUser.operatorId); }
-  if (agent_id) { query += ` AND agent_id = ?`; params.push(agent_id); }
+
+  // Agent (STAFF) role: force-scope to their own records only
+  if (isAgent) {
+    query += ` AND agent_id = ?`;
+    params.push(jwtUser?.id ?? '');
+  } else if (agent_id) {
+    // Supervisors can filter by a specific agent
+    query += ` AND agent_id = ?`;
+    params.push(agent_id);
+  }
+
   if (status) { query += ` AND status = ?`; params.push(status); }
   if (period_date) { query += ` AND period_date = ?`; params.push(period_date); }
   query += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`;
@@ -559,8 +611,8 @@ agentSalesRouter.patch('/reconciliation/:id', requireRole(['SUPER_ADMIN', 'TENAN
   const body = await c.req.json() as Record<string, unknown>;
   const { status, notes } = body as { status?: string; notes?: string };
 
-  if (!status || !['approved', 'rejected'].includes(status)) {
-    return c.json({ success: false, error: 'status must be approved or rejected' }, 400);
+  if (!status || !['approved', 'disputed'].includes(status)) {
+    return c.json({ success: false, error: 'status must be approved or disputed' }, 400);
   }
 
   const db = c.env.DB;

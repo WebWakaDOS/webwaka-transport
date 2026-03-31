@@ -253,6 +253,8 @@ function AgentPOSModule({ online }: { online: boolean }) {
   const [eodSubmitting, setEodSubmitting] = useState(false);
   const [eodCash, setEodCash] = useState('');
   const [eodNote, setEodNote] = useState('');
+  const [eodTodayStats, setEodTodayStats] = useState<{ today_transactions: number; today_revenue_kobo: number } | null>(null);
+  const [graceMode, setGraceMode] = useState(false);
   const [eodResult, setEodResult] = useState<{
     expected_kobo: number; submitted_kobo: number; discrepancy_kobo: number; status: string;
   } | null>(null);
@@ -279,16 +281,29 @@ function AgentPOSModule({ online }: { online: boolean }) {
       .catch(() => {/* non-fatal */});
   }, [online]);
 
-  // Load cached agent sessions for switcher
+  // Load cached agent sessions for switcher + detect grace mode for current user
   useEffect(() => {
     void (async () => {
       try {
-        const { listAgentSessions } = await import('./core/offline/db');
+        const { listAgentSessions, getAgentSession } = await import('./core/offline/db');
         const sessions = await listAgentSessions();
         setAgentSessions(sessions.map(s => ({ agent_id: s.agent_id, name: s.name, expires_at: s.expires_at })));
+        // T3-3/T3-5: Check if current session is in grace period
+        if (user?.id) {
+          const sess = await getAgentSession(user.id, { offline: !online });
+          setGraceMode(sess?.gracePeriod ?? false);
+        }
       } catch { /* non-fatal */ }
     })();
-  }, []);
+  }, [user?.id, online]);
+
+  // T1-9: Fetch today's transaction stats when EOD panel opens
+  useEffect(() => {
+    if (!eodOpen || !user?.id) return;
+    api.getAgentDashboard(user.id)
+      .then(stats => setEodTodayStats(stats))
+      .catch(() => setEodTodayStats(null));
+  }, [eodOpen, user?.id]);
 
   // Load seat availability when trip changes
   useEffect(() => {
@@ -404,7 +419,11 @@ function AgentPOSModule({ online }: { online: boolean }) {
 
   const handleSwitchAgent = useCallback(() => {
     if (window.confirm('Switch agent? Your pending offline transactions are saved.')) {
-      logout();
+      // T3-2: Flush sync queue first (errors are non-blocking — switch always proceeds)
+      import('./core/offline/sync').then(({ syncEngine }) => {
+        syncEngine.flush().catch(err => console.warn('[session-switch] flush failed:', err));
+      }).catch(err => console.warn('[session-switch] import failed:', err))
+        .finally(() => { logout(); });
     }
   }, [logout]);
 
@@ -462,7 +481,8 @@ function AgentPOSModule({ online }: { online: boolean }) {
                   {
                     label: 'Discrepancy',
                     value: formatKobo(Math.abs(eodResult.discrepancy_kobo)),
-                    color: eodResult.discrepancy_kobo === 0 ? '#16a34a' : eodResult.discrepancy_kobo < 0 ? '#dc2626' : '#d97706',
+                    // positive = shortage (red), negative = overage (orange), zero = balanced (green)
+                    color: eodResult.discrepancy_kobo === 0 ? '#16a34a' : eodResult.discrepancy_kobo > 0 ? '#dc2626' : '#d97706',
                   },
                 ].map(item => (
                   <div key={item.label} style={{ textAlign: 'center', padding: '8px 4px', background: '#fff', borderRadius: 6 }}>
@@ -478,9 +498,9 @@ function AgentPOSModule({ online }: { online: boolean }) {
               }}>
                 {eodResult.discrepancy_kobo === 0
                   ? '✓ Balanced — great work!'
-                  : eodResult.discrepancy_kobo < 0
-                    ? '⚠ Shortage — pending supervisor review'
-                    : '⚠ Overage — pending supervisor review'}
+                  : eodResult.discrepancy_kobo > 0
+                    ? '⚠ Shortage — cash submitted is less than expected'
+                    : '⚠ Overage — cash submitted exceeds expected'}
               </div>
               <button
                 onClick={() => { setEodOpen(false); setEodResult(null); }}
@@ -491,6 +511,19 @@ function AgentPOSModule({ online }: { online: boolean }) {
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {/* T1-9: Today's transaction summary before cash input */}
+              {eodTodayStats && (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 4 }}>
+                  <div style={{ textAlign: 'center', padding: '8px 4px', background: '#fff', borderRadius: 6, border: '1px solid #e2e8f0' }}>
+                    <div style={{ fontSize: 18, fontWeight: 800, color: '#1e40af' }}>{eodTodayStats.today_transactions}</div>
+                    <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>Today's Sales</div>
+                  </div>
+                  <div style={{ textAlign: 'center', padding: '8px 4px', background: '#fff', borderRadius: 6, border: '1px solid #e2e8f0' }}>
+                    <div style={{ fontSize: 13, fontWeight: 800, color: '#16a34a' }}>{formatKobo(eodTodayStats.today_revenue_kobo)}</div>
+                    <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>Expected Cash</div>
+                  </div>
+                </div>
+              )}
               {eodError && (
                 <div style={{ padding: '8px 12px', background: '#fee2e2', borderRadius: 6, color: '#b91c1c', fontSize: 12 }}>
                   {eodError}
@@ -524,6 +557,13 @@ function AgentPOSModule({ online }: { online: boolean }) {
       {!online && (
         <div style={{ padding: '8px 14px', background: '#fef3c7', borderRadius: 8, color: '#92400e', fontSize: 12, marginBottom: 12 }}>
           Offline — sales will be queued and synced when connection is restored.
+        </div>
+      )}
+
+      {/* T3-5: Grace period banner — JWT expired but within 8h offline window */}
+      {graceMode && (
+        <div style={{ padding: '8px 14px', background: '#fef9c3', border: '1px solid #facc15', borderRadius: 8, color: '#854d0e', fontSize: 12, marginBottom: 12 }}>
+          ⚠ Session grace period active — your session has expired but you are allowed to continue working offline for up to 8 hours. Please sync and re-login as soon as you are back online.
         </div>
       )}
 

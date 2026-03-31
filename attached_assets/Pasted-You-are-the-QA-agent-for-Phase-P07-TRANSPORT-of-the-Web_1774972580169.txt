@@ -1,0 +1,66 @@
+You are the QA agent for Phase P07-TRANSPORT of the WebWaka platform.
+Target repo: webwaka-transport
+
+Deeply verify P07-TRANSPORT (Agent Operations). Fix every issue. Do not declare verified until all checks pass.
+
+=== VERIFICATION CHECKLIST ===
+
+--- P07-T1: Float Reconciliation ---
+1. Confirm POST /api/agent-sales/reconciliation validates date format (YYYY-MM-DD) and rejects invalid dates.
+2. Confirm it rejects duplicate filings for the same agent and date (returns 409).
+3. Confirm the expected amount is computed using only cash transactions for that agent on that date (not card or bank transfer).
+4. Confirm discrepancy_kobo = expected_kobo - submitted_kobo (sign matters: negative means agent submitted MORE cash than expected, positive means less).
+5. Confirm the reconciliation record is inserted and returned with the discrepancy.
+6. Confirm agent.reconciliation_filed platform event is published.
+7. Confirm GET /api/agent-sales/reconciliation scopes correctly: AGENT role sees only their own, SUPERVISOR+ sees all for the operator.
+8. Confirm PATCH /api/agent-sales/reconciliation/:id requires SUPERVISOR role and allows setting status to approved or disputed.
+9. Frontend: confirm the "End of Day" button is visible in the agent POS. Confirm it shows today's transaction count and sum. Confirm a cash count input is present. Confirm submitting calls the reconciliation API.
+
+--- P07-T2: Thermal Receipt ---
+1. Confirm the receipt component exists and renders without crashing.
+2. Confirm it renders all required fields: operator name, route, departure time, seat numbers, passenger names, amount in ₦ (using formatKobo from @webwaka/core), payment method, booking reference (last 8 chars uppercased), and a QR code.
+3. Confirm the QR code renders as an image (not a broken image icon). The QR data must be `{bookingId}:{seatIds}`.
+4. Confirm the "Print Receipt" button calls window.print() (or opens a print dialog).
+5. Confirm the "Share via WhatsApp" button constructs a wa.me/?text= link (not a WhatsApp API call).
+6. Open browser dev tools → Elements → and check that @media print styles are applied correctly (inspect the print stylesheet).
+7. Confirm the qrcode package is listed in package.json dependencies.
+8. Confirm the receipt is shown after a successful POS sale (not before, not on a failed sale).
+9. Check: what if passengerNames is an empty array? Receipt should still render without crashing.
+10. Confirm the qr_code column is populated in the receipts table when a transaction is completed (check src/api/agent-sales.ts).
+
+--- P07-T3: Multi-Agent Device Sessions ---
+1. Confirm the agent session switcher UI element exists in the POS header (shows "Agent: {name}" with a clickable control).
+2. Confirm "Switch Agent" triggers syncEngine.flush() first, then clears auth state.
+3. Confirm the Dexie getAgentSession function checks the offline grace period: expired sessions within 8 hours are returned with gracePeriod: true when offline.
+4. Confirm online expired sessions return null (force re-login).
+5. Confirm a yellow banner is shown in the POS when operating in grace mode.
+6. Confirm multiple agents' sessions can be stored in Dexie simultaneously (keyed by agentId, not a single shared record).
+7. Check: if syncEngine.flush() fails during switch, is the switch still allowed? It should be — the switch should proceed even if flush encounters an error (errors are logged, not blocking).
+
+--- P07-T4: Bus Park Management ---
+1. Confirm POST /api/agent-sales/parks exists, requires TENANT_ADMIN role, and inserts into bus_parks.
+2. Confirm GET /api/agent-sales/parks returns parks for the authenticated operator only (tenant scope applied).
+3. Confirm POST /api/agent-sales/parks/:id/agents inserts into agent_bus_parks.
+4. Confirm DELETE /api/agent-sales/parks/:id/agents/:agentId removes from agent_bus_parks.
+5. Confirm park_id filter works on GET /api/agent-sales/transactions.
+6. Confirm park_id filter works on GET /api/operator/trips.
+7. Check: assigning an agent to a park that belongs to a different operator must return 403. Confirm tenant scope is enforced.
+8. Frontend: confirm the agent login flow checks park assignments and either auto-selects or prompts.
+
+--- P07-T5: Passenger ID Capture ---
+1. Confirm POST /api/agent-sales/transactions accepts optional passenger_id_type and passenger_id_number fields.
+2. Confirm the raw passenger_id_number is NEVER stored — only the SHA-256 hash.
+3. Confirm passenger_id_type (un-hashed) IS stored.
+4. Confirm the hash is computed using crypto.subtle.digest (not a JS library).
+5. Confirm GET /api/operator/trips/:id/manifest includes passenger_id_type but NOT passenger_id_hash.
+6. Confirm no API endpoint anywhere returns passenger_id_hash in its response.
+7. Check: what if passenger_id_number is provided but passenger_id_type is not? Should return 400 (both required together or neither). Confirm validation exists.
+8. Check: what if the QR code in the receipt encodes the passenger ID? It must not. Only bookingId:seatIds should be in the QR.
+
+--- FINAL CHECKS ---
+1. Run tsc --noEmit — zero errors.
+2. Start the dev server. Open the agent POS. Confirm no runtime errors.
+3. Create a test sale and confirm the receipt modal appears with a QR code.
+4. Confirm the whatsapp share link is correctly encoded (test with a booking that has special characters in the route name).
+
+Report every issue found and every fix applied.

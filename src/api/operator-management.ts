@@ -296,7 +296,10 @@ operatorManagementRouter.get('/trips', async (c) => {
   query = scoped.query;
   params.splice(0, params.length, ...scoped.params);
 
+  const { park_id } = q;
   if (state) { query += ` AND t.state = ?`; params.push(state); }
+  // T4-6: filter trips by departure park
+  if (park_id) { query += ` AND t.departure_park_id = ?`; params.push(park_id); }
 
   // C-004: driver_id filter — 'me' resolves to the authenticated user's id
   if (driver_id) {

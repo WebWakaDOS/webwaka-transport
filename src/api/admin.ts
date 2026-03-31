@@ -548,6 +548,10 @@ const MIGRATIONS: Migration[] = [
       `ALTER TABLE sales_transactions ADD COLUMN passenger_id_hash TEXT`,
       // P07-T2: QR code string embedded in receipt for thermal printing
       `ALTER TABLE receipts ADD COLUMN qr_code TEXT`,
+      // P07-T4: Bus park the transaction was recorded at (optional)
+      `ALTER TABLE sales_transactions ADD COLUMN park_id TEXT`,
+      // P07-T4: Departure park for a trip (optional — lets trips be filtered by park)
+      `ALTER TABLE trips ADD COLUMN departure_park_id TEXT`,
     ],
   },
 ];

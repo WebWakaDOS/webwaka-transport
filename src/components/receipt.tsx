@@ -5,6 +5,7 @@
  * keep it out of the main bundle.
  */
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { formatKobo } from '@webwaka/core';
 
 export interface ReceiptData {
   receipt_id: string;
@@ -26,10 +27,6 @@ interface ReceiptModalProps {
   receipt: ReceiptData;
   onClose: () => void;
 }
-
-const KOBO = 100;
-const fmt = (kobo: number) =>
-  new Intl.NumberFormat('en-NG', { style: 'currency', currency: 'NGN' }).format(kobo / KOBO);
 
 const fmtDT = (ms: number) =>
   new Date(ms).toLocaleString('en-NG', {
@@ -70,7 +67,7 @@ export default function ReceiptModal({ receipt, onClose }: ReceiptModalProps) {
       `Departure: ${fmtDT(receipt.departure_time)}`,
       `Seats: ${receipt.seat_numbers.join(', ')}`,
       `Passengers: ${receipt.passenger_names.join(', ')}`,
-      `Amount: ${fmt(receipt.total_amount)} (${receipt.payment_method})`,
+      `Amount: ${formatKobo(receipt.total_amount)} (${receipt.payment_method})`,
       `Receipt #: ${receipt.receipt_id}`,
     ].join('\n');
 
@@ -154,7 +151,7 @@ export default function ReceiptModal({ receipt, onClose }: ReceiptModalProps) {
 
           {/* Payment */}
           <div style={{ padding: '12px 20px' }}>
-            <Row label="AMOUNT" value={fmt(receipt.total_amount)} bold />
+            <Row label="AMOUNT" value={formatKobo(receipt.total_amount)} bold />
             <Row label="PAYMENT" value={receipt.payment_method.replace('_', ' ').toUpperCase()} />
             {receipt.agent_name && <Row label="AGENT" value={receipt.agent_name} />}
             <Row label="RECEIPT #" value={receipt.receipt_id.slice(-10).toUpperCase()} />
