@@ -1,0 +1,72 @@
+You are the QA agent for Phase P06-TRANSPORT of the WebWaka platform.
+Target repo: webwaka-transport
+
+Deeply verify P06-TRANSPORT (Driver Mobile App). Fix every issue. Do not declare verified until all checks pass.
+
+=== VERIFICATION CHECKLIST ===
+
+--- P06-T1: Complete Driver View ---
+
+Section 1 — My Trips Tab:
+1. Open src/components/driver-view.tsx (or the driver-specific components). Confirm a trips list section fetches GET /api/operator/trips?driver_id=me.
+2. Confirm it handles loading state, error state, and empty state (no trips assigned) gracefully — no blank white screen in any of these cases.
+3. Confirm state badges are shown for each trip: scheduled, boarding, in_transit, completed.
+4. Confirm tapping a trip navigates to the detail view (does not crash, renders the trip's details).
+
+Section 2 — Trip Detail:
+5. Confirm departure time, route, vehicle plate, driver name, seat count, and inspection status are shown.
+6. Confirm "Start Inspection" button appears ONLY for 'scheduled' state trips.
+7. Confirm "Scan Boarding Pass" and "View Manifest" appear ONLY for 'boarding' state trips.
+8. Confirm "Share Location" toggle and "Report Delay" appear ONLY for 'in_transit' state trips.
+9. Confirm the inspection status badge shows correctly based on whether inspection_completed_at is set.
+
+Section 3 — Inspection Form:
+10. Confirm all five checkboxes are present: Tires OK, Brakes OK, Lights OK, Fuel Adequate, Emergency Equipment Present.
+11. Confirm the submit button is disabled (grayed out) until ALL five checkboxes are checked.
+12. Confirm submission calls POST /api/operator/trips/:id/inspection.
+13. Confirm success navigates back to Trip Detail showing the ✓ Inspected badge.
+14. Confirm error responses are shown to the driver (not silently swallowed).
+
+Section 4 — Boarding Scan:
+15. Confirm the camera QR scanner opens on tap (uses getUserMedia — may require HTTPS in production, which Replit proxies handle).
+16. Confirm the jsQR library (or equivalent) is installed (check package.json).
+17. Confirm on successful decode, POST /api/operator/trips/:id/board is called.
+18. Confirm success shows passenger name + seat for 2 seconds then re-opens scanner.
+19. Confirm 409 (already boarded) shows an amber warning, not a crash.
+20. Confirm 404 (invalid ticket) shows a red error card.
+21. Confirm the running counter updates after each scan.
+22. Check: if the camera is denied permission, the component shows an error message, not a blank screen.
+
+Section 5 — GPS Location Share:
+23. Confirm the toggle calls navigator.geolocation.watchPosition when turned on.
+24. Confirm each position update calls POST /api/operator/trips/:id/location.
+25. Confirm the toggle clears the watch when turned off.
+26. Confirm permission denied shows an explanatory error message.
+
+Section 6 — SOS Button:
+27. Confirm the SOS button is prominently styled (red, large).
+28. Confirm a confirmation dialog appears before the SOS is sent (no accidental triggers).
+29. Confirm POST /api/operator/trips/:id/sos is called on confirmation.
+30. Confirm a full-screen SOS ACTIVE banner appears after activation.
+31. Confirm the SOS ACTIVE banner also appears on load if sos_active=1 in the trip data.
+
+Section 7 — Delay Report:
+32. Confirm the form has a reason_code dropdown with the correct options.
+33. Confirm the estimated departure time picker is present.
+34. Confirm POST /api/operator/trips/:id/delay is called on submit.
+
+RBAC:
+35. Confirm users with role != DRIVER are not routed to DriverView (they should see the appropriate dashboard for their role).
+36. Confirm all driver-facing API calls include the auth JWT in the Authorization header.
+
+Offline Behavior:
+37. Confirm that at least the boarding scan queues offline (the mutation is saved to Dexie if the network request fails). Check that the Dexie mutation entry has the correct entity_type and payload for boarding.
+
+--- FINAL CHECKS ---
+1. Run tsc --noEmit — zero errors.
+2. Start the dev server. Log in with a DRIVER role account. Confirm the driver view renders without errors.
+3. Confirm no console errors in the browser dev tools.
+4. Check mobile responsiveness: open browser dev tools, set viewport to iPhone SE size (375×667). Confirm all buttons are tappable and text is readable.
+
+Report every issue found and every fix applied.
+```

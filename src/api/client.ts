@@ -166,6 +166,11 @@ export interface TripDetail extends Trip {
   delay_reason_code: string | null;
   delay_reported_at: number | null;
   estimated_departure_ms: number | null;
+  // Joined fields from vehicles + drivers
+  total_seats?: number | null;
+  plate_number?: string | null;
+  driver_name?: string | null;
+  driver_phone?: string | null;
 }
 
 export interface BoardingStatus {
@@ -286,7 +291,8 @@ export class ApiError extends Error {
   constructor(
     message: string,
     public readonly status: number,
-    public readonly endpoint?: string
+    public readonly endpoint?: string,
+    public readonly data?: unknown
   ) {
     super(message);
     this.name = 'ApiError';
@@ -342,7 +348,7 @@ export class ApiClient {
         clearStoredToken();
         window.dispatchEvent(new CustomEvent('waka:unauthorized'));
       }
-      throw new ApiError(json.error ?? `HTTP ${res.status}`, res.status, path);
+      throw new ApiError(json.error ?? `HTTP ${res.status}`, res.status, path, json.data);
     }
 
     return json.data as T;

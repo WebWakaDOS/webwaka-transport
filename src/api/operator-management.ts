@@ -334,14 +334,25 @@ operatorManagementRouter.get('/trips/:id', async (c) => {
 
   try {
     const trip = await db.prepare(
-      `SELECT t.*, r.origin, r.destination, r.base_fare
+      `SELECT t.*,
+              r.origin, r.destination, r.base_fare,
+              v.plate_number, v.total_seats AS vehicle_total_seats,
+              d.name AS driver_name, d.phone AS driver_phone
        FROM trips t
        JOIN routes r ON t.route_id = r.id
+       LEFT JOIN vehicles v ON t.vehicle_id = v.id AND v.deleted_at IS NULL
+       LEFT JOIN drivers d ON t.driver_id = d.id AND d.deleted_at IS NULL
        WHERE t.id = ? AND t.deleted_at IS NULL`
-    ).bind(id).first<DbTrip & { origin: string; destination: string; base_fare: number }>();
+    ).bind(id).first<DbTrip & {
+      origin: string; destination: string; base_fare: number;
+      plate_number: string | null; vehicle_total_seats: number | null;
+      driver_name: string | null; driver_phone: string | null;
+    }>();
 
     if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
-    return c.json({ success: true, data: trip });
+    // Normalise: expose total_seats at top level (vehicle total seats)
+    const data = { ...trip, total_seats: trip.vehicle_total_seats };
+    return c.json({ success: true, data });
   } catch {
     return c.json({ success: false, error: 'Failed to fetch trip' }, 500);
   }
@@ -801,7 +812,7 @@ operatorManagementRouter.post('/trips/:id/sos/clear', requireRole(['SUPER_ADMIN'
 // ============================================================
 // GET /trips/:id/manifest — passenger manifest for boarding
 // ============================================================
-operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
+operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'DRIVER']), async (c) => {
   const id = c.req.param('id');
   const db = c.env.DB;
   const user = c.get('user');
@@ -1193,7 +1204,7 @@ operatorManagementRouter.post('/trips/:id/inspection', requireRole(['SUPER_ADMIN
 // ============================================================
 // P05-T5: GET /trips/:id/inspection — get pre-trip inspection result (STAFF+)
 // ============================================================
-operatorManagementRouter.get('/trips/:id/inspection', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
+operatorManagementRouter.get('/trips/:id/inspection', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'DRIVER']), async (c) => {
   const tripId = c.req.param('id');
   const db = c.env.DB;
 
@@ -1214,7 +1225,7 @@ operatorManagementRouter.get('/trips/:id/inspection', requireRole(['SUPER_ADMIN'
 const ALLOWED_REASON_CODES = ['traffic', 'breakdown', 'weather', 'accident', 'fuel', 'other'] as const;
 type DelayReasonCode = typeof ALLOWED_REASON_CODES[number];
 
-operatorManagementRouter.post('/trips/:id/delay', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR']), async (c) => {
+operatorManagementRouter.post('/trips/:id/delay', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR', 'DRIVER']), async (c) => {
   const tripId = c.req.param('id');
   const db = c.env.DB;
   const now = Date.now();
@@ -1293,7 +1304,7 @@ operatorManagementRouter.post('/trips/:id/delay', requireRole(['SUPER_ADMIN', 'T
 // ============================================================
 // P05-T6: GET /trips/:id/delay — get delay info (STAFF+)
 // ============================================================
-operatorManagementRouter.get('/trips/:id/delay', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
+operatorManagementRouter.get('/trips/:id/delay', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'DRIVER']), async (c) => {
   const tripId = c.req.param('id');
   const db = c.env.DB;
 

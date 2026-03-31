@@ -383,8 +383,8 @@ function DriverBoardingScan({ tripId, onBack }: { tripId: string; onBack: () => 
     } catch (e) {
       if (e instanceof ApiError) {
         if (e.status === 409) {
-          const msg = (e as ApiError & { body?: { boarded_at?: number } }).body?.boarded_at;
-          setScanResult({ type: 'already', time: msg ?? Date.now() });
+          const boardedAt = (e.data as { boarded_at?: number } | undefined)?.boarded_at;
+          setScanResult({ type: 'already', time: boardedAt ?? Date.now() });
         } else if (e.status === 404) {
           setScanResult({ type: 'invalid' });
         } else {
@@ -705,7 +705,6 @@ function DriverTripDetail({ tripId, onBack, onNav }: {
   const [inspection, setInspection] = useState<InspectionRecord | null | undefined>(undefined);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [delayDone, setDelayDone] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -746,14 +745,33 @@ function DriverTripDetail({ tripId, onBack, onNav }: {
           {/* Trip info card */}
           <div style={{ ...card, borderLeft: `4px solid ${stateColor}`, marginBottom: 16 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-              <div>
-                <div style={{ fontWeight: 700, fontSize: 18, color: '#0f172a' }}>{trip.origin} → {trip.destination}</div>
+              <div style={{ flex: 1, marginRight: 8 }}>
+                <div style={{ fontWeight: 700, fontSize: 18, color: '#0f172a' }}>{trip.origin ?? '—'} → {trip.destination ?? '—'}</div>
                 <div style={{ fontSize: 12, color: '#64748b', marginTop: 3 }}>{fmtFull(trip.departure_time)}</div>
-                {trip.vehicle_id && <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>Vehicle: {trip.vehicle_id}</div>}
               </div>
               <span style={{ fontSize: 11, fontWeight: 700, color: stateColor, background: `${stateColor}20`, padding: '4px 10px', borderRadius: 20, whiteSpace: 'nowrap' }}>
                 {trip.state.replace('_', ' ').toUpperCase()}
               </span>
+            </div>
+
+            {/* Vehicle, driver, seat info */}
+            <div style={{ marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: '4px 16px', fontSize: 12, color: '#64748b' }}>
+              {trip.plate_number
+                ? <span>🚌 <strong>{trip.plate_number}</strong></span>
+                : trip.vehicle_id
+                  ? <span>🚌 Vehicle: {trip.vehicle_id}</span>
+                  : <span style={{ color: '#f59e0b' }}>No vehicle assigned</span>
+              }
+              {trip.driver_name
+                ? <span>👤 <strong>{trip.driver_name}</strong>{trip.driver_phone ? ` · ${trip.driver_phone}` : ''}</span>
+                : null
+              }
+              {trip.total_seats
+                ? <span>💺 <strong>{trip.total_seats}</strong> seats</span>
+                : trip.available_seats !== undefined
+                  ? <span>💺 <strong>{trip.available_seats}</strong> available</span>
+                  : null
+              }
             </div>
 
             {/* Inspection status badge */}
@@ -785,13 +803,14 @@ function DriverTripDetail({ tripId, onBack, onNav }: {
             )}
             {trip.state === 'in_transit' && (
               <>
-                {!delayDone && (
+                {trip.delay_reported_at ? (
+                  <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: '10px 14px', fontSize: 13, color: '#15803d', fontWeight: 600 }}>
+                    ✓ Delay reported — passengers notified ({new Date(trip.delay_reported_at).toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' })})
+                  </div>
+                ) : (
                   <button onClick={() => onNav({ view: 'delay', tripId })} style={{ ...btnSecondary, color: '#92400e', background: '#fef3c7' }}>
                     ⏰ Report Delay
                   </button>
-                )}
-                {delayDone && (
-                  <div style={{ fontSize: 12, color: '#16a34a', fontWeight: 700, textAlign: 'center' }}>✓ Delay reported — passengers notified</div>
                 )}
               </>
             )}
