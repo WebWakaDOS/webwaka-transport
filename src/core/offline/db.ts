@@ -316,20 +316,23 @@ export async function saveOfflineTransaction(txn: NewOfflineTransaction): Promis
   return getOfflineDB().transactions.add(record);
 }
 
-/** Pending transactions for a specific agent — for the agent POS UI */
+/** Pending transactions for a specific agent — for the agent POS UI.
+ *  Uses a single-field .where() on the indexed agent_id column, then
+ *  applies JavaScript filter for synced/retry_count to avoid requiring
+ *  a compound index that doesn't exist. */
 export async function getPendingTransactions(agent_id: string): Promise<OfflineTransaction[]> {
-  return getOfflineDB().transactions
-    .where({ agent_id, synced: false })
-    .and(t => (t.retry_count ?? 0) < 5)
+  const rows = await getOfflineDB().transactions
+    .where('agent_id').equals(agent_id)
     .toArray();
+  return rows.filter(t => !t.synced && (t.retry_count ?? 0) < 5);
 }
 
-/** All pending transactions regardless of agent — for SyncEngine flush */
+/** All pending transactions regardless of agent — for SyncEngine flush.
+ *  Uses .filter() instead of .where().equals() to avoid boolean vs 0 IndexedDB
+ *  key-type mismatch (IDBKeyRange.only(0) does NOT match stored `false`). */
 export async function getAllPendingTransactions(): Promise<OfflineTransaction[]> {
-  return getOfflineDB().transactions
-    .where('synced').equals(0)
-    .and(t => (t.retry_count ?? 0) < 5)
-    .toArray();
+  const all = await getOfflineDB().transactions.toArray();
+  return all.filter(t => !t.synced && (t.retry_count ?? 0) < 5);
 }
 
 export async function markTransactionSynced(local_id: string): Promise<void> {

@@ -1,0 +1,62 @@
+You are the QA agent for Phase P02-TRANSPORT of the WebWaka platform.
+Target repo: webwaka-transport
+
+Deeply verify P02-TRANSPORT. Find every gap, bug, or missing piece. Fix everything. Do not declare verified until all checks pass.
+
+=== VERIFICATION CHECKLIST ===
+
+--- P02-T1: Offline Agent Transaction Sync ---
+1. Read src/core/offline/sync.ts. Locate the flush() method. Confirm it has a second phase after the mutations loop that:
+a. Calls this.db.getPendingTransactions() (or equivalent)
+b. Loops through pending transactions
+c. POSTs each to /api/agent-sales/sync with Authorization header and X-Idempotency-Key header
+d. Calls markTransactionSynced on HTTP 200 or 409
+e. Calls incrementTransactionRetry on non-success responses
+f. Has a try/catch that silently absorbs network errors (non-fatal)
+2. Read src/core/offline/db.ts. Confirm:
+a. markTransactionSynced(id) exists and sets synced_at = Date.now()
+b. incrementTransactionRetry(id) exists and increments retry_count
+c. getPendingTransactions() returns rows where synced_at IS NULL and retry_count < 5
+d. The transactions Dexie table schema includes idempotencyKey field
+e. If the idempotencyKey field was added in a schema version upgrade, confirm the version was incremented and an upgrade migration function handles existing rows (assigns a default idempotencyKey to rows that don't have one)
+3. Mental walkthrough: agent makes an offline sale → saveOfflineTransaction called → transaction written to Dexie → connectivity restored → flush() called → getPendingTransactions returns it → POST to /api/agent-sales/sync → markTransactionSynced called → transaction no longer appears in getPendingTransactions. Trace each step in the code.
+4. Check for type safety: confirm all Dexie operations are typed. No `any` types on transaction objects unless explicitly necessary.
+
+Fix any missing steps or bugs found.
+
+--- P02-T2: Multi-Seat Atomic Reservation Batch Endpoint ---
+1. Locate POST /api/seat-inventory/trips/:tripId/reserve-batch in src/api/seat-inventory.ts.
+2. Verify the request body is validated: seat_ids must be a non-empty array, user_id must be a non-empty string, idempotency_key must be present.
+3. Verify idempotency: the endpoint reads from IDEMPOTENCY_KV before processing. If key found, returns cached response immediately.
+4. Verify the read-then-write optimistic concurrency pattern:
+a. One SELECT query reads all seats at once (not N queries)
+b. If any seat is not 'available', returns 409 immediately without writing anything
+c. The UPDATE statements all include AND version = {originalVersion} in their WHERE clause
+d. After batch execute, each result's meta.changes is checked
+e. If any result has changes=0, a compensating batch releases already-reserved seats in the same batch
+f. The compensating release returns 409 (not 500)
+5. Verify tokens: each seat gets its own unique token (not one shared token). Tokens use nanoid from @webwaka/core.
+6. Verify the platform event seat.batch_reserved is published via publishEvent.
+7. Verify idempotency key is stored in IDEMPOTENCY_KV after success with at least a 24-hour TTL.
+8. Verify response shape: { tokens: [ { seat_id, token, expires_at }, ... ] }
+9. Check: what happens if seat_ids is an empty array? Should return 400. Confirm it does.
+10. Check: what happens if tripId does not exist? Should return 404. Confirm it does.
+
+Fix all issues found.
+
+--- P02-T3: Schema Migration 002 ---
+1. Confirm the file migrations/002_phase2_tables.sql exists.
+2. Read it and verify these tables are defined: api_keys, ndpr_consent_log, bus_parks, agent_bus_parks, float_reconciliation, trip_inspections, seat_history, vehicle_maintenance_records, vehicle_documents, driver_documents, waiting_list, operator_reviews, schedules, agent_broadcasts, dispute_tickets, route_stops.
+3. Verify each table has appropriate indexes (at minimum: foreign key columns and frequently-queried columns should be indexed).
+4. Verify the ALTER TABLE statements at the bottom add the required new columns to existing tables: commission_rate on agents, seat_template on vehicles, fare_matrix on routes, cancellation_policy on routes.
+5. Verify migration 002 is registered in src/api/admin.ts migration runner.
+6. Attempt to parse the SQL mentally for obvious errors: unmatched parentheses, missing semicolons, references to tables that don't exist yet in the migration. Fix any syntax errors found.
+7. Run the migration SQL through a syntax check if a tool is available. If not, read it carefully for errors.
+
+--- FINAL CHECKS ---
+1. Run tsc --noEmit — zero errors required.
+2. Start the dev server (npm run dev:ui) and confirm it starts without runtime errors.
+3. Confirm all new imports from @webwaka/core resolve correctly (nanoid, publishEvent, etc.).
+4. If any import from @webwaka/core fails to resolve, check packages/core/package.json exports and tsconfig paths.
+
+Report every issue found and every fix applied.

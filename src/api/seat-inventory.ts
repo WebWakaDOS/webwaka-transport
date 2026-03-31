@@ -4,7 +4,7 @@
  * Invariants: Nigeria-First (kobo), Offline-First (sync), Multi-tenancy
  */
 import { Hono } from 'hono';
-import { publishEvent } from '@webwaka/core';
+import { publishEvent, nanoid } from '@webwaka/core';
 import type { AppContext, DbTrip, DbSeat } from './types';
 import { genId, parsePagination, metaResponse, requireFields, applyTenantScope } from './types';
 
@@ -247,10 +247,11 @@ seatInventoryRouter.post('/trips/:tripId/reserve-batch', async (c) => {
     }, 409);
   }
 
-  // 4. Generate reservation tokens for each seat
+  // 4. Generate reservation tokens for each seat — nanoid('tok', 32) gives
+  //    a cryptographically-random 32-char suffix making tokens unguessable
   const tokenMap: Record<string, string> = {};
   for (const seat of seatsResult.results) {
-    tokenMap[seat.id] = genId('tok');
+    tokenMap[seat.id] = nanoid('tok', 32);
   }
 
   // 5. Build D1 batch with optimistic locking (version check prevents double-booking)
