@@ -52,12 +52,22 @@ export interface Env {
 const app = new Hono<{ Bindings: Env }>();
 
 // ============================================================
-// CORS
+// CORS — allowlist only (SEC-001: no wildcard in production)
 // ============================================================
+const ALLOWED_ORIGINS = [
+  'https://webwaka-transport-ui.pages.dev',
+  'https://webwaka.ng',
+  'https://www.webwaka.ng',
+  'http://localhost:5000',
+  'http://localhost:5173',
+  'http://127.0.0.1:5000',
+];
+
 app.use('*', cors({
-  origin: '*',
+  origin: (origin) => ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0]!,
   allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowHeaders: ['Content-Type', 'Authorization', 'X-Tenant-ID', 'x-tenant-id'],
+  credentials: true,
 }));
 
 // ============================================================

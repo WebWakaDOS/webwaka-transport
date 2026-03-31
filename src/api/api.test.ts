@@ -266,6 +266,54 @@ describe('TRN-1: Seat Inventory API', () => {
     expect(body.success).toBe(true);
     expect(body.data.applied).toHaveLength(1);
   });
+
+  // SEC-006: Seat release security — token is required (no anonymous release)
+  it('POST /trips/:id/release returns 400 when token is missing (SEC-006)', async () => {
+    const res = await seatInventoryRouter.request('/trips/trp_1/release', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ seat_id: 's1' }), // no token
+    }, makeEnv(db));
+    expect(res.status).toBe(400);
+    const body = await res.json() as any;
+    expect(body.success).toBe(false);
+  });
+
+  it('POST /trips/:id/release returns 403 when wrong token supplied (SEC-006)', async () => {
+    db._tables.seats.push({
+      id: 'sec_seat_1', trip_id: 'trp_sec', seat_number: '01', status: 'reserved',
+      reservation_token: 'correct_token', reserved_by: 'usr_1',
+      reservation_expires_at: Date.now() + 30000,
+      created_at: Date.now(), updated_at: Date.now(),
+    });
+    const res = await seatInventoryRouter.request('/trips/trp_sec/release', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ seat_id: 'sec_seat_1', token: 'wrong_token' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(403);
+    const body = await res.json() as any;
+    expect(body.success).toBe(false);
+    expect(body.error).toMatch(/invalid.*token/i);
+  });
+
+  it('POST /trips/:id/release releases seat with correct token (SEC-006)', async () => {
+    db._tables.seats.push({
+      id: 'sec_seat_2', trip_id: 'trp_sec2', seat_number: '02', status: 'reserved',
+      reservation_token: 'valid_tok_abc', reserved_by: 'usr_1',
+      reservation_expires_at: Date.now() + 30000,
+      created_at: Date.now(), updated_at: Date.now(),
+    });
+    const res = await seatInventoryRouter.request('/trips/trp_sec2/release', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ seat_id: 'sec_seat_2', token: 'valid_tok_abc' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.status).toBe('available');
+  });
 });
 
 // ============================================================

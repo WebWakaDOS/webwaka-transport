@@ -138,16 +138,17 @@ const MIGRATIONS: Migration[] = [
         sync_status TEXT NOT NULL DEFAULT 'pending',
         receipt_id TEXT,
         created_at INTEGER NOT NULL,
-        synced_at INTEGER
+        synced_at INTEGER,
+        deleted_at INTEGER
       )`,
       `CREATE TABLE IF NOT EXISTS customers (
         id TEXT PRIMARY KEY,
-        operator_id TEXT NOT NULL,
-        name TEXT NOT NULL,
+        name TEXT,
         phone TEXT NOT NULL,
         email TEXT,
         ndpr_consent INTEGER NOT NULL DEFAULT 0,
         consent_given_at INTEGER,
+        status TEXT NOT NULL DEFAULT 'active',
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         deleted_at INTEGER
@@ -163,6 +164,8 @@ const MIGRATIONS: Migration[] = [
         payment_status TEXT NOT NULL DEFAULT 'pending',
         payment_method TEXT NOT NULL,
         payment_reference TEXT,
+        payment_provider TEXT,
+        paid_at INTEGER,
         boarded_at INTEGER,
         boarded_by TEXT,
         created_at INTEGER NOT NULL,
@@ -183,6 +186,19 @@ const MIGRATIONS: Migration[] = [
         created_at INTEGER NOT NULL,
         synced_at INTEGER
       )`,
+      `CREATE TABLE IF NOT EXISTS drivers (
+        id TEXT PRIMARY KEY,
+        operator_id TEXT NOT NULL REFERENCES operators(id),
+        name TEXT NOT NULL,
+        phone TEXT NOT NULL,
+        license_number TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        deleted_at INTEGER
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_drivers_operator ON drivers(operator_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_drivers_status ON drivers(status)`,
       `CREATE INDEX IF NOT EXISTS idx_trips_operator ON trips(operator_id)`,
       `CREATE INDEX IF NOT EXISTS idx_trips_state ON trips(state)`,
       `CREATE INDEX IF NOT EXISTS idx_trips_departure ON trips(departure_time)`,
@@ -238,6 +254,27 @@ const MIGRATIONS: Migration[] = [
       // All 004 columns are included in 001+002 CREATE TABLE statements above
       // This entry is a no-op marker for migration tracking consistency
       `SELECT 1`,
+    ],
+  },
+  {
+    name: '005_drivers_and_schema_hardening',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS drivers (
+        id TEXT PRIMARY KEY,
+        operator_id TEXT NOT NULL REFERENCES operators(id),
+        name TEXT NOT NULL,
+        phone TEXT NOT NULL,
+        license_number TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        deleted_at INTEGER
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_drivers_operator ON drivers(operator_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_drivers_status ON drivers(status)`,
+      `ALTER TABLE sales_transactions ADD COLUMN deleted_at INTEGER`,
+      `ALTER TABLE bookings ADD COLUMN payment_provider TEXT`,
+      `ALTER TABLE bookings ADD COLUMN paid_at INTEGER`,
     ],
   },
 ];

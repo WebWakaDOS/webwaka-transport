@@ -781,40 +781,39 @@ operatorManagementRouter.get('/reports/revenue', requireRole(['SUPER_ADMIN', 'TE
   const toMs = q['to'] ? parseInt(q['to'], 10) : now;
   const operatorId = q['operator_id'] ?? null;
 
-  const agentFilter = operatorId
-    ? `AND agent_id IN (SELECT id FROM agents WHERE operator_id = '${operatorId}' AND deleted_at IS NULL)`
-    : '';
-  const tripFilter = operatorId
-    ? `AND operator_id = '${operatorId}'`
-    : '';
+  // Booking revenue query — parameterized (no string interpolation)
+  const bookingBindParams: unknown[] = ['paid', fromMs, toMs];
+  let bookingQuery = `SELECT total_amount FROM bookings
+    WHERE payment_status = ? AND created_at >= ? AND created_at <= ? AND deleted_at IS NULL`;
+
+  // Agent sales revenue query — parameterized operator scope (SEC-003 fix: no string interpolation)
+  const agentBindParams: unknown[] = ['completed', fromMs, toMs];
+  let agentQuery = `SELECT total_amount FROM sales_transactions
+    WHERE payment_status = ? AND created_at >= ? AND created_at <= ? AND deleted_at IS NULL`;
+  if (operatorId) {
+    agentQuery += ` AND agent_id IN (SELECT id FROM agents WHERE operator_id = ? AND deleted_at IS NULL)`;
+    agentBindParams.push(operatorId);
+  }
+
+  // Per-route breakdown — parameterized operator scope
+  const routeBindParams: unknown[] = [fromMs, toMs];
+  let routeQuery = `SELECT r.id as route_id, r.origin, r.destination,
+          COUNT(t.id) as trip_count
+   FROM routes r
+   LEFT JOIN trips t ON t.route_id = r.id AND t.deleted_at IS NULL
+     AND t.departure_time >= ? AND t.departure_time <= ?
+   WHERE r.deleted_at IS NULL`;
+  if (operatorId) {
+    routeQuery += ` AND r.operator_id = ?`;
+    routeBindParams.push(operatorId);
+  }
+  routeQuery += ` GROUP BY r.id, r.origin, r.destination ORDER BY trip_count DESC LIMIT 10`;
 
   try {
     const [bookingRows, agentRows, routeResult] = await Promise.all([
-      // Booking revenue — online payments (bind status so mock filter works)
-      db.prepare(
-        `SELECT total_amount FROM bookings
-         WHERE payment_status = ? AND created_at >= ? AND created_at <= ? AND deleted_at IS NULL`
-      ).bind('paid', fromMs, toMs).all<{ total_amount: number }>(),
-
-      // Agent sales revenue — cash/POS (bind status so mock filter works)
-      db.prepare(
-        `SELECT total_amount FROM sales_transactions
-         WHERE payment_status = ? AND created_at >= ? AND created_at <= ?
-         AND deleted_at IS NULL ${agentFilter}`
-      ).bind('completed', fromMs, toMs).all<{ total_amount: number }>(),
-
-      // Per-route breakdown
-      db.prepare(
-        `SELECT r.id as route_id, r.origin, r.destination,
-                COUNT(t.id) as trip_count
-         FROM routes r
-         LEFT JOIN trips t ON t.route_id = r.id AND t.deleted_at IS NULL
-           AND t.departure_time >= ? AND t.departure_time <= ?
-         WHERE r.deleted_at IS NULL ${tripFilter}
-         GROUP BY r.id, r.origin, r.destination
-         ORDER BY trip_count DESC
-         LIMIT 10`
-      ).bind(fromMs, toMs).all<{ route_id: string; origin: string; destination: string; trip_count: number }>(),
+      db.prepare(bookingQuery).bind(...bookingBindParams).all<{ total_amount: number }>(),
+      db.prepare(agentQuery).bind(...agentBindParams).all<{ total_amount: number }>(),
+      db.prepare(routeQuery).bind(...routeBindParams).all<{ route_id: string; origin: string; destination: string; trip_count: number }>(),
     ]);
 
     const bookingRevenue = bookingRows.results.reduce((sum, r) => sum + r.total_amount, 0);

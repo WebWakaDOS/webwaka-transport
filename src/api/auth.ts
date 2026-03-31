@@ -176,9 +176,10 @@ authRouter.post('/otp/verify', async (c) => {
       } else {
         // New customer — create record
         const newId = genId('cus');
+        const nowMs = Date.now();
         await c.env.DB.prepare(
-          'INSERT INTO customers (id, name, phone, ndpr_consent, ndpr_consent_at, created_at) VALUES (?, NULL, ?, 0, NULL, ?)'
-        ).bind(newId, phone, Date.now()).run();
+          'INSERT INTO customers (id, name, phone, ndpr_consent, created_at, updated_at) VALUES (?, NULL, ?, 0, ?, ?)'
+        ).bind(newId, phone, nowMs, nowMs).run();
         userId = newId;
       }
     }

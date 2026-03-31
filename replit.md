@@ -53,8 +53,8 @@ The frontend runs as a Vite dev server on port 5000. The backend (Cloudflare Wor
 
 ```bash
 npm run dev:ui   # start Vite frontend
-npm test         # run all 219 unit tests (vitest)
-npm run typecheck # TypeScript strict mode check (0 errors required)
+npm test         # run all 281 unit tests (vitest)
+npx tsc --noEmit # TypeScript strict mode check (0 errors)
 ```
 
 ## Platform Invariants
@@ -248,7 +248,7 @@ KV namespace provisioning script (SESSIONS_KV, TENANT_CONFIG_KV, SEAT_CACHE_KV).
 - `fake-indexeddb` — dev dependency for Dexie unit testing in Node environment
 - `hono` — Web framework for Cloudflare Workers
 - `react` + `react-dom` — React 19 UI framework
-- `vitest` — Test runner (278 unit tests across 7 test files)
+- `vitest` — Test runner (281 unit tests across 7 test files)
 
 ## Roles (RBAC)
 Six roles defined in `WakaRole` type: `SUPER_ADMIN`, `TENANT_ADMIN`, `SUPERVISOR`, `STAFF`, `DRIVER`, `CUSTOMER`.
@@ -273,8 +273,15 @@ Uses `schema_migrations` tracking table. Authentication: `Authorization: Bearer 
 1. `drainEventBus()` — processes pending `platform_events` outbox
 2. `sweepExpiredReservations()` — releases expired seat reservations (30s TTL)
 
+## Security Hardening (Production Audit — complete)
+- **SEC-001 (CORS)**: `worker.ts` CORS changed from wildcard `*` to domain allowlist: `webwaka-transport-ui.pages.dev`, `webwaka.ng`, `www.webwaka.ng`, `localhost:5000/5173`, `127.0.0.1:5000`.
+- **SEC-006 (Seat Release)**: `seat-inventory.ts` release endpoint now requires `token` field. Returns 400 if missing, 403 if token doesn't match `reservation_token`. 3 regression tests added.
+- **SQL Injection**: `operator-management.ts` revenue endpoint previously used string interpolation for `agentFilter`/`tripFilter`. Converted to parameterized D1 queries with bound params.
+- **Schema hardening**: `customers.operator_id NOT NULL` removed (customers are cross-tenant); `bookings` gets `payment_provider`/`paid_at`; `sales_transactions` gets `deleted_at`; `drivers` table added. All handled by migration 005.
+- **`@webwaka/core` resolution**: `packages/core/package.json` exports fixed (`.js` → `.ts`); `vitest.config.ts` has `resolve.alias` pointing to TypeScript source. Was the root cause of all test failures.
+
 ## CI/CD
-`.github/workflows/deploy.yml` — hard typecheck gate, all 4 migrations applied before deployment, smoke tests on staging before production promotion. No deployment without green quality gate.
+`.github/workflows/ci.yml` — test (`npm test -- --run`) → typecheck → deploy-staging (on `staging` branch) → deploy-production + post-deploy migration (on `main` branch). GitHub Actions secrets required: `CLOUDFLARE_API_TOKEN`, `MIGRATION_SECRET`, `WORKER_URL`.
 
 ## Deployment
 - Build: `npm run build:ui` → `dist/`

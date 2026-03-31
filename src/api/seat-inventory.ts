@@ -210,24 +210,34 @@ seatInventoryRouter.post('/trips/:id/confirm', async (c) => {
 });
 
 // ============================================================
-// POST /trips/:id/release — release a reservation
+// POST /trips/:id/release — release a reservation (token required)
+// SEC-006: token is mandatory to prevent unauthorized seat release
 // ============================================================
 seatInventoryRouter.post('/trips/:id/release', async (c) => {
   const tripId = c.req.param('id');
   const body = await c.req.json() as Record<string, unknown>;
-  const err = requireFields(body, ['seat_id']);
+  const err = requireFields(body, ['seat_id', 'token']);
   if (err) return c.json({ success: false, error: err }, 400);
 
-  const { seat_id, token } = body as { seat_id: string; token?: string };
+  const { seat_id, token } = body as { seat_id: string; token: string };
   const db = c.env.DB;
   const now = Date.now();
 
   try {
+    const seat = await db.prepare(
+      `SELECT id, reservation_token FROM seats WHERE trip_id = ? AND id = ?`
+    ).bind(tripId, seat_id).first<{ id: string; reservation_token: string | null }>();
+
+    if (!seat) return c.json({ success: false, error: 'Seat not found' }, 404);
+    if (seat.reservation_token !== token) {
+      return c.json({ success: false, error: 'Invalid reservation token' }, 403);
+    }
+
     await db.prepare(
       `UPDATE seats SET status = 'available', reserved_by = NULL, reservation_token = NULL,
        reservation_expires_at = NULL, updated_at = ?
-       WHERE id = ? AND trip_id = ? AND (reservation_token = ? OR ? IS NULL)`
-    ).bind(now, seat_id, tripId, token ?? null, token ?? null).run();
+       WHERE id = ? AND trip_id = ? AND reservation_token = ?`
+    ).bind(now, seat_id, tripId, token).run();
 
     return c.json({ success: true, data: { seat_id, trip_id: tripId, status: 'available' } });
   } catch {
