@@ -1,0 +1,96 @@
+You are implementing Phase P11-TRANSPORT of the WebWaka platform.
+Target repo: webwaka-transport
+
+This phase builds operator API keys, the onboarding wizard, and multi-stop route management. Read webwaka-implementation-plan.md for full context.
+
+=== TASK P11-T1: Operator API Keys ===
+File: src/api/operator-management.ts
+
+The api_keys table was created in migration 002. The verifyApiKey function was added to @webwaka/core in P01-T4. This task wires the management endpoints.
+
+Add POST /api/operator/api-keys (TENANT_ADMIN only):
+- Body: { name: string, scope: 'read'|'read_write' }
+- Generate raw key: `waka_live_${nanoid('', 32)}` (use nanoid from @webwaka/core)
+- Hash key: SHA-256 via crypto.subtle
+- INSERT into api_keys: { id: nanoid('key', 16), operator_id: tenantId, name, key_hash, scope, created_by: userId, created_at: now }
+- Return { id, name, scope, key: rawKey, created_at } — WARN in response: "Save this key now. It will never be shown again."
+- Never store the raw key
+
+Add GET /api/operator/api-keys (TENANT_ADMIN+):
+- Returns api_keys for the operator WITHOUT the key_hash field
+- Includes: id, name, scope, created_at, last_used_at, revoked_at
+
+Add DELETE /api/operator/api-keys/:id (TENANT_ADMIN only):
+- UPDATE api_keys SET revoked_at = ? WHERE id = ? AND operator_id = ?
+- Return 204
+
+=== TASK P11-T2: Operator Onboarding Wizard ===
+Frontend only — all APIs already exist.
+
+Detect new operators: on login, call GET /api/operator/routes and GET /api/operator/vehicles. If both return empty arrays, show the onboarding wizard modal instead of the normal dashboard.
+
+Build a multi-step wizard component src/components/onboarding-wizard.tsx with these steps:
+
+Step 1 — Company Profile:
+- Fields: company name (pre-filled from operator.name), address, contact phone, CAC registration number, FIRS TIN
+- Save button calls PATCH /api/operator/profile (or equivalent update endpoint)
+
+Step 2 — Add Vehicles:
+- Vehicle form: make, model, year, plate number, capacity, type (bus/minibus/coaster)
+- "Add Vehicle" button submits POST /api/operator/vehicles
+- "Add Another" option
+- "Skip for now" advances to Step 3
+
+Step 3 — Add Routes:
+- Route form: origin (dropdown from Nigerian cities list), destination, base fare (₦, auto-converts to kobo), duration (minutes), distance (km)
+- "Add Route" button submits POST /api/operator/routes
+- "Add Another" option
+
+Step 4 — Configure Seat Templates (Optional):
+- Shows list of vehicles added in Step 2
+- For each vehicle: "Configure Seats" opens the template form from P08-T1
+- "Skip" advances
+
+Step 5 — Add Drivers:
+- Driver form: name, phone, license number
+- "Add Driver" submits POST /api/operator/drivers
+
+Step 6 — Add Agents:
+- Agent form: name, phone, bus park (select from parks created, or "Add Park" inline)
+- "Add Agent" submits POST /api/agent-sales/agents
+
+Step 7 — Create First Trip:
+- Trip form: select route (from Step 3), select vehicle (from Step 2), select driver (from Step 5), departure date, departure time
+- "Create Trip" submits POST /api/seat-inventory/trips
+- On success: show confetti or celebration animation, "Go to Dashboard" button
+
+Progress: save current step to localStorage so incomplete wizards resume. Show step progress indicator (1 of 7).
+
+=== TASK P11-T3: Multi-Stop Route Management ===
+File: src/api/operator-management.ts
+File: src/api/booking-portal.ts
+
+The route_stops table was created in migration 002.
+
+Add POST /api/operator/routes/:id/stops (TENANT_ADMIN+):
+- Body: { stops: [{ stop_name: string, sequence: number, distance_from_origin_km?: number, fare_from_origin_kobo?: number }] }
+- Validate: sequence values unique, at least 2 stops, first stop sequence = 1
+- DELETE existing stops: DELETE FROM route_stops WHERE route_id = ?
+- Batch INSERT all stops
+- UPDATE routes SET route_stops_enabled = 1 WHERE id = ?
+- Return the full stop list
+
+Add GET /api/operator/routes/:id/stops (public):
+- Returns stops ordered by sequence
+
+In GET /api/booking/trips/search, add optional query params: origin_stop and destination_stop
+- If provided: join through route_stops to find routes that include both stops in the right sequence
+- Compute the segment fare: (fare_from_origin of destination_stop) - (fare_from_origin of origin_stop)
+- Return this as the effective fare for this booking
+
+In POST /api/booking/bookings, accept optional fields: origin_stop_id, destination_stop_id
+- If provided: store on booking record, validate they belong to the trip's route, validate sequence order
+
+=== DONE ===
+Run tsc --noEmit. Test API key generation, usage (with Authorization: ApiKey header), and revocation. Test onboarding wizard step 7 completes to a viewable trip. Test multi-stop route with partial-route booking fare calculation.
+```

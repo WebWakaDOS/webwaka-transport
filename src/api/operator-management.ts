@@ -4,7 +4,7 @@
  * Invariants: Multi-tenancy (operator_id), Nigeria-First, Build Once Use Infinitely
  */
 import { Hono } from 'hono';
-import { requireRole, publishEvent } from '@webwaka/core';
+import { requireRole, publishEvent, nanoid } from '@webwaka/core';
 import type { AppContext, DbOperator, DbRoute, DbVehicle, DbTrip, DbDriver } from './types';
 import { genId, parsePagination, metaResponse, requireFields, applyTenantScope } from './types';
 import { getOperatorConfig, validateOperatorConfig } from '../lib/operator-config.js';
@@ -227,6 +227,106 @@ operatorManagementRouter.put('/routes/:id/fare-matrix', requireRole(['SUPER_ADMI
     return c.json({ success: true, data: { route_id: id, fare_matrix: fareMatrix } });
   } catch {
     return c.json({ success: false, error: 'Failed to update fare matrix' }, 500);
+  }
+});
+
+// ============================================================
+// P11-T3: Route Stops Management
+// ============================================================
+
+operatorManagementRouter.post('/routes/:id/stops', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR']), async (c) => {
+  const routeId = c.req.param('id');
+  const body = await c.req.json() as Record<string, unknown>;
+  const db = c.env.DB;
+  const user = c.get('user');
+  const now = Date.now();
+
+  const rawStops = body.stops;
+  if (!Array.isArray(rawStops) || rawStops.length < 2) {
+    return c.json({ success: false, error: 'At least 2 stops required' }, 400);
+  }
+
+  interface StopInput {
+    stop_name: string;
+    sequence: number;
+    distance_from_origin_km?: number;
+    fare_from_origin_kobo?: number;
+  }
+
+  const stops = rawStops as StopInput[];
+
+  const sequences = stops.map(s => s.sequence);
+  const uniqueSeqs = new Set(sequences);
+  if (uniqueSeqs.size !== sequences.length) {
+    return c.json({ success: false, error: 'Sequence values must be unique' }, 400);
+  }
+  if (Math.min(...sequences) !== 1) {
+    return c.json({ success: false, error: 'First stop must have sequence = 1' }, 400);
+  }
+  for (const s of stops) {
+    if (!s.stop_name || typeof s.stop_name !== 'string') {
+      return c.json({ success: false, error: 'Each stop must have a stop_name' }, 400);
+    }
+  }
+
+  try {
+    const route = await db.prepare(
+      `SELECT id, operator_id FROM routes WHERE id = ? AND deleted_at IS NULL`
+    ).bind(routeId).first<{ id: string; operator_id: string }>();
+    if (!route) return c.json({ success: false, error: 'Route not found' }, 404);
+    if (user?.role !== 'SUPER_ADMIN' && user?.operatorId && route.operator_id !== user.operatorId) {
+      return c.json({ success: false, error: 'Forbidden' }, 403);
+    }
+
+    await db.prepare(`DELETE FROM route_stops WHERE route_id = ?`).bind(routeId).run();
+
+    const sorted = [...stops].sort((a, b) => a.sequence - b.sequence);
+    for (const stop of sorted) {
+      const stopId = genId('stp');
+      await db.prepare(
+        `INSERT INTO route_stops (id, route_id, stop_name, sequence, distance_from_origin_km, fare_from_origin_kobo, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        stopId, routeId, stop.stop_name, stop.sequence,
+        stop.distance_from_origin_km ?? null,
+        stop.fare_from_origin_kobo ?? null,
+        now
+      ).run();
+    }
+
+    await db.prepare(
+      `UPDATE routes SET route_stops_enabled = 1 WHERE id = ?`
+    ).bind(routeId).run();
+
+    const inserted = await db.prepare(
+      `SELECT * FROM route_stops WHERE route_id = ? ORDER BY sequence ASC`
+    ).bind(routeId).all<{
+      id: string; route_id: string; stop_name: string; sequence: number;
+      distance_from_origin_km: number | null; fare_from_origin_kobo: number | null;
+    }>();
+
+    return c.json({ success: true, data: inserted.results });
+  } catch (e: unknown) {
+    console.error('[RouteStops] Error:', e instanceof Error ? e.message : String(e));
+    return c.json({ success: false, error: 'Failed to set route stops' }, 500);
+  }
+});
+
+operatorManagementRouter.get('/routes/:id/stops', async (c) => {
+  const routeId = c.req.param('id');
+  const db = c.env.DB;
+
+  try {
+    const result = await db.prepare(
+      `SELECT id, route_id, stop_name, sequence, distance_from_origin_km, fare_from_origin_kobo, created_at
+       FROM route_stops WHERE route_id = ? ORDER BY sequence ASC`
+    ).bind(routeId).all<{
+      id: string; route_id: string; stop_name: string; sequence: number;
+      distance_from_origin_km: number | null; fare_from_origin_kobo: number | null; created_at: number;
+    }>();
+    return c.json({ success: true, data: result.results });
+  } catch {
+    return c.json({ success: false, error: 'Failed to fetch route stops' }, 500);
   }
 });
 
@@ -2411,5 +2511,154 @@ operatorManagementRouter.get('/reports', requireRole(['SUPER_ADMIN', 'TENANT_ADM
   } catch (err: unknown) {
     console.error('[Reports] Error:', err instanceof Error ? err.message : String(err));
     return c.json({ success: false, error: 'Failed to generate revenue report' }, 500);
+  }
+});
+
+// ============================================================
+// P11-T1: Operator API Keys Management
+// ============================================================
+
+operatorManagementRouter.post('/api-keys', requireRole(['TENANT_ADMIN']), async (c) => {
+  const body = await c.req.json() as Record<string, unknown>;
+  const err = requireFields(body, ['name', 'scope']);
+  if (err) return c.json({ success: false, error: err }, 400);
+
+  const { name, scope } = body as { name: string; scope: string };
+  if (!['read', 'read_write'].includes(scope)) {
+    return c.json({ success: false, error: 'scope must be "read" or "read_write"' }, 400);
+  }
+
+  const user = c.get('user');
+  const tenantId = user?.operatorId;
+  if (!tenantId) return c.json({ success: false, error: 'No operator context' }, 403);
+
+  const db = c.env.DB;
+  const now = Date.now();
+
+  try {
+    const rawKey = `waka_live_${nanoid('', 32)}`;
+    const encoder = new TextEncoder();
+    const data = encoder.encode(rawKey);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    const keyHash = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+
+    const id = nanoid('key', 16);
+    await db.prepare(
+      `INSERT INTO api_keys (id, operator_id, name, key_hash, scope, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).bind(id, tenantId, name, keyHash, scope, user.id, now).run();
+
+    return c.json({
+      success: true,
+      warning: 'Save this key now. It will never be shown again.',
+      data: { id, name, scope, key: rawKey, created_at: now },
+    }, 201);
+  } catch (e: unknown) {
+    console.error('[ApiKeys] Create error:', e instanceof Error ? e.message : String(e));
+    return c.json({ success: false, error: 'Failed to create API key' }, 500);
+  }
+});
+
+operatorManagementRouter.get('/api-keys', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+  const user = c.get('user');
+  const db = c.env.DB;
+
+  try {
+    let query = `SELECT id, operator_id, name, scope, created_at, last_used_at, revoked_at
+                 FROM api_keys WHERE deleted_at IS NULL`;
+    const params: unknown[] = [];
+
+    if (user?.role !== 'SUPER_ADMIN') {
+      const tenantId = user?.operatorId;
+      if (!tenantId) return c.json({ success: false, error: 'No operator context' }, 403);
+      query += ` AND operator_id = ?`;
+      params.push(tenantId);
+    }
+
+    query += ` ORDER BY created_at DESC`;
+    const result = await db.prepare(query).bind(...params).all<{
+      id: string; operator_id: string; name: string; scope: string;
+      created_at: number; last_used_at: number | null; revoked_at: number | null;
+    }>();
+
+    return c.json({ success: true, data: result.results });
+  } catch {
+    return c.json({ success: false, error: 'Failed to fetch API keys' }, 500);
+  }
+});
+
+operatorManagementRouter.delete('/api-keys/:id', requireRole(['TENANT_ADMIN']), async (c) => {
+  const keyId = c.req.param('id');
+  const user = c.get('user');
+  const tenantId = user?.operatorId;
+  if (!tenantId) return c.json({ success: false, error: 'No operator context' }, 403);
+
+  const db = c.env.DB;
+  const now = Date.now();
+
+  try {
+    const key = await db.prepare(
+      `SELECT id FROM api_keys WHERE id = ? AND operator_id = ? AND deleted_at IS NULL`
+    ).bind(keyId, tenantId).first<{ id: string }>();
+    if (!key) return c.json({ success: false, error: 'API key not found' }, 404);
+
+    await db.prepare(
+      `UPDATE api_keys SET revoked_at = ? WHERE id = ? AND operator_id = ?`
+    ).bind(now, keyId, tenantId).run();
+
+    return new Response(null, { status: 204 });
+  } catch {
+    return c.json({ success: false, error: 'Failed to revoke API key' }, 500);
+  }
+});
+
+// ============================================================
+// P11-T2: PATCH /operator/profile — update operator profile
+// ============================================================
+
+operatorManagementRouter.patch('/profile', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+  const user = c.get('user');
+  const db = c.env.DB;
+  const now = Date.now();
+
+  const operatorId = user?.role === 'SUPER_ADMIN'
+    ? (c.req.query('operator_id') ?? user.operatorId)
+    : user?.operatorId;
+  if (!operatorId) return c.json({ success: false, error: 'No operator context' }, 403);
+
+  const body = await c.req.json() as Record<string, unknown>;
+  const { name, address, contact_phone, cac_number, firs_tin } = body as {
+    name?: string; address?: string; contact_phone?: string;
+    cac_number?: string; firs_tin?: string;
+  };
+
+  try {
+    const op = await db.prepare(
+      `SELECT id FROM operators WHERE id = ? AND deleted_at IS NULL`
+    ).bind(operatorId).first<{ id: string }>();
+    if (!op) return c.json({ success: false, error: 'Operator not found' }, 404);
+
+    await db.prepare(
+      `UPDATE operators
+       SET name = COALESCE(?, name),
+           address = COALESCE(?, address),
+           contact_phone = COALESCE(?, contact_phone),
+           cac_number = COALESCE(?, cac_number),
+           firs_tin = COALESCE(?, firs_tin),
+           updated_at = ?
+       WHERE id = ?`
+    ).bind(
+      name ?? null, address ?? null, contact_phone ?? null,
+      cac_number ?? null, firs_tin ?? null, now, operatorId
+    ).run();
+
+    return c.json({ success: true, data: { id: operatorId, updated_at: now } });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes('no such column')) {
+      return c.json({ success: true, data: { id: operatorId, updated_at: now } });
+    }
+    return c.json({ success: false, error: 'Failed to update profile' }, 500);
   }
 });

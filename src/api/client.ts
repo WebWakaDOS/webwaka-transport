@@ -367,6 +367,42 @@ export interface ReservationResult {
 }
 
 // ============================================================
+// P11-T1: API Key Types
+// ============================================================
+
+export interface ApiKey {
+  id: string;
+  operator_id: string;
+  name: string;
+  scope: 'read' | 'read_write';
+  created_at: number;
+  last_used_at: number | null;
+  revoked_at: number | null;
+}
+
+export interface ApiKeyCreated {
+  id: string;
+  name: string;
+  scope: 'read' | 'read_write';
+  key: string;
+  created_at: number;
+}
+
+// ============================================================
+// P11-T3: Route Stop Types
+// ============================================================
+
+export interface RouteStop {
+  id: string;
+  route_id: string;
+  stop_name: string;
+  sequence: number;
+  distance_from_origin_km: number | null;
+  fare_from_origin_kobo: number | null;
+  created_at?: number;
+}
+
+// ============================================================
 // Error type
 // ============================================================
 
@@ -688,7 +724,7 @@ export class ApiClient {
 
   async createTrip(data: {
     route_id: string; vehicle_id: string; departure_time: number;
-    base_fare?: number; total_seats?: number;
+    driver_id?: string; base_fare?: number; total_seats?: number;
   }): Promise<Trip> {
     return this.request<Trip>('POST', '/api/operator/trips', data);
   }
@@ -948,6 +984,52 @@ export class ApiClient {
   async getPlatformAnalytics(): Promise<PlatformAnalytics> {
     const res = await this.request<{ success: boolean; data: PlatformAnalytics }>(
       'GET', '/api/internal/admin/analytics'
+    );
+    return res.data;
+  }
+
+  // ---- P11-T1: API Key Management ----
+
+  async createApiKey(body: { name: string; scope: 'read' | 'read_write' }): Promise<ApiKeyCreated> {
+    const res = await this.request<{ success: boolean; data: ApiKeyCreated; warning?: string }>(
+      'POST', '/api/operator/api-keys', body
+    );
+    return res.data;
+  }
+
+  async listApiKeys(): Promise<ApiKey[]> {
+    const res = await this.request<{ success: boolean; data: ApiKey[] }>(
+      'GET', '/api/operator/api-keys'
+    );
+    return res.data;
+  }
+
+  async revokeApiKey(id: string): Promise<void> {
+    await this.request('DELETE', `/api/operator/api-keys/${id}`);
+  }
+
+  async updateOperatorProfile(body: {
+    name?: string; address?: string; contact_phone?: string;
+    cac_number?: string; firs_tin?: string;
+  }): Promise<void> {
+    await this.request('PATCH', '/api/operator/profile', body);
+  }
+
+  // ---- P11-T3: Multi-Stop Route Management ----
+
+  async getRouteStops(routeId: string): Promise<RouteStop[]> {
+    const res = await this.request<{ success: boolean; data: RouteStop[] }>(
+      'GET', `/api/operator/routes/${routeId}/stops`
+    );
+    return res.data;
+  }
+
+  async setRouteStops(routeId: string, stops: {
+    stop_name: string; sequence: number;
+    distance_from_origin_km?: number; fare_from_origin_kobo?: number;
+  }[]): Promise<RouteStop[]> {
+    const res = await this.request<{ success: boolean; data: RouteStop[] }>(
+      'POST', `/api/operator/routes/${routeId}/stops`, { stops }
     );
     return res.data;
   }

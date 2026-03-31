@@ -79,40 +79,102 @@ bookingPortalRouter.get('/routes', async (c) => {
 // GET /trips/search — public: search trips by route and date
 // ============================================================
 bookingPortalRouter.get('/trips/search', async (c) => {
-  const { origin, destination, date } = c.req.query();
+  const { origin, destination, date, origin_stop, destination_stop } = c.req.query();
   const db = c.env.DB;
 
-  let query = `SELECT t.id, t.departure_time, t.state, r.origin, r.destination, r.base_fare, r.fare_matrix,
-    o.name as operator_name,
-    COUNT(CASE WHEN s.status = 'available' THEN 1 END) as available_seats
-    FROM trips t
-    JOIN routes r ON t.route_id = r.id
-    JOIN operators o ON t.operator_id = o.id
-    LEFT JOIN seats s ON t.id = s.trip_id
-    WHERE t.deleted_at IS NULL AND t.state IN ('scheduled', 'boarding')`;
+  // P11-T3: If origin_stop or destination_stop provided, use route_stops JOIN
+  const useStops = !!(origin_stop || destination_stop);
+
+  let query: string;
   const params: unknown[] = [];
-  if (origin) { query += ` AND r.origin LIKE ?`; params.push(`%${origin}%`); }
-  if (destination) { query += ` AND r.destination LIKE ?`; params.push(`%${destination}%`); }
-  if (date) {
-    const start = new Date(date).setHours(0, 0, 0, 0);
-    const end = new Date(date).setHours(23, 59, 59, 999);
-    query += ` AND t.departure_time BETWEEN ? AND ?`;
-    params.push(start, end);
+
+  if (useStops) {
+    query = `SELECT t.id, t.departure_time, t.state, r.origin, r.destination, r.base_fare, r.fare_matrix,
+      o.name as operator_name,
+      COUNT(CASE WHEN s.status = 'available' THEN 1 END) as available_seats,
+      rs_orig.id as origin_stop_id, rs_orig.stop_name as origin_stop_name,
+      rs_orig.sequence as origin_stop_seq, rs_orig.fare_from_origin_kobo as origin_fare_kobo,
+      rs_dest.id as destination_stop_id, rs_dest.stop_name as destination_stop_name,
+      rs_dest.sequence as destination_stop_seq, rs_dest.fare_from_origin_kobo as dest_fare_kobo
+      FROM trips t
+      JOIN routes r ON t.route_id = r.id
+      JOIN operators o ON t.operator_id = o.id
+      LEFT JOIN seats s ON t.id = s.trip_id
+      JOIN route_stops rs_orig ON rs_orig.route_id = r.id
+      JOIN route_stops rs_dest ON rs_dest.route_id = r.id
+      WHERE t.deleted_at IS NULL AND t.state IN ('scheduled', 'boarding')
+        AND r.route_stops_enabled = 1
+        AND rs_orig.sequence < rs_dest.sequence`;
+
+    if (origin_stop) { query += ` AND rs_orig.stop_name LIKE ?`; params.push(`%${origin_stop}%`); }
+    if (destination_stop) { query += ` AND rs_dest.stop_name LIKE ?`; params.push(`%${destination_stop}%`); }
+    if (origin) { query += ` AND r.origin LIKE ?`; params.push(`%${origin}%`); }
+    if (destination) { query += ` AND r.destination LIKE ?`; params.push(`%${destination}%`); }
+    if (date) {
+      const start = new Date(date).setHours(0, 0, 0, 0);
+      const end = new Date(date).setHours(23, 59, 59, 999);
+      query += ` AND t.departure_time BETWEEN ? AND ?`;
+      params.push(start, end);
+    }
+    query += ` GROUP BY t.id, rs_orig.id, rs_dest.id HAVING available_seats > 0 ORDER BY t.departure_time ASC`;
+  } else {
+    query = `SELECT t.id, t.departure_time, t.state, r.origin, r.destination, r.base_fare, r.fare_matrix,
+      o.name as operator_name,
+      COUNT(CASE WHEN s.status = 'available' THEN 1 END) as available_seats
+      FROM trips t
+      JOIN routes r ON t.route_id = r.id
+      JOIN operators o ON t.operator_id = o.id
+      LEFT JOIN seats s ON t.id = s.trip_id
+      WHERE t.deleted_at IS NULL AND t.state IN ('scheduled', 'boarding')`;
+
+    if (origin) { query += ` AND r.origin LIKE ?`; params.push(`%${origin}%`); }
+    if (destination) { query += ` AND r.destination LIKE ?`; params.push(`%${destination}%`); }
+    if (date) {
+      const start = new Date(date).setHours(0, 0, 0, 0);
+      const end = new Date(date).setHours(23, 59, 59, 999);
+      query += ` AND t.departure_time BETWEEN ? AND ?`;
+      params.push(start, end);
+    }
+    query += ` GROUP BY t.id HAVING available_seats > 0 ORDER BY t.departure_time ASC`;
   }
-  query += ` GROUP BY t.id HAVING available_seats > 0 ORDER BY t.departure_time ASC`;
 
   try {
     const result = await db.prepare(query).bind(...params).all<{
       id: string; departure_time: number; state: string; origin: string; destination: string;
       base_fare: number; fare_matrix: string | null; operator_name: string; available_seats: number;
+      // stop columns (only present when useStops)
+      origin_stop_id?: string; origin_stop_name?: string; origin_stop_seq?: number; origin_fare_kobo?: number | null;
+      destination_stop_id?: string; destination_stop_name?: string; destination_stop_seq?: number; dest_fare_kobo?: number | null;
     }>();
 
-    // P08-T2: Enrich each trip with effective fare by class
     const enriched = result.results.map(trip => {
       const fareMatrix: FareMatrix | null = trip.fare_matrix ? JSON.parse(trip.fare_matrix) as FareMatrix : null;
-      const effective_fare_by_class = computeFareByClass(trip.base_fare, fareMatrix, trip.departure_time);
-      const effective_fare = Math.min(...Object.values(effective_fare_by_class)); // cheapest class
-      return { ...trip, fare_matrix: undefined, effective_fare_by_class, effective_fare };
+      let effective_fare_by_class = computeFareByClass(trip.base_fare, fareMatrix, trip.departure_time);
+      let effective_fare = Math.min(...Object.values(effective_fare_by_class));
+
+      // P11-T3: Compute segment fare for stop-based search
+      let segment_fare: number | undefined;
+      if (useStops && trip.dest_fare_kobo != null && trip.origin_fare_kobo != null) {
+        segment_fare = trip.dest_fare_kobo - trip.origin_fare_kobo;
+        if (segment_fare > 0) {
+          effective_fare = segment_fare;
+          effective_fare_by_class = { standard: segment_fare, window: segment_fare, vip: segment_fare, front: segment_fare };
+        }
+      }
+
+      return {
+        ...trip,
+        fare_matrix: undefined,
+        effective_fare_by_class,
+        effective_fare,
+        ...(useStops ? {
+          origin_stop_id: trip.origin_stop_id,
+          origin_stop_name: trip.origin_stop_name,
+          destination_stop_id: trip.destination_stop_id,
+          destination_stop_name: trip.destination_stop_name,
+          segment_fare,
+        } : {}),
+      };
     });
 
     return c.json({ success: true, data: enriched });
@@ -171,9 +233,11 @@ bookingPortalRouter.post('/bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN'
   const err = requireFields(body, ['customer_id', 'trip_id', 'seat_ids', 'passenger_names', 'payment_method']);
   if (err) return c.json({ success: false, error: err }, 400);
 
-  const { customer_id, trip_id, seat_ids, passenger_names, payment_method, ndpr_consent } = body as {
+  const { customer_id, trip_id, seat_ids, passenger_names, payment_method, ndpr_consent,
+          origin_stop_id, destination_stop_id } = body as {
     customer_id: string; trip_id: string; seat_ids: string[]; passenger_names: string[];
     payment_method: string; ndpr_consent?: boolean;
+    origin_stop_id?: string; destination_stop_id?: string;
   };
 
   if (!ndpr_consent) return c.json({ success: false, error: 'NDPR consent required to process booking' }, 400);
@@ -238,19 +302,55 @@ bookingPortalRouter.post('/bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN'
       }
     }
 
+    // P11-T3: Validate stop IDs if provided
+    let validatedOriginStopId: string | null = null;
+    let validatedDestStopId: string | null = null;
+    if (origin_stop_id || destination_stop_id) {
+      const tripRoute = await db.prepare(
+        `SELECT r.id as route_id FROM trips t JOIN routes r ON t.route_id = r.id WHERE t.id = ?`
+      ).bind(trip_id).first<{ route_id: string }>();
+
+      if (origin_stop_id) {
+        const origStop = await db.prepare(
+          `SELECT id, sequence FROM route_stops WHERE id = ? AND route_id = ?`
+        ).bind(origin_stop_id, tripRoute?.route_id ?? '').first<{ id: string; sequence: number }>();
+        if (!origStop) return c.json({ success: false, error: 'origin_stop_id not found on this route' }, 400);
+        validatedOriginStopId = origStop.id;
+
+        if (destination_stop_id) {
+          const destStop = await db.prepare(
+            `SELECT id, sequence FROM route_stops WHERE id = ? AND route_id = ?`
+          ).bind(destination_stop_id, tripRoute?.route_id ?? '').first<{ id: string; sequence: number }>();
+          if (!destStop) return c.json({ success: false, error: 'destination_stop_id not found on this route' }, 400);
+          if (destStop.sequence <= origStop.sequence) {
+            return c.json({ success: false, error: 'destination stop must come after origin stop' }, 400);
+          }
+          validatedDestStopId = destStop.id;
+        }
+      } else if (destination_stop_id) {
+        const destStop = await db.prepare(
+          `SELECT id FROM route_stops WHERE id = ? AND route_id = ?`
+        ).bind(destination_stop_id, tripRoute?.route_id ?? '').first<{ id: string }>();
+        if (!destStop) return c.json({ success: false, error: 'destination_stop_id not found on this route' }, 400);
+        validatedDestStopId = destStop.id;
+      }
+    }
+
     const total_amount = body_amount ?? expected_kobo;
     // P03-T3: Paystack-compatible reference using waka_ prefix + 16-char random
     const payment_reference = `waka_${nanoid('', 16)}`;
     const id = genId('bkg');
 
     await db.prepare(
-      `INSERT INTO bookings (id, customer_id, trip_id, seat_ids, passenger_names, total_amount, status, payment_status, payment_method, payment_reference, is_guest, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'pending', 'pending', ?, ?, ?, ?)`
-    ).bind(id, customer_id, trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, payment_method, payment_reference, isGuest ? 1 : 0, now).run();
+      `INSERT INTO bookings (id, customer_id, trip_id, seat_ids, passenger_names, total_amount, status, payment_status, payment_method, payment_reference, is_guest, origin_stop_id, destination_stop_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'pending', 'pending', ?, ?, ?, ?, ?, ?)`
+    ).bind(id, customer_id, trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, payment_method, payment_reference, isGuest ? 1 : 0, validatedOriginStopId, validatedDestStopId, now).run();
 
     return c.json({
       success: true,
-      data: { id, customer_id, trip_id, seat_ids, total_amount, expected_kobo, payment_method, payment_reference, status: 'pending' },
+      data: { id, customer_id, trip_id, seat_ids, total_amount, expected_kobo, payment_method, payment_reference, status: 'pending',
+              ...(validatedOriginStopId ? { origin_stop_id: validatedOriginStopId } : {}),
+              ...(validatedDestStopId ? { destination_stop_id: validatedDestStopId } : {}) },
     }, 201);
   } catch {
     return c.json({ success: false, error: 'Failed to create booking' }, 500);

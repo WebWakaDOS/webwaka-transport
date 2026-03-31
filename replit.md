@@ -23,6 +23,16 @@ WebWaka Transport is the Transportation & Mobility vertical suite (Part 10.3) of
 - **T3 Notification Center**: GET/POST /api/operator/notifications + /read; filters 9 actionable event types, 7-day window, unread_count; notification_reads table (migration 015); frontend: 🔔 badge with count, slide-in drawer colored by severity, persistent red SOS banner, 30-second auto-refresh
 - **Sweepers**: sweepVehicleMaintenanceDue (daily, ≤7d), sweepVehicleDocumentExpiry (daily, ≤30d), sweepDriverDocumentExpiry (daily, ≤30d) — all wired to midnight cron in worker.ts
 
+## P10-TRANSPORT Dispatcher & Analytics (complete)
+- **T1 Dispatcher Dashboard**: GET /api/dispatcher/dashboard; live trip map view with GPS positions, seat utilization, driver/vehicle info, SOS alerts; DispatcherDashboard component; nav button in OperatorOverview
+- **T2 Platform Analytics**: GET /api/super-admin/analytics; SUPER_ADMIN-only aggregate metrics (operators, revenue, bookings, trips, vehicles, drivers, agents); PlatformAnalyticsSection component in analytics tab; ANALYTICS_ROLES restricted to ['SUPER_ADMIN']
+
+## P11-TRANSPORT Operator API Keys, Onboarding Wizard, Multi-Stop Routes (complete)
+- **T1 API Keys**: POST/GET/DELETE /api/operator/api-keys (SHA-256 hash, scope read|read_write); ApiKeysPanel frontend with list/create/revoke/copy; PATCH /operator/profile for profile updates
+- **T2 Onboarding Wizard**: OnboardingWizard component (7-step bottom-sheet: Profile→Vehicles→Routes→Seat Templates→Drivers→Agents→First Trip); auto-triggered for new TENANT_ADMIN operators when routes+vehicles are empty; dismissed via localStorage key
+- **T3 Multi-Stop Routes**: POST/GET /api/operator/routes/:id/stops (replace-all approach); RouteStopsPanel inline in RoutesPanel with ordered stop editing; booking-portal updated for origin_stop/destination_stop params with segment fare computation
+- **Sweepers**: sweepBookingReminders — 24h + 2h pre-departure SMS reminders (reminder_24h_sent_at / reminder_2h_sent_at columns on bookings via migration 016)
+
 ## Tech Stack
 - **Frontend**: React 19 + TypeScript + Vite (PWA, mobile-first, port 5000)
 - **Backend**: Cloudflare Workers + Hono framework

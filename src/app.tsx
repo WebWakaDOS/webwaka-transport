@@ -13,8 +13,9 @@ import { TicketPage } from './components/ticket';
 import { ConflictLog } from './components/conflict-log';
 import { DriverView } from './components/driver-view';
 import ReceiptModal, { type ReceiptData } from './components/receipt';
+import { OnboardingWizard } from './components/onboarding-wizard';
 import { api, ApiError } from './api/client';
-import type { TripSummary, Route, Vehicle, Trip, OperatorStats, Booking, SeatAvailability, TripManifest, ManifestEntry, Driver, Agent, RevenueReport, RouteRevenue, PlatformOperator, OperatorNotification, DispatchDashboard, DispatchTrip, GroupedRevenueReport, RevenueReportItem, PlatformAnalytics } from './api/client';
+import type { TripSummary, Route, Vehicle, Trip, OperatorStats, Booking, SeatAvailability, TripManifest, ManifestEntry, Driver, Agent, RevenueReport, RouteRevenue, PlatformOperator, OperatorNotification, DispatchDashboard, DispatchTrip, GroupedRevenueReport, RevenueReportItem, PlatformAnalytics, ApiKey, ApiKeyCreated, RouteStop } from './api/client';
 import { getConflicts } from './core/offline/db';
 
 // ============================================================
@@ -993,7 +994,7 @@ function NotificationPanel({ notifications, unreadCount, markRead, onClose }: {
 // ============================================================
 // Operator Dashboard Module (TRN-4) — Routes, Vehicles, Trips
 // ============================================================
-type OperatorView = 'overview' | 'routes' | 'vehicles' | 'trips' | 'drivers' | 'agents' | 'reports' | 'dispatch';
+type OperatorView = 'overview' | 'routes' | 'vehicles' | 'trips' | 'drivers' | 'agents' | 'reports' | 'dispatch' | 'api-keys';
 
 function OperatorOverview({ onNav }: { onNav: (v: OperatorView) => void }) {
   const [stats, setStats] = useState<OperatorStats | null>(null);
@@ -1064,6 +1065,10 @@ function OperatorOverview({ onNav }: { onNav: (v: OperatorView) => void }) {
             <button onClick={() => onNav('reports')} style={{ ...navCardStyle, gridColumn: 'span 2' }}>
               <span style={{ fontSize: 24 }}>📊</span>
               <span style={{ fontSize: 13, fontWeight: 600, marginTop: 4 }}>Revenue Reports</span>
+            </button>
+            <button onClick={() => onNav('api-keys')} style={{ ...navCardStyle, gridColumn: 'span 2' }}>
+              <span style={{ fontSize: 24 }}>🔑</span>
+              <span style={{ fontSize: 13, fontWeight: 600, marginTop: 4 }}>API Keys</span>
             </button>
           </div>
         </>
@@ -1179,6 +1184,289 @@ function DispatcherDashboard({ onBack }: { onBack: () => void }) {
   );
 }
 
+// ============================================================
+// P11-T1: ApiKeysPanel — list, create, revoke operator API keys
+// ============================================================
+function ApiKeysPanel({ onBack }: { onBack: () => void }) {
+  const [keys, setKeys] = useState<ApiKey[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ name: '', scope: 'read' as 'read' | 'read_write' });
+  const [creating, setCreating] = useState(false);
+  const [newKey, setNewKey] = useState<ApiKeyCreated | null>(null);
+  const [revoking, setRevoking] = useState<string | null>(null);
+  const [error, setError] = useState('');
+  const [copied, setCopied] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try { setKeys(await api.listApiKeys()); } catch { setKeys([]); } finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const handleCreate = async () => {
+    if (!form.name.trim()) { setError('Key name is required'); return; }
+    setCreating(true);
+    setError('');
+    try {
+      const created = await api.createApiKey({ name: form.name.trim(), scope: form.scope });
+      setNewKey(created);
+      setShowForm(false);
+      setForm({ name: '', scope: 'read' });
+      await load();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Failed to create API key');
+    } finally { setCreating(false); }
+  };
+
+  const handleRevoke = async (id: string) => {
+    if (!confirm('Revoke this API key? Any integrations using it will stop working.')) return;
+    setRevoking(id);
+    try {
+      await api.revokeApiKey(id);
+      await load();
+    } catch (e) {
+      alert(e instanceof ApiError ? e.message : 'Failed to revoke key');
+    } finally { setRevoking(null); }
+  };
+
+  const handleCopy = (text: string) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  const activeKeys = keys.filter(k => !k.revoked_at);
+  const revokedKeys = keys.filter(k => k.revoked_at);
+
+  return (
+    <>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+        <button onClick={onBack} style={backBtnStyle}>←</button>
+        <h2 style={{ margin: 0, fontSize: 18, flex: 1 }}>API Keys</h2>
+        <button onClick={() => { setShowForm(s => !s); setNewKey(null); setError(''); }} style={{ ...primaryBtnStyle, padding: '8px 14px', fontSize: 13 }}>
+          {showForm ? 'Cancel' : '+ New Key'}
+        </button>
+      </div>
+
+      {newKey && (
+        <div style={{ ...cardStyle, cursor: 'default', background: '#f0fdf4', border: '1.5px solid #16a34a', marginBottom: 14 }}>
+          <div style={{ fontWeight: 700, fontSize: 14, color: '#15803d', marginBottom: 6 }}>Key created — copy it now, it won't be shown again</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: '#fff', borderRadius: 8, padding: '8px 10px', border: '1px solid #dcfce7' }}>
+            <code style={{ flex: 1, fontSize: 11, wordBreak: 'break-all', color: '#166534' }}>{newKey.key}</code>
+            <button
+              onClick={() => handleCopy(newKey.key)}
+              style={{ ...primaryBtnStyle, padding: '6px 10px', fontSize: 11, background: copied ? '#16a34a' : '#2563eb' }}
+            >
+              {copied ? 'Copied!' : 'Copy'}
+            </button>
+          </div>
+          <div style={{ fontSize: 11, color: '#64748b', marginTop: 6 }}>
+            Name: {newKey.name} · Scope: {newKey.scope} · Created: {new Date(newKey.created_at).toLocaleDateString('en-NG')}
+          </div>
+          <button onClick={() => setNewKey(null)} style={{ marginTop: 8, background: 'none', border: 'none', color: '#94a3b8', fontSize: 11, cursor: 'pointer' }}>Dismiss</button>
+        </div>
+      )}
+
+      {showForm && (
+        <div style={{ ...cardStyle, marginBottom: 16, cursor: 'default' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <input
+              placeholder="Key name (e.g. Mobile App, POS Terminal)"
+              value={form.name}
+              onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+              style={inputStyle}
+            />
+            <select
+              value={form.scope}
+              onChange={e => setForm(f => ({ ...f, scope: e.target.value as 'read' | 'read_write' }))}
+              style={inputStyle}
+            >
+              <option value="read">Read only — view trips & schedules</option>
+              <option value="read_write">Read & write — create bookings</option>
+            </select>
+            {error && <p style={{ color: '#dc2626', fontSize: 12, margin: 0 }}>{error}</p>}
+            <button onClick={() => void handleCreate()} disabled={creating} style={primaryBtnStyle}>
+              {creating ? 'Creating...' : 'Create API Key'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      <p style={{ margin: '0 0 10px', fontSize: 12, color: '#64748b' }}>
+        Use API keys to integrate WebWaka with your apps, POS terminals, or booking websites.
+      </p>
+
+      {loading ? (
+        <p style={{ color: '#94a3b8', textAlign: 'center' }}>Loading...</p>
+      ) : activeKeys.length === 0 && revokedKeys.length === 0 ? (
+        <p style={{ color: '#94a3b8', textAlign: 'center', fontSize: 14 }}>No API keys yet. Create one to get started.</p>
+      ) : (
+        <>
+          {activeKeys.map(k => (
+            <div key={k.id} style={{ ...cardStyle, cursor: 'default' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 14 }}>{k.name}</div>
+                  <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>
+                    Scope: <strong>{k.scope === 'read_write' ? 'Read & Write' : 'Read only'}</strong>
+                    {' · '}Created: {new Date(k.created_at).toLocaleDateString('en-NG')}
+                    {k.last_used_at ? ` · Last used: ${new Date(k.last_used_at).toLocaleDateString('en-NG')}` : ' · Never used'}
+                  </div>
+                  <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 2 }}>ID: {k.id}</div>
+                </div>
+                <button
+                  onClick={() => void handleRevoke(k.id)}
+                  disabled={revoking === k.id}
+                  style={{ background: '#fef2f2', color: '#dc2626', border: '1px solid #fca5a5', borderRadius: 8, padding: '5px 10px', fontSize: 12, cursor: 'pointer', fontWeight: 600 }}
+                >
+                  {revoking === k.id ? '...' : 'Revoke'}
+                </button>
+              </div>
+            </div>
+          ))}
+          {revokedKeys.length > 0 && (
+            <>
+              <div style={{ margin: '12px 0 6px', fontSize: 12, fontWeight: 600, color: '#94a3b8' }}>Revoked Keys</div>
+              {revokedKeys.map(k => (
+                <div key={k.id} style={{ ...cardStyle, cursor: 'default', opacity: 0.55 }}>
+                  <div style={{ fontWeight: 600, fontSize: 13, textDecoration: 'line-through', color: '#94a3b8' }}>{k.name}</div>
+                  <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>
+                    {k.scope} · Revoked: {k.revoked_at ? new Date(k.revoked_at).toLocaleDateString('en-NG') : '—'}
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+        </>
+      )}
+    </>
+  );
+}
+
+// ============================================================
+// Route Stops sub-panel (used inline in RoutesPanel)
+// ============================================================
+function RouteStopsPanel({ routeId, onClose }: { routeId: string; onClose: () => void }) {
+  const [stops, setStops] = useState<RouteStop[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  // draft list for editing
+  const [draft, setDraft] = useState<{ stop_name: string; distance_from_origin_km: string; fare_from_origin_kobo: string }[]>([]);
+  const [dirty, setDirty] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await api.getRouteStops(routeId);
+      setStops(data);
+      setDraft(data.map(s => ({
+        stop_name: s.stop_name,
+        distance_from_origin_km: s.distance_from_origin_km != null ? String(s.distance_from_origin_km) : '',
+        fare_from_origin_kobo: s.fare_from_origin_kobo != null ? String(s.fare_from_origin_kobo / 100) : '',
+      })));
+      setDirty(false);
+    } catch { setStops([]); setDraft([]); } finally { setLoading(false); }
+  }, [routeId]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const addStop = () => {
+    setDraft(d => [...d, { stop_name: '', distance_from_origin_km: '', fare_from_origin_kobo: '' }]);
+    setDirty(true);
+  };
+
+  const updateStop = (idx: number, field: string, val: string) => {
+    setDraft(d => d.map((s, i) => i === idx ? { ...s, [field]: val } : s));
+    setDirty(true);
+  };
+
+  const removeStop = (idx: number) => {
+    setDraft(d => d.filter((_, i) => i !== idx));
+    setDirty(true);
+  };
+
+  const handleSave = async () => {
+    const valid = draft.filter(s => s.stop_name.trim());
+    if (valid.length === 0) { setError('Add at least one stop name'); return; }
+    setSaving(true);
+    setError('');
+    try {
+      await api.setRouteStops(routeId, valid.map((s, idx) => ({
+        stop_name: s.stop_name.trim(),
+        sequence: idx + 1,
+        ...(s.distance_from_origin_km ? { distance_from_origin_km: parseFloat(s.distance_from_origin_km) } : {}),
+        ...(s.fare_from_origin_kobo ? { fare_from_origin_kobo: Math.round(parseFloat(s.fare_from_origin_kobo) * 100) } : {}),
+      })));
+      await load();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Failed to save stops');
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <div style={{ marginTop: 10, padding: '12px 14px', background: '#f8fafc', borderRadius: 10, border: '1px solid #e2e8f0' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+        <span style={{ fontWeight: 700, fontSize: 13 }}>Intermediate Stops ({stops.length})</span>
+        <div style={{ display: 'flex', gap: 6 }}>
+          {dirty && (
+            <button onClick={() => void handleSave()} disabled={saving} style={{ ...primaryBtnStyle, padding: '5px 10px', fontSize: 12 }}>
+              {saving ? 'Saving...' : 'Save'}
+            </button>
+          )}
+          <button onClick={onClose} style={{ background: 'none', border: 'none', color: '#94a3b8', fontSize: 18, cursor: 'pointer', lineHeight: 1 }}>×</button>
+        </div>
+      </div>
+      {loading ? (
+        <p style={{ color: '#94a3b8', fontSize: 12, margin: 0 }}>Loading stops...</p>
+      ) : (
+        <>
+          {draft.length === 0 && !dirty && (
+            <p style={{ color: '#94a3b8', fontSize: 12, margin: '0 0 8px' }}>No intermediate stops yet. Add stops for multi-stop ticketing.</p>
+          )}
+          {draft.map((s, idx) => (
+            <div key={idx} style={{ display: 'flex', gap: 6, alignItems: 'flex-start', marginBottom: 6 }}>
+              <span style={{ minWidth: 20, paddingTop: 10, fontSize: 11, color: '#94a3b8', fontWeight: 600 }}>{idx + 1}.</span>
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <input
+                  placeholder="Stop name (e.g. Ore)"
+                  value={s.stop_name}
+                  onChange={e => updateStop(idx, 'stop_name', e.target.value)}
+                  style={{ ...inputStyle, padding: '7px 10px', fontSize: 12 }}
+                />
+                <div style={{ display: 'flex', gap: 4 }}>
+                  <input
+                    placeholder="Distance from origin (km)"
+                    type="number"
+                    value={s.distance_from_origin_km}
+                    onChange={e => updateStop(idx, 'distance_from_origin_km', e.target.value)}
+                    style={{ ...inputStyle, padding: '5px 8px', fontSize: 11, flex: 1 }}
+                  />
+                  <input
+                    placeholder="Fare from origin (₦)"
+                    type="number"
+                    value={s.fare_from_origin_kobo}
+                    onChange={e => updateStop(idx, 'fare_from_origin_kobo', e.target.value)}
+                    style={{ ...inputStyle, padding: '5px 8px', fontSize: 11, flex: 1 }}
+                  />
+                </div>
+              </div>
+              <button onClick={() => removeStop(idx)} style={{ background: 'none', border: 'none', color: '#dc2626', fontSize: 18, cursor: 'pointer', paddingTop: 6 }}>×</button>
+            </div>
+          ))}
+          {error && <p style={{ color: '#dc2626', fontSize: 12, margin: '4px 0 0' }}>{error}</p>}
+          <button onClick={addStop} style={{ marginTop: 6, background: 'none', border: '1.5px dashed #cbd5e1', borderRadius: 8, color: '#475569', fontSize: 12, padding: '7px 12px', cursor: 'pointer', width: '100%' }}>
+            + Add Stop
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
 function RoutesPanel({ onBack }: { onBack: () => void }) {
   const { user } = useAuth();
   const [routes, setRoutes] = useState<Route[]>([]);
@@ -1187,6 +1475,7 @@ function RoutesPanel({ onBack }: { onBack: () => void }) {
   const [form, setForm] = useState({ origin: '', destination: '', base_fare: '', operator_id: user?.operator_id ?? '' });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [expandedStopsRouteId, setExpandedStopsRouteId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1267,6 +1556,15 @@ function RoutesPanel({ onBack }: { onBack: () => void }) {
               }}>{r.status}</span>
             </div>
             <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>ID: {r.id}</div>
+            <button
+              onClick={() => setExpandedStopsRouteId(v => v === r.id ? null : r.id)}
+              style={{ marginTop: 8, background: 'none', border: '1px solid #e2e8f0', borderRadius: 7, color: '#475569', fontSize: 11, padding: '5px 10px', cursor: 'pointer', fontWeight: 600 }}
+            >
+              {expandedStopsRouteId === r.id ? 'Hide Stops ▲' : 'Manage Stops ▼'}
+            </button>
+            {expandedStopsRouteId === r.id && (
+              <RouteStopsPanel routeId={r.id} onClose={() => setExpandedStopsRouteId(null)} />
+            )}
           </div>
         ))
       )}
@@ -2125,11 +2423,43 @@ function OperatorDashboardModule() {
   const [view, setView] = useState<OperatorView>('overview');
   const [panelOpen, setPanelOpen] = useState(false);
   const { notifications, unreadCount, markRead } = useOperatorNotifications();
+  const { user } = useAuth();
+
+  // P11-T2: Onboarding wizard detection — show for new TENANT_ADMIN operators
+  const [showWizard, setShowWizard] = useState(false);
+  const [wizardChecked, setWizardChecked] = useState(false);
+
+  useEffect(() => {
+    if (user?.role !== 'TENANT_ADMIN' || !user?.operator_id) { setWizardChecked(true); return; }
+    const wasExited = localStorage.getItem('webwaka_onboarding_exited') === '1';
+    if (wasExited) { setWizardChecked(true); return; }
+    Promise.all([
+      api.getOperatorRoutes().catch(() => [] as Route[]),
+      api.getVehicles().catch(() => [] as Vehicle[]),
+    ]).then(([routes, vehicles]) => {
+      if (routes.length === 0 && vehicles.length === 0) setShowWizard(true);
+      setWizardChecked(true);
+    }).catch(() => setWizardChecked(true));
+  }, [user]);
+
+  const handleWizardComplete = useCallback(() => {
+    localStorage.setItem('webwaka_onboarding_exited', '1');
+    setShowWizard(false);
+  }, []);
 
   const sosActive = notifications.some(n => SOS_EVENT_TYPES.includes(n.event_type) && !n.is_read);
 
   return (
     <div style={{ padding: 16 }}>
+      {/* P11-T2: Onboarding wizard for new operators */}
+      {showWizard && user?.operator_id && (
+        <OnboardingWizard
+          operatorId={user.operator_id}
+          operatorName=""
+          onComplete={handleWizardComplete}
+        />
+      )}
+
       {/* SOS persistent banner — only cleared when SOS notifications are read */}
       {sosActive && (
         <div style={{
@@ -2171,6 +2501,7 @@ function OperatorDashboardModule() {
       {view === 'agents' && <AgentsPanel onBack={() => setView('overview')} />}
       {view === 'reports' && <ReportsPanel onBack={() => setView('overview')} />}
       {view === 'dispatch' && <DispatcherDashboard onBack={() => setView('overview')} />}
+      {view === 'api-keys' && <ApiKeysPanel onBack={() => setView('overview')} />}
 
       {panelOpen && (
         <>

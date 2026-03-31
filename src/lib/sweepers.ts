@@ -714,7 +714,7 @@ export async function sweepBookingReminders(env: Env): Promise<void> {
           try { return (JSON.parse(booking.seat_ids) as string[]).length; } catch { return 1; }
         })();
         const msg = `WebWaka: Reminder — your trip ${booking.origin} → ${booking.destination} departs in ~24 hours (${depTime}). ${seatCount} seat(s) reserved. Safe travels!`;
-        await sendSms(env, booking.phone, msg);
+        await sendSms(booking.phone, msg, env);
         await db.prepare(`UPDATE bookings SET reminder_24h_sent_at = ? WHERE id = ?`).bind(now, booking.id).run();
       } catch { /* skip individual — non-fatal */ }
     }
@@ -745,7 +745,7 @@ export async function sweepBookingReminders(env: Env): Promise<void> {
           timeZone: 'Africa/Lagos', timeStyle: 'short',
         });
         const msg = `WebWaka: Departing soon! ${booking.origin} → ${booking.destination} departs at ${depTime} (~2 hours). Please proceed to boarding. Safe travels!`;
-        await sendSms(env, booking.phone, msg);
+        await sendSms(booking.phone, msg, env);
         await db.prepare(`UPDATE bookings SET reminder_2h_sent_at = ? WHERE id = ?`).bind(now, booking.id).run();
       } catch { /* skip individual — non-fatal */ }
     }
