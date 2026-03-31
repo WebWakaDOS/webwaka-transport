@@ -310,6 +310,54 @@ async function deliverEvent(evt: Record<string, unknown>, env: Env): Promise<voi
     return;
   }
 
+  // P13-T2: trip.state_changed → completed — send review-prompt SMS (once per booking)
+  if (eventType === 'trip.state_changed') {
+    try {
+      const payload = JSON.parse(String(evt['payload'] ?? '{}')) as Record<string, unknown>;
+      const newState = String(payload['new_state'] ?? '');
+      if (newState !== 'completed') return; // only act on completion
+
+      const tripId = String(payload['trip_id'] ?? evt['aggregate_id'] ?? '');
+      const db = env.DB;
+      const now = Date.now();
+
+      // Find all confirmed bookings for this trip that have not had a review prompt sent
+      const bookings = await db.prepare(
+        `SELECT b.id, b.customer_id, c.phone as customer_phone, r.origin, r.destination
+         FROM bookings b
+         JOIN customers c ON c.id = b.customer_id
+         JOIN trips t ON t.id = b.trip_id
+         JOIN routes r ON r.id = t.route_id
+         WHERE b.trip_id = ?
+           AND b.status = 'confirmed'
+           AND b.deleted_at IS NULL
+           AND b.review_prompt_sent_at IS NULL
+         LIMIT 100`
+      ).bind(tripId).all<{ id: string; customer_id: string; customer_phone: string; origin: string; destination: string }>();
+
+      let sent = 0;
+      for (const bk of bookings.results) {
+        if (!bk.customer_phone || bk.customer_phone.startsWith('NDPR_')) continue;
+        const shortRef = bk.id.slice(-8).toUpperCase();
+        const msg =
+          `WebWaka: Hope you enjoyed your trip from ${bk.origin} to ${bk.destination}! ` +
+          `Please rate your experience at https://webwaka.ng/review/${shortRef} — it takes 30 seconds.`;
+        try {
+          await sendSms(bk.customer_phone, msg, env);
+          await db.prepare(`UPDATE bookings SET review_prompt_sent_at = ? WHERE id = ?`)
+            .bind(now, bk.id).run();
+          sent++;
+        } catch {
+          // SMS failed — non-fatal, review_prompt_sent_at stays NULL so it retries next drain
+        }
+      }
+      console.log(`[EventBus] trip.state_changed→completed review prompts sent=${sent}, trip=${tripId}`);
+    } catch (err) {
+      console.error('[EventBus] trip.state_changed handler error (non-fatal):', err instanceof Error ? err.message : err);
+    }
+    return;
+  }
+
   // P05-T6: trip:DELAYED — bulk SMS to all affected passengers
   if (eventType === 'trip:DELAYED') {
     try {

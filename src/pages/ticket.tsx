@@ -103,12 +103,16 @@ export function TicketPage({ bookingId }: TicketPageProps) {
   const passengerNames: string[] = JSON.parse(booking.passenger_names) as string[];
   const shortRef = booking.id.slice(-8).toUpperCase();
 
-  const receiptText = encodeURIComponent(
-    `WebWaka Booking Confirmed!\n${booking.origin} → ${booking.destination}\n` +
-    `Date: ${formatDate(booking.departure_time)}\n` +
-    `Seats: ${seatIds.length}\nRef: ${shortRef}\n` +
-    `View: https://webwaka.ng/b/${booking.id}`
-  );
+  const whatsAppText = [
+    'WebWaka Booking Confirmed! ✅',
+    `Route: ${booking.origin} → ${booking.destination}`,
+    `Date: ${formatDate(booking.departure_time)}`,
+    `Seat(s): ${seatIds.length}`,
+    `Passenger: ${passengerNames[0] ?? 'Passenger'}`,
+    `Ref: ${shortRef}`,
+    `View ticket: https://webwaka.ng/b/${booking.id}`,
+  ].join('\n');
+  const whatsAppUrl = `https://wa.me/?text=${encodeURIComponent(whatsAppText)}`;
 
   return (
     <div style={pageStyle}>
@@ -167,12 +171,16 @@ export function TicketPage({ bookingId }: TicketPageProps) {
 
           <div className="no-print" style={{ display: 'flex', gap: 10, marginTop: 4 }}>
             <a
-              href={`https://wa.me/?text=${receiptText}`}
+              href={whatsAppUrl}
               target="_blank"
               rel="noopener noreferrer"
-              style={{ ...btnStyle, flex: 1, textAlign: 'center', textDecoration: 'none', background: '#16a34a' }}
+              className="btn-whatsapp"
+              style={{ ...btnStyle, flex: 1, textAlign: 'center', textDecoration: 'none', background: '#25D366', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
             >
-              📤 Share via WhatsApp
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="16" height="16" fill="currentColor" style={{ flexShrink: 0 }}>
+                <path d="M16 0C7.163 0 0 7.163 0 16c0 2.826.74 5.476 2.034 7.773L0 32l8.454-2.012A15.93 15.93 0 0016 32c8.837 0 16-7.163 16-16S24.837 0 16 0zm0 29.3a13.27 13.27 0 01-6.74-1.835l-.483-.287-4.99 1.188 1.226-4.867-.316-.5A13.26 13.26 0 012.7 16C2.7 8.656 8.656 2.7 16 2.7c7.344 0 13.3 5.956 13.3 13.3S23.344 29.3 16 29.3zm7.3-9.946c-.4-.2-2.367-1.168-2.733-1.3-.366-.133-.633-.2-.9.2s-1.033 1.3-1.266 1.567c-.233.267-.467.3-.867.1a10.91 10.91 0 01-3.213-1.983 12.07 12.07 0 01-2.223-2.77c-.233-.4-.025-.617.175-.817.181-.18.4-.467.6-.7.2-.233.267-.4.4-.667.133-.267.067-.5-.033-.7-.1-.2-.9-2.167-1.233-2.967-.325-.78-.656-.674-.9-.686l-.767-.013c-.267 0-.7.1-1.067.5s-1.4 1.367-1.4 3.333 1.433 3.867 1.633 4.133c.2.267 2.82 4.3 6.833 6.033.954.413 1.699.66 2.28.845.958.306 1.83.263 2.52.16.769-.114 2.367-.968 2.7-1.9.333-.933.333-1.733.233-1.9-.1-.167-.367-.267-.767-.467z" />
+              </svg>
+              Share via WhatsApp
             </a>
             <button
               onClick={() => window.print()}

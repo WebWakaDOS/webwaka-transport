@@ -4,7 +4,7 @@
  * Invariants: Mobile-First, PWA-First, Offline-First, Nigeria-First (₦), Africa-First (4 languages)
  */
 import React, { Component, useState, useEffect, useCallback } from 'react';
-import { t, setLanguage, getLanguage, getSupportedLanguages, formatAmount, setCurrency, getCurrency, getSupportedCurrencies, type Language, type CurrencyCode } from './core/i18n/index';
+import { t, setLanguage, getLanguage, getSupportedLanguages, formatAmount, setCurrency, getCurrency, getSupportedCurrencies, autoDetectLanguage, type Language, type CurrencyCode } from './core/i18n/index';
 import { useOnlineStatus, useSyncQueue } from './core/offline/hooks';
 import { AuthProvider, useAuth, type WakaRole } from './core/auth/context';
 import { LoginScreen } from './components/login-screen';
@@ -97,6 +97,39 @@ function StatusBar({ online, pendingSync, syncing, lang, onLangChange, currency,
 }
 
 // ============================================================
+// P13-T3: Compact inline language selector — used in module headers
+// Self-contained: reads/writes from i18n state directly.
+// ============================================================
+const LANG_FLAGS: Record<Language, string> = { en: '🇬🇧', yo: '🇳🇬', ig: '🇳🇬', ha: '🇳🇬' };
+const LANG_ABBR: Record<Language, string> = { en: 'EN', yo: 'YO', ig: 'IG', ha: 'HA' };
+
+function InlineLangSelector() {
+  const [lang, setLang] = useState<Language>(getLanguage());
+  const handleChange = (l: Language) => {
+    setLanguage(l);
+    setLang(l);
+  };
+  return (
+    <select
+      value={lang}
+      onChange={e => handleChange(e.target.value as Language)}
+      aria-label={t('language')}
+      style={{
+        fontSize: 11, padding: '4px 6px', borderRadius: 6,
+        border: '1px solid #e2e8f0', background: '#f8fafc', color: '#475569',
+        cursor: 'pointer', fontWeight: 600,
+      }}
+    >
+      {getSupportedLanguages().map(l => (
+        <option key={l.code} value={l.code}>
+          {LANG_FLAGS[l.code]} {LANG_ABBR[l.code]}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+// ============================================================
 // Trip Search Module (TRN-3 Booking Portal)
 // ============================================================
 function TripSearchModule() {
@@ -152,16 +185,19 @@ function TripSearchModule() {
     <div style={{ padding: 16 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
         <h2 style={{ margin: 0, fontSize: 18 }}>{t('search_trips')}</h2>
-        <button
-          onClick={() => setAiMode(m => !m)}
-          style={{
-            fontSize: 11, padding: '5px 12px', borderRadius: 20, border: `1px solid ${aiMode ? '#7c3aed' : '#e2e8f0'}`,
-            background: aiMode ? '#f5f3ff' : '#fff', color: aiMode ? '#7c3aed' : '#64748b', cursor: 'pointer', fontWeight: 600,
-          }}
-          title="Toggle AI natural language search"
-        >
-          ✨ AI Search {aiMode ? 'ON' : 'OFF'}
-        </button>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <InlineLangSelector />
+          <button
+            onClick={() => setAiMode(m => !m)}
+            style={{
+              fontSize: 11, padding: '5px 12px', borderRadius: 20, border: `1px solid ${aiMode ? '#7c3aed' : '#e2e8f0'}`,
+              background: aiMode ? '#f5f3ff' : '#fff', color: aiMode ? '#7c3aed' : '#64748b', cursor: 'pointer', fontWeight: 600,
+            }}
+            title="Toggle AI natural language search"
+          >
+            ✨ AI Search {aiMode ? 'ON' : 'OFF'}
+          </button>
+        </div>
       </div>
 
       {aiMode ? (
@@ -487,6 +523,7 @@ function AgentPOSModule({ online }: { online: boolean }) {
           )}
         </div>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <InlineLangSelector />
           {agentSessions.length > 1 && (
             <button
               onClick={handleSwitchAgent}
@@ -2915,6 +2952,9 @@ function AppContent() {
   const [showConflicts, setShowConflicts] = useState(false);
   const online = useOnlineStatus();
   const { pendingCount: pendingSync, isSyncing } = useSyncQueue();
+
+  // P13-T3: Auto-detect browser language on first visit (no stored preference)
+  useEffect(() => { autoDetectLanguage(); }, []);
 
   // Auto-logout when JWT expires mid-session
   useEffect(() => {

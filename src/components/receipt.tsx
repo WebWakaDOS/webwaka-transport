@@ -1,5 +1,6 @@
 /**
  * P07-T2: Thermal Receipt Component
+ * P13-T1: WhatsApp branded share button (#25D366 + SVG icon)
  * Renders a printable receipt with QR code (validation payload) and supports
  * browser Print and WhatsApp share. Dynamically imports the `qrcode` lib to
  * keep it out of the main bundle.
@@ -10,6 +11,7 @@ import { formatKobo } from '@webwaka/core';
 export interface ReceiptData {
   receipt_id: string;
   transaction_id: string;
+  booking_id?: string | undefined;
   trip_origin: string;
   trip_destination: string;
   departure_time: number;
@@ -34,10 +36,44 @@ const fmtDT = (ms: number) =>
     hour: '2-digit', minute: '2-digit',
   });
 
+const WhatsAppIcon = () => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 32 32"
+    width="16"
+    height="16"
+    fill="currentColor"
+    style={{ display: 'inline', verticalAlign: 'middle', marginRight: 5 }}
+  >
+    <path d="M16 0C7.163 0 0 7.163 0 16c0 2.826.74 5.476 2.034 7.773L0 32l8.454-2.012A15.93 15.93 0 0016 32c8.837 0 16-7.163 16-16S24.837 0 16 0zm0 29.3a13.27 13.27 0 01-6.74-1.835l-.483-.287-4.99 1.188 1.226-4.867-.316-.5A13.26 13.26 0 012.7 16C2.7 8.656 8.656 2.7 16 2.7c7.344 0 13.3 5.956 13.3 13.3S23.344 29.3 16 29.3zm7.3-9.946c-.4-.2-2.367-1.168-2.733-1.3-.366-.133-.633-.2-.9.2s-1.033 1.3-1.266 1.567c-.233.267-.467.3-.867.1a10.91 10.91 0 01-3.213-1.983 12.07 12.07 0 01-2.223-2.77c-.233-.4-.025-.617.175-.817.181-.18.4-.467.6-.7.2-.233.267-.4.4-.667.133-.267.067-.5-.033-.7-.1-.2-.9-2.167-1.233-2.967-.325-.78-.656-.674-.9-.686l-.767-.013c-.267 0-.7.1-1.067.5s-1.4 1.367-1.4 3.333 1.433 3.867 1.633 4.133c.2.267 2.82 4.3 6.833 6.033.954.413 1.699.66 2.28.845.958.306 1.83.263 2.52.16.769-.114 2.367-.968 2.7-1.9.333-.933.333-1.733.233-1.9-.1-.167-.367-.267-.767-.467z" />
+  </svg>
+);
+
+interface ShareParams {
+  origin: string;
+  destination: string;
+  departureDate: string;
+  seatNumbers: string;
+  passengerName: string;
+  bookingId: string;
+}
+
+function buildWhatsAppUrl({ origin, destination, departureDate, seatNumbers, passengerName, bookingId }: ShareParams) {
+  const text = [
+    'WebWaka Booking Confirmed! ✅',
+    `Route: ${origin} → ${destination}`,
+    `Date: ${departureDate}`,
+    `Seat(s): ${seatNumbers}`,
+    `Passenger: ${passengerName}`,
+    `Ref: ${bookingId.slice(-8).toUpperCase()}`,
+    `View ticket: https://webwaka.ng/b/${bookingId}`,
+  ].join('\n');
+  return `https://wa.me/?text=${encodeURIComponent(text)}`;
+}
+
 export default function ReceiptModal({ receipt, onClose }: ReceiptModalProps) {
   const qrCanvasRef = useRef<HTMLCanvasElement>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
-  const [sharing, setSharing] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -60,31 +96,14 @@ export default function ReceiptModal({ receipt, onClose }: ReceiptModalProps) {
     window.print();
   }, []);
 
-  const handleShare = useCallback(async () => {
-    const text = [
-      `🚌 WebWaka Ticket`,
-      `Route: ${receipt.trip_origin} → ${receipt.trip_destination}`,
-      `Departure: ${fmtDT(receipt.departure_time)}`,
-      `Seats: ${receipt.seat_numbers.join(', ')}`,
-      `Passengers: ${receipt.passenger_names.join(', ')}`,
-      `Amount: ${formatKobo(receipt.total_amount)} (${receipt.payment_method})`,
-      `Receipt #: ${receipt.receipt_id}`,
-    ].join('\n');
-
-    setSharing(true);
-    try {
-      if (navigator.share) {
-        await navigator.share({ title: 'WebWaka Ticket', text });
-      } else {
-        const wa = `https://wa.me/?text=${encodeURIComponent(text)}`;
-        window.open(wa, '_blank', 'noopener,noreferrer');
-      }
-    } catch {
-      // share cancelled or not supported
-    } finally {
-      setSharing(false);
-    }
-  }, [receipt]);
+  const whatsAppUrl = buildWhatsAppUrl({
+    origin: receipt.trip_origin,
+    destination: receipt.trip_destination,
+    departureDate: fmtDT(receipt.departure_time),
+    seatNumbers: receipt.seat_numbers.join(', '),
+    passengerName: receipt.passenger_names[0] ?? 'Passenger',
+    bookingId: receipt.booking_id ?? receipt.receipt_id,
+  });
 
   return (
     <>
@@ -188,37 +207,46 @@ export default function ReceiptModal({ receipt, onClose }: ReceiptModalProps) {
 
           {/* Action buttons */}
           <div className="no-print" style={{
-            padding: '12px 16px 16px', display: 'flex', gap: 8,
+            padding: '12px 16px 16px', display: 'flex', flexDirection: 'column', gap: 8,
             borderTop: '1px solid #f1f5f9',
           }}>
-            <button
-              onClick={handlePrint}
+            {/* WhatsApp share button */}
+            <a
+              href={whatsAppUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn-whatsapp"
               style={{
-                flex: 1, padding: '10px 0', borderRadius: 8, border: '1px solid #2563eb',
-                background: '#eff6ff', color: '#2563eb', fontWeight: 700, fontSize: 13, cursor: 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                padding: '11px 0', borderRadius: 8, border: 'none',
+                background: '#25D366', color: '#fff', fontWeight: 700, fontSize: 13,
+                cursor: 'pointer', textDecoration: 'none', width: '100%',
               }}
             >
-              🖨 Print
-            </button>
-            <button
-              onClick={() => void handleShare()}
-              disabled={sharing}
-              style={{
-                flex: 1, padding: '10px 0', borderRadius: 8, border: '1px solid #16a34a',
-                background: '#f0fdf4', color: '#16a34a', fontWeight: 700, fontSize: 13, cursor: 'pointer',
-              }}
-            >
-              📤 Share
-            </button>
-            <button
-              onClick={onClose}
-              style={{
-                flex: 1, padding: '10px 0', borderRadius: 8, border: '1px solid #e2e8f0',
-                background: '#f8fafc', color: '#64748b', fontWeight: 700, fontSize: 13, cursor: 'pointer',
-              }}
-            >
-              Done
-            </button>
+              <WhatsAppIcon />
+              Share via WhatsApp
+            </a>
+
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                onClick={handlePrint}
+                style={{
+                  flex: 1, padding: '10px 0', borderRadius: 8, border: '1px solid #2563eb',
+                  background: '#eff6ff', color: '#2563eb', fontWeight: 700, fontSize: 13, cursor: 'pointer',
+                }}
+              >
+                🖨 Print
+              </button>
+              <button
+                onClick={onClose}
+                style={{
+                  flex: 1, padding: '10px 0', borderRadius: 8, border: '1px solid #e2e8f0',
+                  background: '#f8fafc', color: '#64748b', fontWeight: 700, fontSize: 13, cursor: 'pointer',
+                }}
+              >
+                Done
+              </button>
+            </div>
           </div>
         </div>
       </div>

@@ -92,6 +92,7 @@ bookingPortalRouter.get('/trips/search', async (c) => {
     query = `SELECT t.id, t.departure_time, t.state, r.origin, r.destination, r.base_fare, r.fare_matrix,
       o.name as operator_name,
       COUNT(CASE WHEN s.status = 'available' THEN 1 END) as available_seats,
+      ROUND(COALESCE(rev.avg_rating, 0), 1) as avg_rating, COALESCE(rev.review_count, 0) as review_count,
       rs_orig.id as origin_stop_id, rs_orig.stop_name as origin_stop_name,
       rs_orig.sequence as origin_stop_seq, rs_orig.fare_from_origin_kobo as origin_fare_kobo,
       rs_dest.id as destination_stop_id, rs_dest.stop_name as destination_stop_name,
@@ -100,6 +101,10 @@ bookingPortalRouter.get('/trips/search', async (c) => {
       JOIN routes r ON t.route_id = r.id
       JOIN operators o ON t.operator_id = o.id
       LEFT JOIN seats s ON t.id = s.trip_id
+      LEFT JOIN (
+        SELECT operator_id, AVG(CAST(rating AS REAL)) as avg_rating, COUNT(id) as review_count
+        FROM operator_reviews WHERE deleted_at IS NULL GROUP BY operator_id
+      ) rev ON rev.operator_id = t.operator_id
       JOIN route_stops rs_orig ON rs_orig.route_id = r.id
       JOIN route_stops rs_dest ON rs_dest.route_id = r.id
       WHERE t.deleted_at IS NULL AND t.state IN ('scheduled', 'boarding')
@@ -120,11 +125,16 @@ bookingPortalRouter.get('/trips/search', async (c) => {
   } else {
     query = `SELECT t.id, t.departure_time, t.state, r.origin, r.destination, r.base_fare, r.fare_matrix,
       o.name as operator_name,
-      COUNT(CASE WHEN s.status = 'available' THEN 1 END) as available_seats
+      COUNT(CASE WHEN s.status = 'available' THEN 1 END) as available_seats,
+      ROUND(COALESCE(rev.avg_rating, 0), 1) as avg_rating, COALESCE(rev.review_count, 0) as review_count
       FROM trips t
       JOIN routes r ON t.route_id = r.id
       JOIN operators o ON t.operator_id = o.id
       LEFT JOIN seats s ON t.id = s.trip_id
+      LEFT JOIN (
+        SELECT operator_id, AVG(CAST(rating AS REAL)) as avg_rating, COUNT(id) as review_count
+        FROM operator_reviews WHERE deleted_at IS NULL GROUP BY operator_id
+      ) rev ON rev.operator_id = t.operator_id
       WHERE t.deleted_at IS NULL AND t.state IN ('scheduled', 'boarding')`;
 
     if (origin) { query += ` AND r.origin LIKE ?`; params.push(`%${origin}%`); }
@@ -151,6 +161,8 @@ bookingPortalRouter.get('/trips/search', async (c) => {
       const fareMatrix: FareMatrix | null = trip.fare_matrix ? JSON.parse(trip.fare_matrix) as FareMatrix : null;
       let effective_fare_by_class = computeFareByClass(trip.base_fare, fareMatrix, trip.departure_time);
       let effective_fare = Math.min(...Object.values(effective_fare_by_class));
+      const avg_rating = (trip as Record<string, unknown>)['avg_rating'] as number ?? 0;
+      const review_count = (trip as Record<string, unknown>)['review_count'] as number ?? 0;
 
       // P11-T3: Compute segment fare for stop-based search
       let segment_fare: number | undefined;
@@ -167,6 +179,8 @@ bookingPortalRouter.get('/trips/search', async (c) => {
         fare_matrix: undefined,
         effective_fare_by_class,
         effective_fare,
+        avg_rating,
+        review_count,
         ...(useStops ? {
           origin_stop_id: trip.origin_stop_id,
           origin_stop_name: trip.origin_stop_name,
@@ -1016,4 +1030,133 @@ publicBookingRouter.post('/verify-phone/confirm', async (c) => {
       user: { id: guestId, phone, role: 'CUSTOMER', is_guest: true },
     },
   });
+});
+
+// ============================================================
+// P13-T2: POST /reviews — submit an operator review (CUSTOMER)
+// Body: { booking_id, rating (1-5), review_text? }
+// Auth: CUSTOMER phone must match booking's customer phone
+// Constraint: trip must be completed; one review per booking
+// ============================================================
+bookingPortalRouter.post('/reviews', requireRole(['CUSTOMER', 'STAFF', 'TENANT_ADMIN', 'SUPER_ADMIN']), async (c) => {
+  const body = await c.req.json() as Record<string, unknown>;
+  const err = requireFields(body, ['booking_id', 'rating']);
+  if (err) return c.json({ success: false, error: err }, 400);
+
+  const { booking_id, rating, review_text } = body as { booking_id: string; rating: number; review_text?: string };
+
+  const ratingNum = Number(rating);
+  if (!Number.isInteger(ratingNum) || ratingNum < 1 || ratingNum > 5) {
+    return c.json({ success: false, error: 'Rating must be an integer between 1 and 5' }, 422);
+  }
+
+  const db = c.env.DB;
+  const now = Date.now();
+  const user = c.get('user');
+
+  try {
+    const booking = await db.prepare(
+      `SELECT b.id, b.status, b.customer_id, t.state as trip_state, t.operator_id,
+              c.phone as customer_phone
+       FROM bookings b
+       JOIN trips t ON b.trip_id = t.id
+       JOIN customers c ON c.id = b.customer_id
+       WHERE b.id = ? AND b.deleted_at IS NULL`
+    ).bind(booking_id).first<{
+      id: string; status: string; customer_id: string; trip_state: string;
+      operator_id: string; customer_phone: string;
+    }>();
+
+    if (!booking) return c.json({ success: false, error: 'Booking not found' }, 404);
+
+    // For CUSTOMER role, verify the booking belongs to the authenticated user via phone
+    if (user?.role === 'CUSTOMER') {
+      const userPhone = (user as unknown as Record<string, unknown>)['phone'] as string | undefined;
+      if (!userPhone || booking.customer_phone !== userPhone) {
+        return c.json({ success: false, error: 'You are not authorized to review this booking' }, 403);
+      }
+    }
+
+    if (!['confirmed', 'completed'].includes(booking.status)) {
+      return c.json({ success: false, error: 'Only confirmed or completed bookings can be reviewed' }, 422);
+    }
+
+    if (booking.trip_state !== 'completed') {
+      return c.json({ success: false, error: 'Trip must be completed before you can leave a review' }, 422);
+    }
+
+    // One review per booking
+    const existing = await db.prepare(
+      `SELECT id FROM operator_reviews WHERE booking_id = ? AND deleted_at IS NULL`
+    ).bind(booking_id).first<{ id: string }>();
+
+    if (existing) {
+      return c.json({ success: false, error: 'You have already reviewed this booking' }, 409);
+    }
+
+    const reviewId = genId('rev_');
+    await db.prepare(
+      `INSERT INTO operator_reviews (id, operator_id, booking_id, customer_id, rating, review_text, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).bind(reviewId, booking.operator_id, booking_id, booking.customer_id, ratingNum, review_text ?? null, now).run();
+
+    return c.json({
+      success: true,
+      data: {
+        id: reviewId,
+        operator_id: booking.operator_id,
+        booking_id,
+        rating: ratingNum,
+        review_text: review_text ?? null,
+        created_at: now,
+      },
+    }, 201);
+  } catch (err) {
+    console.error('[reviews/post] error:', err instanceof Error ? err.message : err);
+    return c.json({ success: false, error: 'Failed to submit review' }, 500);
+  }
+});
+
+// ============================================================
+// P13-T2: GET /operators/:id/reviews — list reviews for an operator (public)
+// Returns paginated reviews with avg_rating summary
+// ============================================================
+bookingPortalRouter.get('/operators/:id/reviews', async (c) => {
+  const operatorId = c.req.param('id');
+  const db = c.env.DB;
+  const { limit: lim, offset: off } = parsePagination(c.req.query());
+
+  try {
+    const [reviewsRes, summaryRes] = await Promise.all([
+      db.prepare(
+        `SELECT r.id, r.rating, r.review_text, r.created_at,
+                c.name as customer_name
+         FROM operator_reviews r
+         JOIN customers c ON c.id = r.customer_id
+         WHERE r.operator_id = ? AND r.deleted_at IS NULL
+         ORDER BY r.created_at DESC
+         LIMIT ? OFFSET ?`
+      ).bind(operatorId, lim, off).all<{
+        id: string; rating: number; review_text: string | null; created_at: number; customer_name: string;
+      }>(),
+      db.prepare(
+        `SELECT COUNT(id) as total_reviews, ROUND(AVG(CAST(rating AS REAL)), 1) as avg_rating
+         FROM operator_reviews
+         WHERE operator_id = ? AND deleted_at IS NULL`
+      ).bind(operatorId).first<{ total_reviews: number; avg_rating: number | null }>(),
+    ]);
+
+    return c.json({
+      success: true,
+      data: reviewsRes.results,
+      meta: {
+        ...metaResponse(summaryRes?.total_reviews ?? 0, lim, off),
+        avg_rating: summaryRes?.avg_rating ?? null,
+        total_reviews: summaryRes?.total_reviews ?? 0,
+      },
+    });
+  } catch (err) {
+    console.error('[reviews/get] error:', err instanceof Error ? err.message : err);
+    return c.json({ success: false, error: 'Failed to fetch reviews' }, 500);
+  }
 });

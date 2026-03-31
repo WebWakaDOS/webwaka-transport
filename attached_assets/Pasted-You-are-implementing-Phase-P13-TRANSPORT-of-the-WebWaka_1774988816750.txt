@@ -1,0 +1,85 @@
+You are implementing Phase P13-TRANSPORT of the WebWaka platform.
+Target repo: webwaka-transport
+
+This phase builds channel expansion features: WhatsApp sharing, operator reviews, and full i18n. Read webwaka-implementation-plan.md for full context.
+
+=== TASK P13-T1: WhatsApp Receipt and Ticket Sharing ===
+Files: src/components/receipt.tsx (from P07-T2), src/pages/ticket.tsx (from P03-T5)
+
+These are frontend-only changes. No backend work required.
+
+In both the receipt component and the e-ticket page, add a "Share via WhatsApp" button:
+
+const buildWhatsAppUrl = ({ origin, destination, departureDate, seatNumbers, passengerName, bookingId }: ShareParams) => {
+const text = [
+'WebWaka Booking Confirmed! ✅',
+`Route: ${origin} → ${destination}`,
+`Date: ${departureDate}`,
+`Seat(s): ${seatNumbers}`,
+`Passenger: ${passengerName}`,
+`Ref: ${bookingId.slice(-8).toUpperCase()}`,
+`View ticket: https://webwaka.ng/b/${bookingId}`,
+].join('\n');
+return `https://wa.me/?text=${encodeURIComponent(text)}`;
+};
+
+Render: <a href={buildWhatsAppUrl({...})} target="_blank" rel="noopener noreferrer" className="btn-whatsapp">Share via WhatsApp</a>
+
+Style the button green (#25D366 — WhatsApp's brand color) with a WhatsApp icon (use a simple SVG icon, not an image).
+
+On mobile, this opens the WhatsApp app directly. On desktop, it opens web.whatsapp.com.
+
+=== TASK P13-T2: Operator Reviews and Ratings ===
+File: src/api/booking-portal.ts
+File: src/lib/sweepers.ts
+
+The operator_reviews table was created in migration 002.
+
+Add POST /api/booking/reviews (CUSTOMER role):
+- Body: { booking_id: string, rating: number (1-5), review_text?: string }
+- Validate: rating integer between 1 and 5. booking_id must belong to the authenticated customer.
+- Fetch booking: must have status='confirmed' or 'completed', and trip.state='completed'. Return 422 if trip not yet completed.
+- Check no existing review: SELECT id FROM operator_reviews WHERE booking_id = ? — return 409 if exists
+- INSERT into operator_reviews
+- Return the created review
+
+Add GET /api/booking/operators/:id/reviews (public):
+- Returns { avg_rating: float, total_reviews: N, reviews: [...paginated reviews] }
+- Reviews include: rating, review_text (if provided), created_at. Never include customer PII.
+
+In GET /api/booking/trips/search, add avg_rating to each trip's operator info:
+- SELECT AVG(r.rating) as avg_rating, COUNT(r.id) as review_count FROM operator_reviews r WHERE r.operator_id = ? AND r.deleted_at IS NULL
+- Return as part of each trip result
+
+In drainEventBus() sweepers.ts, add handler for trip.state_changed where new_state='completed':
+- SELECT b.id, c.phone FROM bookings b JOIN customers c ON c.id = b.customer_id WHERE b.trip_id = ? AND b.status='confirmed' AND b.review_prompt_sent_at IS NULL AND c.phone NOT LIKE 'NDPR_%'
+- For each: sendSms(phone, "WebWaka: How was your journey? Rate your trip in 10 seconds: https://webwaka.ng/b/{booking_id}#review", env)
+- UPDATE bookings SET review_prompt_sent_at = ? WHERE id = ?
+
+Add review_prompt_sent_at INTEGER to bookings in migration 003.
+
+=== TASK P13-T3: Full i18n Completion ===
+File: src/core/i18n/index.ts
+
+The i18n module supports English, Yoruba, Igbo, and Hausa. Audit and complete all missing translations.
+
+For every key in the translations object:
+1. If the Yoruba, Igbo, or Hausa value is empty, missing, or identical to the English value (indicating a placeholder), add a real translation.
+2. At minimum, the following booking flow keys must be fully translated in all 4 languages:
+- Search form: "From", "To", "Date", "Search Trips", "Any date"
+- Trip list: "Available seats", "Departs", "Arrives", "Book Now", "Sold Out"
+- Seat selection: "Select your seat", "Available", "Reserved", "Confirmed", "Window", "Aisle", "VIP", "Standard"
+- Payment: "Proceed to Payment", "Total Amount", "Booking Summary", "Pay Now"
+- Confirmation: "Booking Confirmed", "Your ticket", "View E-Ticket", "Share via WhatsApp"
+- Errors: "Seat no longer available", "Payment failed", "Session expired, please log in again"
+- Common: "Loading", "Back", "Cancel", "Confirm", "Done", "Error", "Success"
+
+3. Add language auto-detection: read navigator.language on app init. Map: 'yo' or 'yo-*' → yoruba, 'ig' or 'ig-*' → igbo, 'ha' or 'ha-*' → hausa, default → english.
+
+4. Add a manual language selector (small dropdown in the booking portal header and agent POS header) with flags or abbreviations: EN, YO, IG, HA.
+
+5. Store the user's selected language in localStorage so it persists across sessions.
+
+=== DONE ===
+Run tsc --noEmit. Test WhatsApp deep link on mobile (tap should open WhatsApp app). Test review submission after a completed trip. Switch language to Yoruba and verify the entire booking flow is in Yoruba.
+```
