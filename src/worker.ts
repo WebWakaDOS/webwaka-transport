@@ -40,7 +40,10 @@ import {
   drainEventBus,
   sweepExpiredReservations,
   sweepAbandonedBookings,
+  sweepExpiredPII,
+  purgeExpiredFinancialData,
 } from './lib/sweepers.js';
+import { notificationsRouter } from './api/notifications.js';
 
 export interface Env {
   DB: D1Database;
@@ -54,6 +57,8 @@ export interface Env {
   FLUTTERWAVE_SECRET?: string;
   SMS_API_KEY?: string;
   VAPID_PRIVATE_KEY?: string;
+  VAPID_PUBLIC_KEY?: string;
+  OPENROUTER_API_KEY?: string;
 }
 
 const app = new Hono<{ Bindings: Env }>();
@@ -130,6 +135,7 @@ app.route('/api/seat-inventory', seatInventoryRouter);
 app.route('/api/agent-sales', agentSalesRouter);
 app.route('/api/booking', bookingPortalRouter);
 app.route('/api/operator', operatorManagementRouter);
+app.route('/api/notifications', notificationsRouter);
 
 // ============================================================
 // Paystack webhook — PUBLIC (HMAC-SHA512 verified internally)
@@ -235,11 +241,19 @@ app.onError((err, c) => {
 // Sweepers are extracted to src/lib/sweepers.ts for testability.
 // ============================================================
 export async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+  // Run per-minute sweepers on every cron trigger
   ctx.waitUntil(Promise.all([
     drainEventBus(env),
     sweepExpiredReservations(env),
     sweepAbandonedBookings(env),
   ]));
+
+  // Run daily NDPR sweepers only at midnight UTC (C-002)
+  const scheduledHour = new Date(event.scheduledTime).getUTCHours();
+  if (scheduledHour === 0) {
+    ctx.waitUntil(sweepExpiredPII(env));
+    ctx.waitUntil(purgeExpiredFinancialData(env));
+  }
 }
 
 export default app;

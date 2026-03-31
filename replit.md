@@ -44,8 +44,21 @@ src/
   worker.ts          - Cloudflare Worker entry point (scheduled cron handler)
 migrations/          - SQL migrations for Cloudflare D1 (001-004)
 docs/
-  rbac.md            - RBAC permission matrix for all 6 roles
-.dev.vars.example    - All required secrets (copy → .dev.vars, never commit)
+  rbac.md               - RBAC permission matrix for all 6 roles
+  ndpr-compliance.md    - NDPR data retention + sweeper documentation
+src/
+  components/
+    conflict-log.tsx    - C-003: Sync conflict resolution UI
+    analytics.tsx       - C-005: Revenue analytics SVG dashboard
+    driver-view.tsx     - C-004: Driver mobile boarding manifest
+  lib/
+    push.ts             - C-001: VAPID Web Push delivery (RFC 8030/8292)
+    ai.ts               - C-007: OpenRouter AI trip search
+    sweepers.ts         - C-002: NDPR sweepExpiredPII + purgeExpiredFinancialData
+  api/
+    notifications.ts    - C-001: Push subscription router (/api/notifications)
+  vite-env.d.ts         - VITE_VAPID_PUBLIC_KEY type declaration
+.dev.vars.example       - All required secrets (copy → .dev.vars, never commit)
 ```
 
 ## Local Development
@@ -53,7 +66,7 @@ The frontend runs as a Vite dev server on port 5000. The backend (Cloudflare Wor
 
 ```bash
 npm run dev:ui   # start Vite frontend
-npm test         # run all 281 unit tests (vitest)
+npm test         # run all 300 unit tests (vitest)
 npx tsc --noEmit # TypeScript strict mode check (0 errors)
 ```
 

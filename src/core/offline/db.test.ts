@@ -124,7 +124,7 @@ describe('Conflict Log', () => {
 
   it('resolveConflict marks a conflict as resolved', async () => {
     const id = await logConflict('trip', 'tr_c1', { state: 'BOARDING' }, { state: 'DEPARTED' }, 409);
-    await resolveConflict(id);
+    await resolveConflict(id, 'accept_server');
     const conflicts = await getUnresolvedConflicts();
     expect(conflicts.find(c => c.id === id)).toBeUndefined();
   });

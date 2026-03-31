@@ -267,10 +267,6 @@ export async function getUnresolvedConflicts(): Promise<ConflictRecord[]> {
   return getOfflineDB().conflict_log.filter(c => !c.resolved).toArray();
 }
 
-export async function resolveConflict(id: number): Promise<void> {
-  await getOfflineDB().conflict_log.update(id, { resolved: true });
-}
-
 // ============================================================
 // Offline Transaction Helpers (TRN-2 Agent POS)
 // ============================================================
@@ -427,4 +423,44 @@ export async function recordNdprConsent(
 
 export async function getConsentHistory(customer_id: string): Promise<NdprConsentRecord[]> {
   return getOfflineDB().ndpr_consent.where('customer_id').equals(customer_id).toArray();
+}
+
+// ============================================================
+// C-003: Conflict Resolution Helpers
+// ============================================================
+
+export async function getConflicts(): Promise<ConflictRecord[]> {
+  return getOfflineDB().conflict_log
+    .where('resolved')
+    .equals(0)
+    .sortBy('created_at');
+}
+
+export async function resolveConflict(
+  id: number,
+  resolution: 'accept_server' | 'retry' | 'discard'
+): Promise<void> {
+  const db = getOfflineDB();
+  const conflict = await db.conflict_log.get(id);
+  if (!conflict) throw new Error(`Conflict ${id} not found`);
+
+  if (resolution === 'retry') {
+    // Re-queue the local mutation for another sync attempt
+    await db.mutations.add({
+      entity_type: conflict.entity_type,
+      entity_id: conflict.entity_id,
+      action: 'UPDATE',
+      payload: conflict.local_payload,
+      version: 1,
+      status: 'PENDING',
+      retry_count: 0,
+      next_retry_at: 0,
+      created_at: Date.now(),
+      synced_at: undefined,
+      error: undefined,
+    });
+  }
+
+  // Mark conflict as resolved (both accept_server and discard close the ticket)
+  await db.conflict_log.update(id, { resolved: true });
 }

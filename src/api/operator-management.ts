@@ -281,7 +281,7 @@ operatorManagementRouter.patch('/vehicles/:id', requireRole(['SUPER_ADMIN', 'TEN
 
 operatorManagementRouter.get('/trips', async (c) => {
   const q = c.req.query();
-  const { state } = q;
+  const { state, driver_id, date } = q;
   const { limit, offset } = parsePagination(q);
   const db = c.env.DB;
 
@@ -295,6 +295,23 @@ operatorManagementRouter.get('/trips', async (c) => {
   params.splice(0, params.length, ...scoped.params);
 
   if (state) { query += ` AND t.state = ?`; params.push(state); }
+
+  // C-004: driver_id filter — 'me' resolves to the authenticated user's id
+  if (driver_id) {
+    const user = c.get('user');
+    const resolvedDriverId = driver_id === 'me' ? user?.id ?? driver_id : driver_id;
+    query += ` AND t.driver_id = ?`;
+    params.push(resolvedDriverId);
+  }
+
+  // C-004: date filter — filters trips departing on the given YYYY-MM-DD
+  if (date) {
+    const dayStart = new Date(date).setHours(0, 0, 0, 0);
+    const dayEnd = dayStart + 86400000 - 1;
+    query += ` AND t.departure_time >= ? AND t.departure_time <= ?`;
+    params.push(dayStart, dayEnd);
+  }
+
   query += ` ORDER BY t.departure_time DESC LIMIT ? OFFSET ?`;
   params.push(limit, offset);
 
@@ -693,6 +710,62 @@ operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 
 });
 
 // ============================================================
+// C-004: PATCH /trips/:tripId/manifest/:bookingId/board
+// Driver marks a passenger as boarded. Trip must be in 'boarding' state.
+// ============================================================
+
+operatorManagementRouter.patch(
+  '/trips/:tripId/manifest/:bookingId/board',
+  requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'DRIVER']),
+  async (c) => {
+    const tripId = c.req.param('tripId');
+    const bookingId = c.req.param('bookingId');
+    const user = c.get('user');
+    const db = c.env.DB;
+    const now = Date.now();
+
+    try {
+      const trip = await db.prepare(
+        `SELECT id, state FROM trips WHERE id = ? AND deleted_at IS NULL`
+      ).bind(tripId).first<{ id: string; state: string }>();
+
+      if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
+      if (trip.state !== 'boarding') {
+        return c.json({ success: false, error: `Boarding not open — trip is in '${trip.state}' state` }, 409);
+      }
+
+      const booking = await db.prepare(
+        `SELECT id, status FROM bookings WHERE id = ? AND trip_id = ? AND deleted_at IS NULL`
+      ).bind(bookingId, tripId).first<{ id: string; status: string }>();
+
+      if (!booking) return c.json({ success: false, error: 'Booking not found on this trip' }, 404);
+      if (booking.status === 'cancelled') {
+        return c.json({ success: false, error: 'Cannot board a cancelled booking' }, 409);
+      }
+
+      await db.prepare(
+        `UPDATE bookings SET boarded_at = ?, boarded_by = ? WHERE id = ?`
+      ).bind(now, user?.id ?? 'unknown', bookingId).run();
+
+      const evtId = genId('evt');
+      await db.prepare(
+        `INSERT OR IGNORE INTO platform_events
+         (id, event_type, aggregate_id, aggregate_type, payload, status, created_at)
+         VALUES (?, 'passenger:BOARDED', ?, 'booking', ?, 'pending', ?)`
+      ).bind(
+        evtId, bookingId,
+        JSON.stringify({ booking_id: bookingId, trip_id: tripId, boarded_by: user?.id, boarded_at: now }),
+        now
+      ).run();
+
+      return c.json({ success: true, data: { booking_id: bookingId, boarded_at: now } });
+    } catch {
+      return c.json({ success: false, error: 'Failed to mark passenger boarded' }, 500);
+    }
+  }
+);
+
+// ============================================================
 // Driver Management — TRN-4
 // ============================================================
 
@@ -824,11 +897,27 @@ operatorManagementRouter.get('/reports/revenue', requireRole(['SUPER_ADMIN', 'TE
   }
   routeQuery += ` GROUP BY r.id, r.origin, r.destination ORDER BY trip_count DESC LIMIT 10`;
 
+  // Agent breakdown query — revenue per agent
+  const agentBreakdownParams: unknown[] = ['completed', fromMs, toMs];
+  let agentBreakdownQuery = `SELECT st.agent_id,
+      a.name as agent_name,
+      SUM(st.total_amount) as total_kobo,
+      COUNT(st.id) as transaction_count
+    FROM sales_transactions st
+    LEFT JOIN agents a ON a.id = st.agent_id
+    WHERE st.payment_status = ? AND st.created_at >= ? AND st.created_at <= ? AND st.deleted_at IS NULL`;
+  if (operatorId) {
+    agentBreakdownQuery += ` AND st.agent_id IN (SELECT id FROM agents WHERE operator_id = ? AND deleted_at IS NULL)`;
+    agentBreakdownParams.push(operatorId);
+  }
+  agentBreakdownQuery += ` GROUP BY st.agent_id ORDER BY total_kobo DESC LIMIT 20`;
+
   try {
-    const [bookingRows, agentRows, routeResult] = await Promise.all([
+    const [bookingRows, agentRows, routeResult, agentBreakdownResult] = await Promise.all([
       db.prepare(bookingQuery).bind(...bookingBindParams).all<{ total_amount: number }>(),
       db.prepare(agentQuery).bind(...agentBindParams).all<{ total_amount: number }>(),
       db.prepare(routeQuery).bind(...routeBindParams).all<{ route_id: string; origin: string; destination: string; trip_count: number }>(),
+      db.prepare(agentBreakdownQuery).bind(...agentBreakdownParams).all<{ agent_id: string; agent_name: string | null; total_kobo: number; transaction_count: number }>(),
     ]);
 
     const bookingRevenue = bookingRows.results.reduce((sum, r) => sum + r.total_amount, 0);
@@ -844,6 +933,7 @@ operatorManagementRouter.get('/reports/revenue', requireRole(['SUPER_ADMIN', 'TE
         total_bookings: bookingRows.results.length,
         total_agent_transactions: agentRows.results.length,
         top_routes: routeResult.results,
+        agent_breakdown: agentBreakdownResult.results,
       },
     });
   } catch {
@@ -895,5 +985,84 @@ operatorManagementRouter.get('/dashboard', async (c) => {
     });
   } catch {
     return c.json({ success: false, error: 'Failed to fetch dashboard' }, 500);
+  }
+});
+
+// ============================================================
+// C-008: PATCH /users/:id/role — Admin Promotion API
+// SUPER_ADMIN only. Promotes/demotes an agent or customer's role.
+// Cannot promote to SUPER_ADMIN via this endpoint.
+// ============================================================
+
+operatorManagementRouter.patch('/users/:id/role', requireRole(['SUPER_ADMIN']), async (c) => {
+  const userId = c.req.param('id');
+  const db = c.env.DB;
+  const now = Date.now();
+
+  let body: Record<string, unknown>;
+  try {
+    body = await c.req.json<Record<string, unknown>>();
+  } catch {
+    return c.json({ success: false, error: 'Invalid JSON body' }, 400);
+  }
+
+  const role = body['role'] as string | undefined;
+  const newOperatorId = body['operator_id'] as string | undefined;
+
+  if (!role) return c.json({ success: false, error: 'role is required' }, 400);
+
+  // Cannot self-promote to SUPER_ADMIN via API
+  const PROMOTABLE_ROLES = ['CUSTOMER', 'STAFF', 'SUPERVISOR', 'TENANT_ADMIN', 'DRIVER', 'AGENT'];
+  if (!PROMOTABLE_ROLES.includes(role)) {
+    return c.json({ success: false, error: `Cannot promote to '${role}' via this endpoint` }, 403);
+  }
+
+  try {
+    // Try agents table first, then customers
+    const agent = await db.prepare(
+      `SELECT id, role FROM agents WHERE id = ? AND deleted_at IS NULL`
+    ).bind(userId).first<{ id: string; role: string }>();
+
+    if (agent) {
+      await db.prepare(
+        `UPDATE agents SET role = ?, operator_id = COALESCE(?, operator_id), updated_at = ? WHERE id = ?`
+      ).bind(role, newOperatorId ?? null, now, userId).run();
+    } else {
+      const customer = await db.prepare(
+        `SELECT id FROM customers WHERE id = ? AND deleted_at IS NULL`
+      ).bind(userId).first<{ id: string }>();
+
+      if (!customer) return c.json({ success: false, error: 'User not found' }, 404);
+
+      // Promote customer to agent if needed
+      if (newOperatorId && (role === 'STAFF' || role === 'SUPERVISOR' || role === 'TENANT_ADMIN')) {
+        const agentId = genId('agt');
+        const customerData = await db.prepare(
+          `SELECT name, phone, email FROM customers WHERE id = ?`
+        ).bind(userId).first<{ name: string; phone: string; email: string | null }>();
+
+        if (customerData) {
+          await db.prepare(
+            `INSERT OR IGNORE INTO agents (id, operator_id, name, phone, email, role, bus_parks, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, '[]', 'active', ?, ?)`
+          ).bind(agentId, newOperatorId, customerData.name, customerData.phone, customerData.email, role, now, now).run();
+        }
+      }
+    }
+
+    const evtId = genId('evt');
+    await db.prepare(
+      `INSERT OR IGNORE INTO platform_events
+       (id, event_type, aggregate_id, aggregate_type, payload, status, created_at)
+       VALUES (?, 'user:ROLE_CHANGED', ?, 'user', ?, 'pending', ?)`
+    ).bind(
+      evtId, userId,
+      JSON.stringify({ user_id: userId, new_role: role, operator_id: newOperatorId, changed_at: now }),
+      now
+    ).run();
+
+    return c.json({ success: true, data: { user_id: userId, role, updated_at: now } });
+  } catch {
+    return c.json({ success: false, error: 'Failed to update user role' }, 500);
   }
 });

@@ -2062,3 +2062,78 @@ describe('OTP Rate Limiting', () => {
     expect(body.success).toBe(true);
   });
 });
+
+// ============================================================
+// C-008: PATCH /users/:id/role — Admin Promotion API (RBAC Tests)
+// NOTE: requireRole(['SUPER_ADMIN']) in production returns 403 for
+// TENANT_ADMIN and lower roles. In vitest the SUPER_ADMIN bypass is active,
+// so these tests cover business-logic validations only.
+// ============================================================
+describe('C-008: PATCH /users/:id/role — Admin Promotion API', () => {
+  let db: any;
+  beforeEach(() => {
+    db = createMockDB();
+    db._tables.agents.push({
+      id: 'agt_rbac1', operator_id: 'opr_1', name: 'Chidi Okeke', phone: '08022221111',
+      email: null, role: 'STAFF', bus_parks: '[]', status: 'active',
+      created_at: Date.now(), updated_at: Date.now(), deleted_at: null,
+    });
+    db._tables.customers.push({
+      id: 'cst_rbac1', name: 'Amaka Nwosu', phone: '08099990000', email: null,
+      operator_id: null, created_at: Date.now(), updated_at: Date.now(), deleted_at: null,
+    });
+  });
+
+  it('returns 400 when role field is missing', async () => {
+    const res = await operatorManagementRouter.request('/users/agt_rbac1/role', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }, makeEnv(db));
+    expect(res.status).toBe(400);
+    const body = await res.json() as any;
+    expect(body.error).toMatch(/role.*required/i);
+  });
+
+  it('returns 403 when trying to promote to SUPER_ADMIN via API', async () => {
+    const res = await operatorManagementRouter.request('/users/agt_rbac1/role', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'SUPER_ADMIN' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(403);
+    const body = await res.json() as any;
+    expect(body.error).toMatch(/cannot promote/i);
+  });
+
+  it('returns 404 when user does not exist in agents or customers', async () => {
+    const res = await operatorManagementRouter.request('/users/usr_ghost999/role', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'SUPERVISOR' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(404);
+    const body = await res.json() as any;
+    expect(body.error).toMatch(/not found/i);
+  });
+
+  it('promotes an existing agent to SUPERVISOR', async () => {
+    const res = await operatorManagementRouter.request('/users/agt_rbac1/role', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'SUPERVISOR' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+  });
+
+  it('returns 400 for malformed JSON body', async () => {
+    const res = await operatorManagementRouter.request('/users/agt_rbac1/role', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: 'not-json',
+    }, makeEnv(db));
+    expect(res.status).toBe(400);
+  });
+});

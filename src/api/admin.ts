@@ -292,6 +292,36 @@ const MIGRATIONS: Migration[] = [
       `CREATE INDEX IF NOT EXISTS idx_trips_operator_departure ON trips(operator_id, departure_time)`,
     ],
   },
+  {
+    name: '007_push_subscriptions',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS push_subscriptions (
+        id TEXT PRIMARY KEY,
+        customer_id TEXT,
+        operator_id TEXT,
+        endpoint TEXT NOT NULL UNIQUE,
+        subscription_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        deleted_at INTEGER
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_push_subscriptions_customer ON push_subscriptions(customer_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_push_subscriptions_operator ON push_subscriptions(operator_id)`,
+    ],
+  },
+  {
+    name: '008_customer_last_active',
+    statements: [
+      `ALTER TABLE customers ADD COLUMN last_active_at INTEGER`,
+    ],
+  },
+  {
+    name: '009_booking_boarding_cols',
+    statements: [
+      `ALTER TABLE bookings ADD COLUMN boarded_at INTEGER`,
+      `ALTER TABLE bookings ADD COLUMN boarded_by TEXT`,
+    ],
+  },
 ];
 
 export const adminRouter = new Hono<{ Bindings: AdminEnv }>();

@@ -71,12 +71,18 @@ export interface ManifestEntry {
   booking_id: string;
   customer_name: string;
   customer_phone: string;
+  phone?: string;
+  passenger_name?: string;
   seat_ids: string[];
+  seat_numbers?: string[];
   passenger_names: string[];
   status: string;
   payment_status: string;
+  payment_method?: string;
   total_amount: number;
   booked_at: number;
+  boarded_at?: number | null;
+  boarded_by?: string | null;
 }
 
 export interface TripManifest {
@@ -97,6 +103,11 @@ export interface TripManifest {
     load_factor: number;
     confirmed_revenue_kobo: number;
   };
+  // Top-level aliases for driver-view convenience
+  origin?: string;
+  destination?: string;
+  departure_time?: number;
+  driver?: { id: string; name: string; phone: string } | null;
 }
 
 export interface Driver {
@@ -133,6 +144,7 @@ export interface Trip {
   id: string;
   operator_id: string;
   route_id: string;
+  vehicle_id?: string;
   state: string;
   departure_time: number;
   driver_id?: string | null;
@@ -167,6 +179,26 @@ export interface RouteRevenue {
   trip_count: number;
 }
 
+export interface AgentBreakdown {
+  agent_id: string;
+  agent_name: string | null;
+  total_kobo: number;
+  transaction_count: number;
+}
+
+export interface DailyRevenue {
+  date_ms: number;
+  total_kobo: number;
+}
+
+export interface PushSubscriptionData {
+  endpoint: string;
+  keys: {
+    p256dh: string;
+    auth: string;
+  };
+}
+
 export interface RevenueReport {
   period: { from: number; to: number };
   total_revenue_kobo: number;
@@ -175,6 +207,8 @@ export interface RevenueReport {
   total_bookings: number;
   total_agent_transactions: number;
   top_routes: RouteRevenue[];
+  agent_breakdown?: AgentBreakdown[];
+  daily_breakdown?: DailyRevenue[];
 }
 
 export interface PlatformOperator {
@@ -533,6 +567,51 @@ export class ApiClient {
 
   async updateOperator(id: string, body: { name?: string; phone?: string; email?: string; status?: string }): Promise<void> {
     await this.request('PATCH', `/api/operator/operators/${id}`, body);
+  }
+
+  // ---- C-001: Web Push Notifications ----
+
+  async subscribeForPush(subscription: PushSubscriptionData): Promise<void> {
+    await this.request('POST', '/api/notifications/subscribe', subscription);
+  }
+
+  async unsubscribeFromPush(endpoint: string): Promise<void> {
+    await this.request('DELETE', '/api/notifications/subscribe', { endpoint });
+  }
+
+  // ---- C-004: Driver Mobile View ----
+
+  async getMyDriverTrips(): Promise<Trip[]> {
+    const today = new Date().toISOString().split('T')[0]!;
+    const res = await this.request<{ data: Trip[]; meta: unknown }>(
+      'GET',
+      `/api/operator/trips?driver_id=me&date=${today}&limit=50`
+    );
+    return res.data;
+  }
+
+  async markPassengerBoarded(tripId: string, bookingId: string): Promise<void> {
+    await this.request('PATCH', `/api/operator/trips/${tripId}/manifest/${bookingId}/board`, {});
+  }
+
+  // ---- C-007: AI Natural Language Trip Search ----
+
+  async aiSearchTrips(query: string): Promise<TripSummary[]> {
+    const res = await this.request<{ data: TripSummary[]; ai_params?: unknown }>(
+      'POST',
+      '/api/booking/trips/ai-search',
+      { query }
+    );
+    return res.data;
+  }
+
+  // ---- C-008: Admin Promotion API ----
+
+  async promoteUser(userId: string, role: string, operatorId?: string): Promise<void> {
+    await this.request('PATCH', `/api/operator/users/${userId}/role`, {
+      role,
+      ...(operatorId ? { operator_id: operatorId } : {}),
+    });
   }
 }
 

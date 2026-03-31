@@ -9,8 +9,12 @@ import { useOnlineStatus, useSyncQueue } from './core/offline/hooks';
 import { AuthProvider, useAuth, type WakaRole } from './core/auth/context';
 import { LoginScreen } from './components/login-screen';
 import { BookingFlow } from './components/booking-flow';
+import { ConflictLog } from './components/conflict-log';
+import { AnalyticsDashboard } from './components/analytics';
+import { DriverView } from './components/driver-view';
 import { api, ApiError } from './api/client';
 import type { TripSummary, Route, Vehicle, Trip, OperatorStats, Booking, SeatAvailability, TripManifest, ManifestEntry, Driver, Agent, RevenueReport, RouteRevenue, PlatformOperator } from './api/client';
+import { getConflicts } from './core/offline/db';
 
 // ============================================================
 // Error Boundary
@@ -86,6 +90,8 @@ function TripSearchModule() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [selectedTrip, setSelectedTrip] = useState<TripSummary | null>(null);
+  const [aiMode, setAiMode] = useState(false);
+  const [aiQuery, setAiQuery] = useState('');
 
   const search = useCallback(async () => {
     setLoading(true);
@@ -101,6 +107,21 @@ function TripSearchModule() {
     }
   }, [origin, destination, date]);
 
+  const aiSearch = useCallback(async () => {
+    if (!aiQuery.trim()) return;
+    setLoading(true);
+    setError('');
+    try {
+      const results = await api.aiSearchTrips(aiQuery);
+      setTrips(results);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'AI search failed — try standard search');
+      setTrips([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [aiQuery]);
+
   if (selectedTrip) {
     return (
       <BookingFlow
@@ -112,15 +133,47 @@ function TripSearchModule() {
 
   return (
     <div style={{ padding: 16 }}>
-      <h2 style={{ margin: '0 0 16px', fontSize: 18 }}>{t('search_trips')}</h2>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        <input placeholder={t('origin')} value={origin} onChange={e => setOrigin(e.target.value)} style={inputStyle} />
-        <input placeholder={t('destination')} value={destination} onChange={e => setDestination(e.target.value)} style={inputStyle} />
-        <input type="date" value={date} onChange={e => setDate(e.target.value)} style={inputStyle} />
-        <button onClick={() => void search()} style={primaryBtnStyle}>
-          {loading ? t('loading') : t('search')}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+        <h2 style={{ margin: 0, fontSize: 18 }}>{t('search_trips')}</h2>
+        <button
+          onClick={() => setAiMode(m => !m)}
+          style={{
+            fontSize: 11, padding: '5px 12px', borderRadius: 20, border: `1px solid ${aiMode ? '#7c3aed' : '#e2e8f0'}`,
+            background: aiMode ? '#f5f3ff' : '#fff', color: aiMode ? '#7c3aed' : '#64748b', cursor: 'pointer', fontWeight: 600,
+          }}
+          title="Toggle AI natural language search"
+        >
+          ✨ AI Search {aiMode ? 'ON' : 'OFF'}
         </button>
       </div>
+
+      {aiMode ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <textarea
+            placeholder='Describe your trip… e.g. "Lagos to Abuja tomorrow morning, cheapest"'
+            value={aiQuery}
+            onChange={e => setAiQuery(e.target.value)}
+            rows={3}
+            style={{ ...inputStyle, resize: 'vertical' }}
+          />
+          <button onClick={() => void aiSearch()} style={{ ...primaryBtnStyle, background: '#7c3aed' }}>
+            {loading ? 'Searching…' : '✨ Find My Trip'}
+          </button>
+          <button onClick={() => setAiMode(false)} style={secondaryBtnStyle}>
+            Use standard form
+          </button>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <input placeholder={t('origin')} value={origin} onChange={e => setOrigin(e.target.value)} style={inputStyle} />
+          <input placeholder={t('destination')} value={destination} onChange={e => setDestination(e.target.value)} style={inputStyle} />
+          <input type="date" value={date} onChange={e => setDate(e.target.value)} style={inputStyle} />
+          <button onClick={() => void search()} style={primaryBtnStyle}>
+            {loading ? t('loading') : t('search')}
+          </button>
+        </div>
+      )}
+
       {error && (
         <div style={{ marginTop: 12, padding: '10px 14px', background: '#fee2e2', borderRadius: 8, color: '#b91c1c', fontSize: 13 }}>
           {error}
@@ -1680,16 +1733,20 @@ function SuperAdminModule() {
 
 const STAFF_ROLES: WakaRole[] = ['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR', 'STAFF'];
 const ADMIN_ROLES: WakaRole[] = ['SUPER_ADMIN', 'TENANT_ADMIN'];
+const CONFLICT_ROLES: WakaRole[] = ['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR', 'STAFF'];
+const ANALYTICS_ROLES: WakaRole[] = ['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR'];
 
 // ============================================================
 // Main App — inner shell (requires AuthProvider above it)
 // ============================================================
-type Tab = 'search' | 'bookings' | 'agent' | 'operator' | 'admin';
+type Tab = 'search' | 'bookings' | 'agent' | 'operator' | 'admin' | 'driver' | 'analytics' | 'conflicts';
 
 function AppContent() {
   const { user, isAuthenticated, isLoading, logout, hasRole } = useAuth();
   const [tab, setTab] = useState<Tab>('search');
   const [lang, setLang] = useState<Language>(getLanguage());
+  const [conflictCount, setConflictCount] = useState(0);
+  const [showConflicts, setShowConflicts] = useState(false);
   const online = useOnlineStatus();
   const { pendingCount: pendingSync, isSyncing } = useSyncQueue();
 
@@ -1699,6 +1756,56 @@ function AppContent() {
     window.addEventListener('waka:unauthorized', handler);
     return () => window.removeEventListener('waka:unauthorized', handler);
   }, [logout]);
+
+  // C-001: Request push notification permission + subscribe after login
+  useEffect(() => {
+    if (!isAuthenticated || !user) return;
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+    const vapidKey = import.meta.env.VITE_VAPID_PUBLIC_KEY as string | undefined;
+    if (!vapidKey) return;
+    void (async () => {
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        const existing = await reg.pushManager.getSubscription();
+        if (existing) return; // already subscribed
+        const permission = await Notification.requestPermission();
+        if (permission !== 'granted') return;
+        const sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: vapidKey,
+        });
+        const raw = sub.toJSON() as { endpoint: string; keys?: { p256dh?: string; auth?: string } };
+        await api.subscribeForPush({
+          endpoint: raw.endpoint,
+          keys: {
+            p256dh: raw.keys?.p256dh ?? '',
+            auth: raw.keys?.auth ?? '',
+          },
+        });
+      } catch {
+        // non-fatal — push is a progressive enhancement
+      }
+    })();
+  }, [isAuthenticated, user]);
+
+  // C-003: Poll conflict count every 30 s when logged in
+  useEffect(() => {
+    if (!isAuthenticated || !hasRole(CONFLICT_ROLES)) return;
+    const refresh = () => void getConflicts().then(cs => setConflictCount(cs.length)).catch(() => {});
+    refresh();
+    const id = setInterval(refresh, 30_000);
+    return () => clearInterval(id);
+  }, [isAuthenticated, hasRole]);
+
+  // T013: Flush offline queue when coming back online
+  useEffect(() => {
+    if (!online) return;
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.ready.then(reg => {
+        if (reg.active) reg.active.postMessage({ type: 'TRIGGER_SYNC' });
+      }).catch(() => {});
+    }
+  }, [online]);
 
   const handleLangChange = (l: Language) => {
     setLanguage(l);
@@ -1720,17 +1827,24 @@ function AppContent() {
     return <LoginScreen />;
   }
 
+  // Driver role: show Driver view first
+  const isDriverOnly = user?.role === 'DRIVER';
+
   // Build tabs based on role
-  const tabs: Array<{ id: Tab; icon: string; label: string }> = [
-    { id: 'search', icon: '🔍', label: t('search_trips') },
-    { id: 'bookings', icon: '🎫', label: t('my_bookings') },
-    ...(hasRole(STAFF_ROLES) ? [{ id: 'agent' as Tab, icon: '💰', label: t('agent_pos') }] : []),
-    ...(hasRole(ADMIN_ROLES) ? [{ id: 'operator' as Tab, icon: '🚌', label: t('operator') }] : []),
-    ...(hasRole(['SUPER_ADMIN']) ? [{ id: 'admin' as Tab, icon: '⚙️', label: 'Platform' }] : []),
-  ];
+  const tabs: Array<{ id: Tab; icon: string; label: string }> = isDriverOnly
+    ? [{ id: 'driver' as Tab, icon: '🚐', label: 'My Trips' }]
+    : [
+        { id: 'search' as Tab, icon: '🔍', label: t('search_trips') },
+        { id: 'bookings' as Tab, icon: '🎫', label: t('my_bookings') },
+        ...(hasRole(STAFF_ROLES) ? [{ id: 'agent' as Tab, icon: '💰', label: t('agent_pos') }] : []),
+        ...(hasRole(ANALYTICS_ROLES) ? [{ id: 'analytics' as Tab, icon: '📊', label: 'Analytics' }] : []),
+        ...(hasRole(ADMIN_ROLES) ? [{ id: 'operator' as Tab, icon: '🚌', label: t('operator') }] : []),
+        ...(hasRole(['SUPER_ADMIN']) ? [{ id: 'admin' as Tab, icon: '⚙️', label: 'Platform' }] : []),
+      ];
 
   // Reset tab if current tab is no longer visible (e.g. after role change)
-  const validTab = tabs.some(t => t.id === tab) ? tab : 'search';
+  const defaultTab = isDriverOnly ? 'driver' : 'search';
+  const validTab = tabs.some(tb => tb.id === tab) ? tab : defaultTab;
 
   const roleLabel: Record<string, string> = {
     CUSTOMER: 'Customer', STAFF: 'Agent', SUPERVISOR: 'Supervisor',
@@ -1741,10 +1855,43 @@ function AppContent() {
     <div data-testid="transport-app" style={{ maxWidth: 430, margin: '0 auto', minHeight: '100vh', display: 'flex', flexDirection: 'column', fontFamily: 'system-ui, sans-serif', background: '#f8fafc' }}>
       <StatusBar online={online} pendingSync={pendingSync} syncing={isSyncing} lang={lang} onLangChange={handleLangChange} />
 
+      {/* C-003: Conflict resolution panel (slide-in on badge click) */}
+      {showConflicts && hasRole(CONFLICT_ROLES) && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 200, background: 'rgba(0,0,0,0.45)', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
+        }}>
+          <div style={{ background: '#fff', borderRadius: '16px 16px 0 0', maxHeight: '70vh', overflowY: 'auto', padding: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
+              <span style={{ fontWeight: 700, fontSize: 16 }}>Sync Conflicts</span>
+              <button onClick={() => setShowConflicts(false)} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer' }}>✕</button>
+            </div>
+            <ErrorBoundary label="Conflict Log">
+              <ConflictLog onClose={() => {
+                void getConflicts().then(cs => setConflictCount(cs.length)).catch(() => {});
+                setShowConflicts(false);
+              }} />
+            </ErrorBoundary>
+          </div>
+        </div>
+      )}
+
       {/* App header with user strip */}
       <div style={{ background: '#1e40af', color: '#fff', padding: '10px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ fontWeight: 800, fontSize: 18 }}>🚌 {t('app_name')}</div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {/* C-003: Conflict badge */}
+          {conflictCount > 0 && hasRole(CONFLICT_ROLES) && (
+            <button
+              onClick={() => setShowConflicts(true)}
+              title={`${conflictCount} unresolved sync conflict${conflictCount !== 1 ? 's' : ''}`}
+              style={{
+                background: '#dc2626', border: 'none', color: '#fff', borderRadius: 20,
+                padding: '3px 10px', fontSize: 11, cursor: 'pointer', fontWeight: 700,
+              }}
+            >
+              ⚠ {conflictCount}
+            </button>
+          )}
           <div style={{ textAlign: 'right' }}>
             <div style={{ fontSize: 12, fontWeight: 700, opacity: 0.95 }}>
               {user?.name ?? user?.phone}
@@ -1768,6 +1915,10 @@ function AppContent() {
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto', paddingBottom: 70 }}>
+        {/* C-004: Driver mobile view */}
+        <ErrorBoundary label="Driver View">
+          {validTab === 'driver' && <DriverView />}
+        </ErrorBoundary>
         <ErrorBoundary label="Trip Search">
           {validTab === 'search' && <TripSearchModule />}
         </ErrorBoundary>
@@ -1776,6 +1927,10 @@ function AppContent() {
         </ErrorBoundary>
         <ErrorBoundary label="Agent POS">
           {validTab === 'agent' && <AgentPOSModule online={online} />}
+        </ErrorBoundary>
+        {/* C-005: Revenue analytics */}
+        <ErrorBoundary label="Analytics">
+          {validTab === 'analytics' && <AnalyticsDashboard />}
         </ErrorBoundary>
         <ErrorBoundary label="Operator Dashboard">
           {validTab === 'operator' && <OperatorDashboardModule />}

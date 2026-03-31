@@ -258,6 +258,120 @@ async function deliverEvent(evt: Record<string, unknown>, env: Env): Promise<voi
   console.log(`[EventBus] No-op delivery for: ${eventType} — consumer not yet wired`);
 }
 
+// ============================================================
+// C-002: NDPR Data Retention Sweepers
+// sweepExpiredPII     — anonymize customers inactive for 2+ years
+// purgeExpiredFinancialData — soft-delete records older than 7 years
+// Both run in the daily cron (cron: 0 0 * * *)
+// ============================================================
+
+const TWO_YEARS_MS = 2 * 365 * 24 * 60 * 60 * 1000;
+const SEVEN_YEARS_MS = 7 * 365 * 24 * 60 * 60 * 1000;
+
+/**
+ * Anonymize PII for customers with no activity for 2+ years and
+ * no active or future bookings (NDPR Article 2.1 — retention minimisation).
+ */
+export async function sweepExpiredPII(env: Env): Promise<void> {
+  const db = env.DB;
+  const now = Date.now();
+  const cutoff = now - TWO_YEARS_MS;
+
+  try {
+    // Find customers inactive for 2+ years with no confirmed/future bookings
+    const stale = await db.prepare(
+      `SELECT c.id FROM customers c
+       WHERE c.deleted_at IS NULL
+         AND (c.last_active_at IS NULL AND c.created_at < ?)
+            OR (c.last_active_at IS NOT NULL AND c.last_active_at < ?)
+         AND NOT EXISTS (
+           SELECT 1 FROM bookings b
+           WHERE b.customer_id = c.id
+             AND b.deleted_at IS NULL
+             AND b.status IN ('pending', 'confirmed')
+             AND b.created_at > ?
+         )
+       LIMIT 100`
+    ).bind(cutoff, cutoff, now - (30 * 24 * 60 * 60 * 1000)).all<{ id: string }>();
+
+    if (!stale.results || stale.results.length === 0) return;
+
+    console.log(`[NDPR/PII] Anonymizing ${stale.results.length} expired customer records`);
+
+    for (const row of stale.results) {
+      try {
+        await db.prepare(
+          `UPDATE customers
+           SET name = 'ANONYMIZED', phone = ?, email = NULL, updated_at = ?
+           WHERE id = ? AND deleted_at IS NULL`
+        ).bind(`NDPR_REDACTED_${row.id}`, now, row.id).run();
+
+        const evtId = `evt_ndpr_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        await db.prepare(
+          `INSERT OR IGNORE INTO platform_events
+           (id, event_type, aggregate_id, aggregate_type, payload, status, created_at)
+           VALUES (?, 'customer:PII_ANONYMIZED', ?, 'customer', ?, 'pending', ?)`
+        ).bind(
+          evtId, row.id,
+          JSON.stringify({ customer_id: row.id, anonymized_at: now, reason: 'NDPR_2yr_inactivity' }),
+          now
+        ).run();
+
+        console.log(`[NDPR/PII] Anonymized customer ${row.id}`);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[NDPR/PII] Failed to anonymize ${row.id}: ${msg}`);
+      }
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[NDPR/PII] Sweep error: ${msg}`);
+  }
+}
+
+/**
+ * Soft-delete financial records (bookings + sales_transactions) older than 7 years.
+ * NDPR Article 2.3 — financial records retained 7 years per FIRS requirements.
+ * Uses soft-delete only — sets deleted_at for compliance audit trail.
+ */
+export async function purgeExpiredFinancialData(env: Env): Promise<void> {
+  const db = env.DB;
+  const now = Date.now();
+  const cutoff = now - SEVEN_YEARS_MS;
+
+  try {
+    const [bookingResult, txResult] = await Promise.all([
+      db.prepare(
+        `UPDATE bookings SET deleted_at = ? WHERE created_at < ? AND deleted_at IS NULL`
+      ).bind(now, cutoff).run(),
+      db.prepare(
+        `UPDATE sales_transactions SET deleted_at = ? WHERE created_at < ? AND deleted_at IS NULL`
+      ).bind(now, cutoff).run(),
+    ]);
+
+    const bookingsAffected = (bookingResult.meta as { changes?: number })?.changes ?? 0;
+    const txAffected = (txResult.meta as { changes?: number })?.changes ?? 0;
+
+    if (bookingsAffected > 0 || txAffected > 0) {
+      console.log(`[NDPR/Financial] Purged ${bookingsAffected} bookings, ${txAffected} transactions (7yr TTL)`);
+
+      const evtId = `evt_fin_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      await db.prepare(
+        `INSERT OR IGNORE INTO platform_events
+         (id, event_type, aggregate_id, aggregate_type, payload, status, created_at)
+         VALUES (?, 'compliance:FINANCIAL_PURGE', 'batch', 'compliance', ?, 'pending', ?)`
+      ).bind(
+        evtId,
+        JSON.stringify({ bookings_purged: bookingsAffected, transactions_purged: txAffected, cutoff_ms: cutoff }),
+        now
+      ).run();
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[NDPR/Financial] Purge error: ${msg}`);
+  }
+}
+
 async function deliverToConsumer(endpointUrl: string, evt: Record<string, unknown>): Promise<void> {
   const response = await fetch(endpointUrl, {
     method: 'POST',

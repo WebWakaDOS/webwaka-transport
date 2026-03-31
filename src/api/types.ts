@@ -22,6 +22,8 @@ export interface Env {
   FLUTTERWAVE_SECRET?: string;
   SMS_API_KEY?: string;
   VAPID_PRIVATE_KEY?: string;
+  VAPID_PUBLIC_KEY?: string;
+  OPENROUTER_API_KEY?: string;
 }
 
 export type HonoVariables = {

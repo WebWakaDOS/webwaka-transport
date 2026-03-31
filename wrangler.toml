@@ -5,11 +5,11 @@ compatibility_flags = ["nodejs_compat"]
 
 # ============================================================
 # Cron Triggers — Scheduled Worker
-# Runs drainEventBus() + sweepExpiredReservations() +
-# sweepAbandonedBookings() every minute
+# "* * * * *"    — every minute: drainEventBus, sweepExpiredReservations, sweepAbandonedBookings
+# "0 0 * * *"    — daily at UTC midnight: NDPR sweepExpiredPII + purgeExpiredFinancialData (C-002)
 # ============================================================
 [triggers]
-crons = ["* * * * *"]
+crons = ["* * * * *", "0 0 * * *"]
 
 # ============================================================
 # Local development (wrangler dev)
@@ -23,7 +23,7 @@ crons = ["* * * * *"]
 name = "webwaka-transport-api-staging"
 
 [env.staging.triggers]
-crons = ["* * * * *"]
+crons = ["* * * * *", "0 0 * * *"]
 
 [[env.staging.d1_databases]]
 binding = "DB"
@@ -53,7 +53,7 @@ id = "placeholder-idempotency-staging"
 name = "webwaka-transport-api-prod"
 
 [env.production.triggers]
-crons = ["* * * * *"]
+crons = ["* * * * *", "0 0 * * *"]
 
 [[env.production.d1_databases]]
 binding = "DB"

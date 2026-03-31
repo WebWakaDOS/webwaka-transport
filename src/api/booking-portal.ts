@@ -325,6 +325,103 @@ bookingPortalRouter.get('/bookings', async (c) => {
 });
 
 // ============================================================
+// C-007: POST /trips/ai-search — AI Natural Language Trip Search
+// Accepts a freeform query like "Lagos to Abuja tomorrow morning cheap"
+// Extracts structured search params via OpenRouter, then runs standard search.
+// Falls back to empty results (not 500) if AI is unavailable.
+// Rate limit: 5 requests/minute/IP via SESSIONS_KV
+// ============================================================
+
+bookingPortalRouter.post('/trips/ai-search', async (c) => {
+  let body: Record<string, unknown>;
+  try {
+    body = await c.req.json<Record<string, unknown>>();
+  } catch {
+    return c.json({ success: false, error: 'Invalid JSON body' }, 400);
+  }
+
+  const query = body['query'] as string | undefined;
+  if (!query || typeof query !== 'string' || query.trim().length === 0) {
+    return c.json({ success: false, error: 'query is required' }, 400);
+  }
+
+  // Rate limiting via SESSIONS_KV (5 AI calls / minute / IP)
+  const clientIp = c.req.header('CF-Connecting-IP') ?? 'unknown';
+  if (c.env.SESSIONS_KV) {
+    const rateLimitKey = `ai_rl:${clientIp}`;
+    try {
+      const current = await c.env.SESSIONS_KV.get(rateLimitKey);
+      const count = current ? parseInt(current, 10) : 0;
+      if (count >= 5) {
+        return c.json({ success: false, error: 'Rate limit exceeded. Try again in a minute.' }, 429);
+      }
+      await c.env.SESSIONS_KV.put(rateLimitKey, String(count + 1), { expirationTtl: 60 });
+    } catch { /* non-fatal — continue even if rate limit check fails */ }
+  }
+
+  const db = c.env.DB;
+
+  // Extract structured params from natural language query
+  let origin: string | undefined;
+  let destination: string | undefined;
+  let date: string | undefined;
+
+  if (c.env.OPENROUTER_API_KEY) {
+    try {
+      const { extractTripSearchParams } = await import('../lib/ai.js');
+      const params = await extractTripSearchParams(query, c.env);
+      origin = params?.origin ?? undefined;
+      destination = params?.destination ?? undefined;
+      date = params?.date ?? undefined;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[ai-search] AI extraction failed, running standard search:', msg);
+    }
+  }
+
+  // Fall back to treating the whole query as origin/destination search
+  if (!origin && !destination) {
+    const words = query.trim().split(/\s+/);
+    origin = words[0];
+    destination = words[words.length - 1];
+  }
+
+  // Run standard trip search with extracted params
+  let searchQuery = `SELECT t.id, t.departure_time, t.state, r.origin, r.destination, r.base_fare,
+    o.name as operator_name,
+    COUNT(CASE WHEN s.status = 'available' THEN 1 END) as available_seats
+    FROM trips t
+    JOIN routes r ON t.route_id = r.id
+    JOIN operators o ON t.operator_id = o.id
+    LEFT JOIN seats s ON s.trip_id = t.id
+    WHERE t.deleted_at IS NULL AND t.state IN ('scheduled', 'boarding')
+      AND r.deleted_at IS NULL`;
+  const params: unknown[] = [];
+
+  if (origin) { searchQuery += ` AND r.origin LIKE ?`; params.push(`%${origin}%`); }
+  if (destination) { searchQuery += ` AND r.destination LIKE ?`; params.push(`%${destination}%`); }
+  if (date) {
+    const dayStart = new Date(date).setHours(0, 0, 0, 0);
+    const dayEnd = dayStart + 86400000 - 1;
+    searchQuery += ` AND t.departure_time >= ? AND t.departure_time <= ?`;
+    params.push(dayStart, dayEnd);
+  }
+
+  searchQuery += ` GROUP BY t.id ORDER BY t.departure_time ASC LIMIT 20`;
+
+  try {
+    const result = await db.prepare(searchQuery).bind(...params).all();
+    return c.json({
+      success: true,
+      data: result.results,
+      ai_params: { origin, destination, date, query },
+    });
+  } catch {
+    return c.json({ success: false, error: 'Failed to execute AI search' }, 500);
+  }
+});
+
+// ============================================================
 // GET /bookings/:id — booking detail
 // ============================================================
 bookingPortalRouter.get('/bookings/:id', async (c) => {
