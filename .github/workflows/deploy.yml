@@ -207,7 +207,7 @@ jobs:
         run: npm ci
 
       - name: Build PWA (Vite)
-        run: npm run build
+        run: npm run build:ui
         env:
           VITE_API_BASE: https://webwaka-transport-api-prod.webwaka.workers.dev
 
@@ -311,7 +311,7 @@ jobs:
         run: npm ci
 
       - name: Build PWA (Vite)
-        run: npm run build
+        run: npm run build:ui
         env:
           VITE_API_BASE: https://webwaka-transport-api-staging.webwaka.workers.dev
 
