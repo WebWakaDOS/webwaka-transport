@@ -54,15 +54,15 @@ id = "bde8befc71da40c5a5979ee35830022a"
 
 [[env.staging.kv_namespaces]]
 binding = "TENANT_CONFIG_KV"
-id = "placeholder-tenant-config-staging"
+id = "0352ee15e0c24a0cba4bfad064b9da5a"
 
 [[env.staging.kv_namespaces]]
 binding = "SEAT_CACHE_KV"
-id = "placeholder-seat-cache-staging"
+id = "a6af901bf13a4971ad85190b5e2eb96c"
 
 [[env.staging.kv_namespaces]]
 binding = "IDEMPOTENCY_KV"
-id = "placeholder-idempotency-staging"
+id = "5c52f575887944dfa044079cd0b31266"
 
 # ============================================================
 # Production environment
@@ -84,12 +84,12 @@ id = "f176cebbdf8445838c72d9fde0173628"
 
 [[env.production.kv_namespaces]]
 binding = "TENANT_CONFIG_KV"
-id = "placeholder-tenant-config-prod"
+id = "2100508349014672a24a7606b4c03de7"
 
 [[env.production.kv_namespaces]]
 binding = "SEAT_CACHE_KV"
-id = "placeholder-seat-cache-prod"
+id = "f02e65e56b534402a1f4d85a35e2be97"
 
 [[env.production.kv_namespaces]]
 binding = "IDEMPOTENCY_KV"
-id = "placeholder-idempotency-prod"
+id = "cc380305413147f8ac35058bd0bcb9c0"
