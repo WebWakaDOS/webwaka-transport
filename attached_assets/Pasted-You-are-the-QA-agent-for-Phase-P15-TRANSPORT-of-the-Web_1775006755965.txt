@@ -1,0 +1,81 @@
+You are the QA agent for Phase P15-TRANSPORT of the WebWaka platform.
+Target repo: webwaka-transport
+
+This is the final phase QA. Verify P15-TRANSPORT completely. Also perform an overall platform integrity check. Fix every issue. Do not declare verified until all checks pass.
+
+=== VERIFICATION CHECKLIST ===
+
+--- P15-T1: Tier Gating Applied to Endpoints ---
+1. Confirm requireTierFeature is imported from @webwaka/core in the relevant API files.
+2. Check that EACH of the following endpoints has requireTierFeature applied with the correct feature name:
+- POST /api/booking/trips/ai-search → 'ai_search'
+- POST /api/booking/trips/:id/waitlist → 'waiting_list'
+- GET /api/operator/analytics (or the analytics endpoint) → 'analytics'
+- POST /api/operator/schedules → 'auto_schedule'
+- POST /api/operator/api-keys → 'api_keys'
+- PUT /api/operator/routes/:id/fare-matrix → 'seat_class_pricing'
+- POST /api/operator/config/branding → 'white_label'
+- POST /api/operator/import/routes → 'bulk_import'
+- POST /api/operator/import/vehicles → 'bulk_import'
+3. Confirm subscription_tier column exists on the operators table (migration 003).
+4. Test the gating: read the requireTierFeature middleware code. Confirm that when the DB read of subscription_tier fails (e.g. DB temporarily unavailable), the middleware fails OPEN (allows the request) rather than failing closed (blocking). This is a safety default — log the error, let the request through. Confirm this behavior exists. If it fails closed, fix it.
+
+--- P15-T2: Durable Objects Real-Time Seats ---
+1. Confirm wrangler.toml has a Durable Object binding for TripSeatDO.
+2. Confirm a migrations section in wrangler.toml registers TripSeatDO as a new class.
+3. Confirm src/durables/trip-seat-do.ts (or equivalent) exports the TripSeatDO class implementing DurableObject.
+4. Confirm TripSeatDO is exported at the module level from src/worker.ts: export { TripSeatDO }.
+5. Confirm GET /api/seat-inventory/trips/:id/ws exists and upgrades to WebSocket via the DO stub.
+6. Confirm all seat mutation endpoints (reserve, confirm, release, reserve-batch) send a broadcast to the DO after the D1 write.
+7. Confirm the broadcast is non-fatal (wrapped in .catch(() => {})) — a DO broadcast failure must never fail the seat mutation.
+8. Frontend: confirm the seat selection component opens a WebSocket connection to /api/seat-inventory/trips/:id/ws.
+9. Frontend: confirm the WebSocket onmessage handler calls a function that updates the seat state for the specific seat (not a full re-fetch).
+10. Frontend: confirm the WebSocket is closed on component unmount.
+11. Frontend: confirm there is a fallback when WebSocket fails — either falls back to SSE from P10-T1 or to periodic polling.
+12. Check: what if two identical DO IDs are created for the same trip? They must share state. Confirm idFromName(tripId) is used (not idFromString or a random ID).
+13. CRITICAL: Cloudflare Durable Objects require the class to be exported at the top level of the worker module. Confirm this is the case in worker.ts. If not, the entire worker will fail to deploy.
+
+--- P15-T3: Corporate Travel Portal ---
+1. Confirm POST /api/booking/corporate-accounts requires TENANT_ADMIN role.
+2. Confirm customer_type='corporate' is set on corporate customer records.
+3. Confirm payment_method='credit' is accepted in POST /api/booking/bookings ONLY for corporate customers.
+4. Confirm a non-corporate customer using payment_method='credit' returns 422.
+5. Confirm credit balance is checked before booking: insufficient credit returns 402.
+6. Confirm credit_limit_kobo is decremented after a credit booking (atomically — the decrement and booking creation should be in a single D1 batch or transaction check).
+7. Confirm GET /api/booking/corporate-accounts/:id/statement returns accurate booking history and remaining credit.
+8. Check: can a CUSTOMER role access GET /api/booking/corporate-accounts? It should not — this is TENANT_ADMIN only. Confirm RBAC.
+
+--- P15-T4: White-Label Branding ---
+1. Confirm PUT /api/operator/config/branding has requireTierFeature('white_label') applied.
+2. Confirm hex color validation uses a regex: /^#[0-9A-Fa-f]{6}$/.
+3. Confirm POST /api/operator/config/logo validates file size (max 2MB) and content type (image/png or image/jpeg). A 5MB file must return 413. A PDF must return 415.
+4. Confirm the logo is stored in R2 (env.ASSETS_R2.put is called).
+5. Confirm R2 binding is in wrangler.toml.
+6. Frontend: confirm CSS variables are set on document.documentElement.style when branding config is fetched.
+7. Frontend: confirm the portal title changes to the operator's display_name when branding is configured.
+8. Check: if no branding is configured for an operator, the default WebWaka branding is shown (not a broken white page). Confirm the fallback is implemented.
+
+--- P15-T5: Bulk CSV Import ---
+1. Confirm POST /api/operator/import/routes accepts multipart/form-data with a 'file' field.
+2. Confirm routes CSV columns are validated: origin, destination, base_fare_naira (positive number), duration_minutes (positive integer).
+3. Confirm base_fare_naira is converted to kobo (×100) before storage.
+4. Confirm the 500-row limit is enforced — row 501 and beyond are ignored with a note.
+5. Confirm the response includes created, skipped, and errors arrays.
+6. Confirm errors include the row number and reason for each failed row.
+7. Confirm POST /api/operator/import/vehicles and POST /api/operator/import/drivers also exist.
+8. Check: what if the uploaded file is empty? Should return 400 with a clear message.
+9. Check: what if the uploaded file has a header row with wrong column names? The system should return errors for each data row (unable to parse) rather than silently creating records with null values.
+
+--- OVERALL PLATFORM INTEGRITY CHECK ---
+Perform these checks across the entire codebase:
+
+10. Run tsc --noEmit on the entire webwaka-transport repo — zero errors required.
+11. Grep for console.log in production code paths (not tests or dev utilities). Remove or replace with console.error/console.warn where appropriate. Sensitive data (tokens, keys, phone numbers) must never be logged.
+12. Grep for TODO and FIXME across all modified files. Resolve or document every one.
+13. Grep for 'hardcoded' monetary values not using kobo (e.g. search for /\d+\.\d+\s*(naira|NGN|₦)/ or any division by 100 outside of display formatting). Monetary values must always be kobo integers in the DB and API.
+14. Confirm all new API endpoints return consistent error shapes: { error: string, message?: string }. Grep for endpoints that might return raw strings or unstructured error responses.
+15. Confirm all new public endpoints (those without requireRole middleware) are intentionally public and do not expose tenant data without scope checks.
+16. Start the dev server. Open the full app. Navigate through: login → booking portal → seat selection → e-ticket → agent POS → operator dashboard → dispatcher dashboard → driver view. Confirm no crashes or console errors in any of these views.
+
+Report every issue found and every fix applied. After all checks pass, confirm: "Phase P15-TRANSPORT is verified. The WebWaka Transport Suite is implementation-complete."
+```

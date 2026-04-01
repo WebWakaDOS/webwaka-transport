@@ -233,6 +233,8 @@ seatInventoryRouter.post('/trips/:id/reserve', async (c) => {
        WHERE id = ? AND status = 'available'`
     ).bind(user_id, token, expiresAt, now, seat_id).run();
 
+    broadcastSeatChange(c.env, tripId, { id: seat_id, status: 'reserved', seat_number: seat.seat_number ?? undefined });
+
     return c.json({
       success: true,
       data: { seat_id, trip_id: tripId, token, expires_at: expiresAt, ttl_seconds: Math.round(ttlMs / 1000) },
@@ -371,6 +373,11 @@ seatInventoryRouter.post('/trips/:tripId/reserve-batch', async (c) => {
     expires_at: expiresAt,
   }));
 
+  // P15-T2: Broadcast seat changes to DO (non-fatal)
+  for (const seat of seatsResult.results) {
+    broadcastSeatChange(c.env, tripId, { id: seat.id, status: 'reserved' });
+  }
+
   // 9. Publish platform event (non-fatal — event bus failure must not block booking)
   const trip = await db.prepare(
     `SELECT operator_id FROM trips WHERE id = ? AND deleted_at IS NULL`
@@ -492,6 +499,8 @@ seatInventoryRouter.post('/trips/:id/confirm', async (c) => {
        WHERE id = ?`
     ).bind(booking_id ?? seat.reserved_by, now, now, seat_id).run();
 
+    broadcastSeatChange(c.env, tripId, { id: seat_id, status: 'confirmed', seat_number: seat.seat_number ?? undefined });
+
     return c.json({ success: true, data: { seat_id, trip_id: tripId, status: 'confirmed' } });
   } catch {
     return c.json({ success: false, error: 'Failed to confirm seat' }, 500);
@@ -527,6 +536,8 @@ seatInventoryRouter.post('/trips/:id/release', async (c) => {
        reservation_expires_at = NULL, updated_at = ?
        WHERE id = ? AND trip_id = ? AND reservation_token = ?`
     ).bind(now, seat_id, tripId, token).run();
+
+    broadcastSeatChange(c.env, tripId, { id: seat_id, status: 'available' });
 
     return c.json({ success: true, data: { seat_id, trip_id: tripId, status: 'available' } });
   } catch {
@@ -614,6 +625,44 @@ seatInventoryRouter.post('/sync', async (c) => {
   }
 
   return c.json({ success: true, data: { applied, failed, synced_at: now } });
+});
+
+// ============================================================
+// P15-T2: Durable Object broadcast helper — non-fatal seat update push
+// ============================================================
+function broadcastSeatChange(
+  env: { TRIP_SEAT_DO?: DurableObjectNamespace },
+  tripId: string,
+  seat: { id: string; status: string; seat_number?: string },
+): void {
+  if (!env.TRIP_SEAT_DO) return;
+  try {
+    const doId = env.TRIP_SEAT_DO.idFromName(tripId);
+    const stub = env.TRIP_SEAT_DO.get(doId);
+    stub.fetch(new Request('https://do/broadcast', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'seat_changed', seat }),
+    })).catch(() => {});
+  } catch { /* non-fatal */ }
+}
+
+// ============================================================
+// P15-T2: GET /trips/:id/ws — WebSocket upgrade to Durable Object
+// Proxies the connection to the TripSeatDO for this trip.
+// Falls back gracefully when TRIP_SEAT_DO binding not present.
+// ============================================================
+seatInventoryRouter.get('/trips/:id/ws', async (c) => {
+  const tripId = c.req.param('id');
+  const env = c.env;
+
+  if (!env.TRIP_SEAT_DO) {
+    return c.json({ success: false, error: 'Real-time seat updates not configured' }, 503);
+  }
+
+  const doId = env.TRIP_SEAT_DO.idFromName(tripId);
+  const stub = env.TRIP_SEAT_DO.get(doId);
+  return stub.fetch(new Request('https://do/ws', { headers: c.req.raw.headers }));
 });
 
 // ============================================================

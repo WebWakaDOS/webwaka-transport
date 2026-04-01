@@ -5,7 +5,7 @@
  * Events: booking.created published to platform Event Bus (D1 outbox) on booking confirmation
  */
 import { Hono } from 'hono';
-import { requireRole, nanoid, generateJWT } from '@webwaka/core';
+import { requireRole, requireTierFeature, nanoid, generateJWT } from '@webwaka/core';
 import type { AppContext, DbBooking, DbCustomer } from './types';
 import { genId, parsePagination, metaResponse, requireFields } from './types';
 import { publishEvent } from '../core/events/index';
@@ -355,14 +355,43 @@ bookingPortalRouter.post('/bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN'
     const payment_reference = `waka_${nanoid('', 16)}`;
     const id = genId('bkg');
 
+    // P15-T3: Credit payment for corporate customers
+    let initialPaymentStatus = 'pending';
+    if (payment_method === 'credit') {
+      const corpCustomer = await db.prepare(
+        `SELECT customer_type, credit_limit_kobo FROM customers WHERE id = ? AND deleted_at IS NULL`
+      ).bind(customer_id).first<{ customer_type: string; credit_limit_kobo: number }>();
+
+      if (!corpCustomer || corpCustomer.customer_type !== 'corporate') {
+        return c.json({ success: false, error: 'Credit payment is only available for corporate accounts' }, 403);
+      }
+
+      const new_credit_balance = corpCustomer.credit_limit_kobo - total_amount;
+      if (new_credit_balance < 0) {
+        return c.json({
+          success: false,
+          error: 'insufficient_credit',
+          available_kobo: corpCustomer.credit_limit_kobo,
+          required_kobo: total_amount,
+        }, 402);
+      }
+
+      await db.prepare(
+        `UPDATE customers SET credit_limit_kobo = ? WHERE id = ?`
+      ).bind(new_credit_balance, customer_id).run();
+
+      initialPaymentStatus = 'completed';
+    }
+
     await db.prepare(
       `INSERT INTO bookings (id, customer_id, trip_id, seat_ids, passenger_names, total_amount, status, payment_status, payment_method, payment_reference, is_guest, origin_stop_id, destination_stop_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'pending', 'pending', ?, ?, ?, ?, ?, ?)`
-    ).bind(id, customer_id, trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, payment_method, payment_reference, isGuest ? 1 : 0, validatedOriginStopId, validatedDestStopId, now).run();
+       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(id, customer_id, trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, initialPaymentStatus, payment_method, payment_reference, isGuest ? 1 : 0, validatedOriginStopId, validatedDestStopId, now).run();
 
     return c.json({
       success: true,
-      data: { id, customer_id, trip_id, seat_ids, total_amount, expected_kobo, payment_method, payment_reference, status: 'pending',
+      data: { id, customer_id, trip_id, seat_ids, total_amount, expected_kobo, payment_method, payment_reference,
+              status: 'pending', payment_status: initialPaymentStatus,
               ...(validatedOriginStopId ? { origin_stop_id: validatedOriginStopId } : {}),
               ...(validatedDestStopId ? { destination_stop_id: validatedDestStopId } : {}) },
     }, 201);
@@ -657,7 +686,7 @@ async function notifyWaitlist(db: D1Database, trip_id: string, env: AppContext['
 // ============================================================
 // P08-T4: POST /trips/:id/waitlist — join a waiting list
 // ============================================================
-bookingPortalRouter.post('/trips/:id/waitlist', requireRole(['CUSTOMER', 'STAFF', 'TENANT_ADMIN', 'SUPER_ADMIN']), async (c) => {
+bookingPortalRouter.post('/trips/:id/waitlist', requireRole(['CUSTOMER', 'STAFF', 'TENANT_ADMIN', 'SUPER_ADMIN']), requireTierFeature('waiting_list'), async (c) => {
   const trip_id = c.req.param('id');
   const body = await c.req.json() as { customer_id?: string; seat_class?: string };
   const { customer_id, seat_class } = body;
@@ -818,7 +847,7 @@ bookingPortalRouter.patch('/group-bookings/:id/cancel', requireRole(['SUPER_ADMI
 // Rate limit: 5 requests/minute/IP via SESSIONS_KV
 // ============================================================
 
-bookingPortalRouter.post('/trips/ai-search', async (c) => {
+bookingPortalRouter.post('/trips/ai-search', requireTierFeature('ai_search'), async (c) => {
   let body: Record<string, unknown>;
   try {
     body = await c.req.json<Record<string, unknown>>();
@@ -1033,12 +1062,129 @@ publicBookingRouter.post('/verify-phone/confirm', async (c) => {
 });
 
 // ============================================================
+// P15-T3: Corporate Travel Portal
+// POST /corporate-accounts — create a corporate account (TENANT_ADMIN+)
+// GET  /corporate-accounts — list all corporate accounts (TENANT_ADMIN+)
+// GET  /corporate-accounts/:id/statement — credit statement (TENANT_ADMIN+)
+// ============================================================
+
+bookingPortalRouter.post('/corporate-accounts', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+  const body = await c.req.json() as Record<string, unknown>;
+  const err = requireFields(body, ['company_name', 'contact_name', 'contact_phone', 'credit_limit_naira']);
+  if (err) return c.json({ success: false, error: err }, 400);
+
+  const { company_name, contact_name, contact_phone, contact_email, credit_limit_naira } = body as {
+    company_name: string; contact_name: string; contact_phone: string;
+    contact_email?: string; credit_limit_naira: number;
+  };
+
+  if (typeof credit_limit_naira !== 'number' || credit_limit_naira < 0) {
+    return c.json({ success: false, error: 'credit_limit_naira must be a non-negative number' }, 400);
+  }
+
+  const db = c.env.DB;
+  const now = Date.now();
+  const id = genId('cust');
+  const credit_limit_kobo = Math.round(credit_limit_naira * 100);
+
+  try {
+    await db.prepare(
+      `INSERT INTO customers (id, name, phone, email, company_name, contact_email, customer_type, credit_limit_kobo, ndpr_consent, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'corporate', ?, 1, 'active', ?, ?)`
+    ).bind(id, contact_name, contact_phone, contact_email ?? null, company_name, contact_email ?? null, credit_limit_kobo, now, now).run();
+
+    return c.json({
+      success: true,
+      data: { id, company_name, contact_name, contact_phone, contact_email: contact_email ?? null, customer_type: 'corporate', credit_limit_kobo, status: 'active' },
+    }, 201);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : '';
+    if (msg.includes('UNIQUE')) return c.json({ success: false, error: 'A corporate account with this phone already exists' }, 409);
+    return c.json({ success: false, error: 'Failed to create corporate account' }, 500);
+  }
+});
+
+bookingPortalRouter.get('/corporate-accounts', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+  const db = c.env.DB;
+  const { limit, offset } = parsePagination(c.req.query());
+
+  try {
+    const result = await db.prepare(
+      `SELECT id, name, phone, email, company_name, credit_limit_kobo, status, created_at
+       FROM customers WHERE customer_type = 'corporate' AND deleted_at IS NULL
+       ORDER BY company_name ASC LIMIT ? OFFSET ?`
+    ).bind(limit, offset).all<{ id: string; name: string; phone: string; email: string | null; company_name: string | null; credit_limit_kobo: number; status: string; created_at: number }>();
+
+    return c.json({ success: true, data: result.results, meta: metaResponse(result.results.length, limit, offset) });
+  } catch {
+    return c.json({ success: false, error: 'Failed to fetch corporate accounts' }, 500);
+  }
+});
+
+bookingPortalRouter.get('/corporate-accounts/:id/statement', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+  const customerId = c.req.param('id');
+  const db = c.env.DB;
+  const now = Date.now();
+  const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime();
+
+  try {
+    const customer = await db.prepare(
+      `SELECT id, name, company_name, credit_limit_kobo FROM customers
+       WHERE id = ? AND customer_type = 'corporate' AND deleted_at IS NULL`
+    ).bind(customerId).first<{ id: string; name: string; company_name: string | null; credit_limit_kobo: number }>();
+
+    if (!customer) return c.json({ success: false, error: 'Corporate account not found' }, 404);
+
+    // All bookings for this customer with trip summary
+    const bookingsRes = await db.prepare(
+      `SELECT b.id as booking_id, b.total_amount, b.created_at, b.seat_ids,
+              r.origin, r.destination, t.departure_time, b.payment_method
+       FROM bookings b
+       JOIN trips t ON b.trip_id = t.id
+       JOIN routes r ON t.route_id = r.id
+       WHERE b.customer_id = ? AND b.deleted_at IS NULL
+       ORDER BY b.created_at DESC LIMIT 100`
+    ).bind(customerId).all<{
+      booking_id: string; total_amount: number; created_at: number; seat_ids: string;
+      origin: string; destination: string; departure_time: number; payment_method: string;
+    }>();
+
+    // Monthly spend
+    const monthlyRes = await db.prepare(
+      `SELECT COALESCE(SUM(total_amount), 0) as total_spent_this_month
+       FROM bookings WHERE customer_id = ? AND created_at >= ? AND created_at <= ? AND deleted_at IS NULL`
+    ).bind(customerId, monthStart, now).first<{ total_spent_this_month: number }>();
+
+    return c.json({
+      success: true,
+      data: {
+        customer_id: customerId,
+        company_name: customer.company_name,
+        remaining_credit_kobo: customer.credit_limit_kobo,
+        total_spent_kobo_this_month: monthlyRes?.total_spent_this_month ?? 0,
+        bookings: bookingsRes.results.map(b => ({
+          booking_id: b.booking_id,
+          origin: b.origin,
+          destination: b.destination,
+          departure_time: b.departure_time,
+          amount_kobo: b.total_amount,
+          date: b.created_at,
+          payment_method: b.payment_method,
+        })),
+      },
+    });
+  } catch {
+    return c.json({ success: false, error: 'Failed to fetch corporate statement' }, 500);
+  }
+});
+
+// ============================================================
 // P13-T2: POST /reviews — submit an operator review (CUSTOMER)
 // Body: { booking_id, rating (1-5), review_text? }
 // Auth: CUSTOMER phone must match booking's customer phone
 // Constraint: trip must be completed; one review per booking
 // ============================================================
-bookingPortalRouter.post('/reviews', requireRole(['CUSTOMER', 'STAFF', 'TENANT_ADMIN', 'SUPER_ADMIN']), async (c) => {
+bookingPortalRouter.post('/reviews', requireRole(['CUSTOMER', 'STAFF', 'TENANT_ADMIN', 'SUPER_ADMIN']), requireTierFeature('operator_reviews'), async (c) => {
   const body = await c.req.json() as Record<string, unknown>;
   const err = requireFields(body, ['booking_id', 'rating']);
   if (err) return c.json({ success: false, error: err }, 400);

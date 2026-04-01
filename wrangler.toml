@@ -4,6 +4,24 @@ compatibility_date = "2024-12-01"
 compatibility_flags = ["nodejs_compat"]
 
 # ============================================================
+# P15-T2: Durable Objects — Real-Time Seat Updates
+# ============================================================
+[[durable_objects.bindings]]
+name = "TRIP_SEAT_DO"
+class_name = "TripSeatDO"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["TripSeatDO"]
+
+# ============================================================
+# P15-T4: R2 Bucket — Operator Branding Assets
+# ============================================================
+[[r2_buckets]]
+binding = "ASSETS_R2"
+bucket_name = "webwaka-operator-assets"
+
+# ============================================================
 # Cron Triggers — Scheduled Worker
 # "* * * * *"    — every minute: drainEventBus, sweepExpiredReservations, sweepAbandonedBookings
 # "0 0 * * *"    — daily at UTC midnight: NDPR sweepExpiredPII + purgeExpiredFinancialData (C-002)

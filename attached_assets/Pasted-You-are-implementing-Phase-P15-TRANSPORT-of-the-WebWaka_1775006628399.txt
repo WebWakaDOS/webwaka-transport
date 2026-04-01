@@ -1,0 +1,202 @@
+You are implementing Phase P15-TRANSPORT of the WebWaka platform.
+Target repo: webwaka-transport
+
+This is the final phase. It applies subscription tier gating, builds the real-time Durable Object seat system, corporate travel portal, white-label branding, and bulk import. Read webwaka-implementation-plan.md for full context.
+
+=== TASK P15-T1: Apply Subscription Tier Gating to Feature Endpoints ===
+
+Now that @webwaka/core has requireTierFeature (from P14-T1), apply it to gated endpoints.
+
+File: src/api/booking-portal.ts, src/api/seat-inventory.ts, src/api/operator-management.ts
+
+Import requireTierFeature from @webwaka/core.
+
+Apply to these specific route registrations (add the middleware before the existing handler):
+
+booking-portal.ts:
+POST /api/booking/trips/ai-search → requireTierFeature('ai_search')
+POST /api/booking/trips/:id/waitlist → requireTierFeature('waiting_list')
+POST /api/booking/reviews → requireTierFeature('operator_reviews') (remove if you decide reviews should be basic)
+
+operator-management.ts:
+GET /api/operator/analytics → requireTierFeature('analytics')
+POST /api/operator/schedules → requireTierFeature('auto_schedule')
+POST /api/operator/api-keys → requireTierFeature('api_keys')
+PUT /api/operator/routes/:id/fare-matrix → requireTierFeature('seat_class_pricing')
+POST /api/operator/config/branding → requireTierFeature('white_label')
+POST /api/operator/import/routes → requireTierFeature('bulk_import')
+POST /api/operator/import/vehicles → requireTierFeature('bulk_import')
+
+seat-inventory.ts:
+POST /api/seat-inventory/trips/:id/waitlist → requireTierFeature('waiting_list')
+
+Also add subscription_tier TEXT NOT NULL DEFAULT 'basic' to operators table (migration 003 if not already added).
+
+=== TASK P15-T2: Durable Objects Real-Time Seat Updates ===
+
+File: src/durables/trip-seat-do.ts (create)
+File: wrangler.toml (add DO binding)
+File: src/api/seat-inventory.ts (add WebSocket upgrade endpoint)
+
+1. In wrangler.toml, add:
+
+[[durable_objects.bindings]]
+name = "TRIP_SEAT_DO"
+class_name = "TripSeatDO"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["TripSeatDO"]
+
+2. Create src/durables/trip-seat-do.ts:
+
+export class TripSeatDO implements DurableObject {
+private connections: Set<WebSocket> = new Set();
+
+async fetch(request: Request): Promise<Response> {
+const url = new URL(request.url);
+
+if (url.pathname === '/ws') {
+const upgrade = request.headers.get('Upgrade');
+if (upgrade !== 'websocket') return new Response('Expected WebSocket', { status: 426 });
+const { 0: client, 1: server } = new WebSocketPair();
+server.accept();
+this.connections.add(server);
+server.addEventListener('close', () => this.connections.delete(server));
+server.addEventListener('error', () => this.connections.delete(server));
+return new Response(null, { status: 101, webSocket: client });
+}
+
+if (url.pathname === '/broadcast' && request.method === 'POST') {
+const data = await request.json() as { type: string; seat: unknown };
+const message = JSON.stringify(data);
+const dead: WebSocket[] = [];
+for (const ws of this.connections) {
+try { ws.send(message); } catch { dead.push(ws); }
+}
+dead.forEach(ws => this.connections.delete(ws));
+return new Response('ok');
+}
+
+return new Response('Not Found', { status: 404 });
+}
+}
+
+3. Export TripSeatDO from src/worker.ts at the module level: export { TripSeatDO } from './durables/trip-seat-do';
+
+4. Add WebSocket upgrade route to seat-inventory.ts:
+
+seatInventoryRouter.get('/trips/:id/ws', async (c) => {
+const tripId = c.req.param('id');
+const env = c.env as Env & { TRIP_SEAT_DO: DurableObjectNamespace };
+const id = env.TRIP_SEAT_DO.idFromName(tripId);
+const stub = env.TRIP_SEAT_DO.get(id);
+return stub.fetch(new Request('https://do/ws', { headers: c.req.raw.headers }));
+});
+
+5. In all seat mutation endpoints (reserve, confirm, release, reserve-batch), after the D1 write, add a broadcast:
+
+const doId = env.TRIP_SEAT_DO.idFromName(tripId);
+const stub = env.TRIP_SEAT_DO.get(doId);
+await stub.fetch(new Request('https://do/broadcast', {
+method: 'POST',
+headers: { 'Content-Type': 'application/json' },
+body: JSON.stringify({ type: 'seat_changed', seat: { id: seatId, status: newStatus, seat_number: seatNumber } }),
+})).catch(() => {}); // Non-fatal
+
+6. In the booking portal frontend, replace the SSE EventSource with a WebSocket:
+
+useEffect(() => {
+const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+const ws = new WebSocket(`${protocol}//${location.host}/api/seat-inventory/trips/${tripId}/ws`);
+ws.onmessage = (event) => {
+const { type, seat } = JSON.parse(event.data);
+if (type === 'seat_changed') updateSingleSeat(seat);
+};
+ws.onerror = () => {
+// Fall back to polling if WebSocket fails
+console.warn('[SeatWS] WebSocket failed, falling back to polling');
+};
+return () => ws.close();
+}, [tripId]);
+
+Keep the SSE endpoint from P10-T1 as a fallback (older browsers).
+
+=== TASK P15-T3: Corporate Travel Portal ===
+File: src/api/booking-portal.ts
+
+1. Add customer_type TEXT NOT NULL DEFAULT 'individual' and credit_limit_kobo INTEGER DEFAULT 0 to customers (migration 003).
+
+2. Add POST /api/booking/corporate-accounts (TENANT_ADMIN+):
+- Body: { company_name, contact_name, contact_phone, contact_email, credit_limit_naira }
+- Creates a customer record with customer_type='corporate', credit_limit_kobo=credit_limit_naira*100
+- Returns the corporate account
+
+3. Add GET /api/booking/corporate-accounts (TENANT_ADMIN+):
+- Lists all corporate customers for the operator
+
+4. Modify POST /api/booking/bookings to support payment_method='credit':
+- Only for corporate customers (customer.customer_type = 'corporate')
+- Compute new_credit_balance = customer.credit_limit_kobo - total_amount_kobo (subtract from available credit, assuming credit_limit is the remaining balance)
+- If new_credit_balance < 0: return 402 { error: 'insufficient_credit', available_kobo: customer.credit_limit_kobo }
+- UPDATE customers SET credit_limit_kobo = new_credit_balance WHERE id = ?
+- Set booking.payment_status = 'completed' (credit purchases are immediately settled)
+
+5. Add GET /api/booking/corporate-accounts/:id/statement (TENANT_ADMIN+):
+- Returns all bookings for this corporate customer ordered by created_at DESC
+- Includes: booking_id, trip summary, amount_kobo, date, seat_numbers
+- Also returns: total_spent_kobo_this_month, remaining_credit_kobo
+
+=== TASK P15-T4: Operator White-Label Branding ===
+File: src/api/operator-management.ts
+File: src/app.tsx
+File: wrangler.toml (add R2 binding)
+
+1. Add R2 bucket binding to wrangler.toml:
+[[r2_buckets]]
+binding = "ASSETS_R2"
+bucket_name = "webwaka-operator-assets"
+
+2. Add PUT /api/operator/config/branding (TENANT_ADMIN+ with requireTierFeature('white_label')):
+- Body: { logo_url?: string, primary_color?: string (hex), secondary_color?: string (hex), display_name?: string }
+- Validate hex colors: /^#[0-9A-Fa-f]{6}$/
+- Merge into operator config under 'branding' key
+- Write to TENANT_CONFIG_KV
+
+3. Add POST /api/operator/config/logo (TENANT_ADMIN+ with requireTierFeature('white_label')):
+- Accepts multipart/form-data with a 'logo' file field
+- Validate: max 2MB, must be image/png or image/jpeg
+- Upload to R2: env.ASSETS_R2.put(`logos/${operatorId}/${Date.now()}`, imageBuffer, { httpMetadata: { contentType } })
+- Return the public URL: https://assets.webwaka.ng/logos/{operatorId}/{filename}
+
+4. In src/app.tsx on mount:
+- Detect operator from URL subdomain (location.hostname.split('.')[0]) or from a ?op= query param
+- If operator detected: fetch GET /api/operator/config for that operator's public branding
+- Apply CSS variables: document.documentElement.style.setProperty('--primary', branding.primary_color)
+- Set document.title = branding.display_name or "WebWaka"
+
+=== TASK P15-T5: Bulk CSV Import ===
+File: src/api/operator-management.ts
+
+Add POST /api/operator/import/routes (TENANT_ADMIN+ with requireTierFeature('bulk_import')):
+- Accepts multipart/form-data with a 'file' field (CSV)
+- Parse CSV: first line is header. Expected columns: origin,destination,base_fare_naira,duration_minutes,distance_km
+- Limit: 500 rows. Rows 501+ are ignored (return a note in the response).
+- For each valid row:
+- Validate: origin and destination non-empty, base_fare_naira positive number, duration_minutes positive integer
+- Convert base_fare_naira to kobo (multiply by 100)
+- INSERT into routes (skip if origin+destination+operator_id already exists — INSERT OR IGNORE)
+- Return: { created: N, skipped: N, errors: [{ row: N, reason: '...' }] }
+
+Add POST /api/operator/import/vehicles — CSV: plate_number,make,model,year,capacity,vehicle_type
+Add POST /api/operator/import/drivers — CSV: name,phone,license_number,license_category
+
+Simple CSV parser (no library needed for this schema):
+const parseCSV = (text: string): string[][] => {
+return text.trim().split('\n').map(line => line.split(',').map(cell => cell.trim().replace(/^"|"$/g, '')));
+};
+
+=== DONE ===
+Run tsc --noEmit. Verify the Durable Object class is exported correctly (Cloudflare requires it to be a named export at the worker module level). Test feature gating: a 'basic' tier operator calling /api/booking/trips/ai-search should get 402. Test bulk CSV import with a 10-row CSV. Test WebSocket seat updates in two browser tabs.
+
+This is the final phase. After P15 is deployed, the full WebWaka Transport Suite is feature-complete across all 15 phases.

@@ -66,7 +66,11 @@ export interface Env {
   VAPID_PUBLIC_KEY?: string;
   OPENROUTER_API_KEY?: string;
   SENDGRID_API_KEY?: string;
+  TRIP_SEAT_DO?: DurableObjectNamespace;
+  ASSETS_R2?: R2Bucket;
 }
+
+export { TripSeatDO } from './durables/trip-seat-do.js';
 
 const app = new Hono<{ Bindings: Env }>();
 

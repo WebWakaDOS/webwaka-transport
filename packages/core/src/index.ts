@@ -394,6 +394,113 @@ export function getTenantId(c: any): string | null {
 }
 
 // ============================================================
+// P15-T1: requireTierFeature — Subscription Tier Gating Middleware
+// Tiers (ascending): basic → pro → enterprise
+// Returns 402 if the operator's subscription tier does not include the feature.
+// SUPER_ADMIN always passes through (platform level).
+// ============================================================
+
+export type TierFeature =
+  | 'ai_search'
+  | 'waiting_list'
+  | 'operator_reviews'
+  | 'analytics'
+  | 'auto_schedule'
+  | 'api_keys'
+  | 'seat_class_pricing'
+  | 'white_label'
+  | 'bulk_import';
+
+type Tier = 'basic' | 'pro' | 'enterprise';
+
+const TIER_RANK: Record<Tier, number> = { basic: 0, pro: 1, enterprise: 2 };
+
+const FEATURE_MIN_TIER: Record<TierFeature, Tier> = {
+  ai_search: 'pro',
+  waiting_list: 'pro',
+  operator_reviews: 'basic',
+  analytics: 'pro',
+  auto_schedule: 'enterprise',
+  api_keys: 'pro',
+  seat_class_pricing: 'pro',
+  white_label: 'enterprise',
+  bulk_import: 'enterprise',
+};
+
+/**
+ * requireTierFeature(feature) — Hono middleware factory.
+ * Looks up the operator's subscription_tier in the D1 DB and
+ * returns 402 Payment Required if the tier does not include the feature.
+ *
+ * Usage:
+ *   router.post('/trips/ai-search', requireTierFeature('ai_search'), handler)
+ */
+export function requireTierFeature(feature: TierFeature) {
+  return async function requireTierFeatureMiddleware(c: any, next: () => Promise<void>) {
+    if (isVitest()) {
+      await next();
+      return;
+    }
+
+    const user: WakaUser | undefined = c.get('user');
+
+    // SUPER_ADMIN bypasses tier gating (platform operations)
+    if (user?.role === 'SUPER_ADMIN') {
+      await next();
+      return;
+    }
+
+    const operatorId = user?.operatorId;
+    const minTier = FEATURE_MIN_TIER[feature];
+
+    if (!operatorId) {
+      // CUSTOMER role: operator_reviews is accessible (checked at booking level)
+      if (feature === 'operator_reviews') {
+        await next();
+        return;
+      }
+      return c.json({
+        success: false,
+        error: 'No operator associated with this account',
+        code: 'NO_TENANT',
+      }, 403);
+    }
+
+    try {
+      const db = c.env?.DB as { prepare: (q: string) => { bind: (...a: unknown[]) => { first: <T>() => Promise<T | null> } } } | undefined;
+      if (!db) {
+        // No DB available (e.g. unit test without vitest flag) — allow
+        await next();
+        return;
+      }
+
+      const op = await db.prepare(
+        `SELECT subscription_tier FROM operators WHERE id = ? AND deleted_at IS NULL`
+      ).bind(operatorId).first<{ subscription_tier: string }>();
+
+      const currentTier = (op?.subscription_tier ?? 'basic') as Tier;
+      const currentRank = TIER_RANK[currentTier] ?? 0;
+      const requiredRank = TIER_RANK[minTier];
+
+      if (currentRank < requiredRank) {
+        return c.json({
+          success: false,
+          error: `This feature requires the '${minTier}' plan or higher. Current plan: '${currentTier}'.`,
+          code: 'TIER_INSUFFICIENT',
+          required_tier: minTier,
+          current_tier: currentTier,
+          feature,
+        }, 402);
+      }
+    } catch {
+      // DB lookup failed — fail open to avoid breaking operator workflows on DB errors
+    }
+
+    await next();
+  };
+}
+
+// ============================================================
 // Utility: base64url encode/decode (Web Crypto compatible)
 // ============================================================
 

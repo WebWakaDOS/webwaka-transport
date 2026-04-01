@@ -568,3 +568,38 @@ Added to `MIGRATIONS` array in `src/api/admin.ts`: `idx_routes_operator_id`, `id
 - OTP is consumed (KV deleted) on first valid use — no replay
 - `is_guest` flag stored on bookings for audit; Nigerian phone format validated (`+234` or `0` prefix + 10 digits)
 - Paystack payment reference format: `waka_${16-char-random}` (Paystack-compatible)
+
+---
+
+## P15-TRANSPORT: Subscription Tier Gating, Real-Time Seats, Corporate Portal, White-Label, Bulk Import
+
+### P15-T1: Subscription Tier Gating Middleware
+- `packages/core/src/index.ts` — `requireTierFeature(feature)` middleware; tier map: basic/pro/enterprise; 9 gated features (`operator_reviews→basic`, `ai_search/waiting_list/analytics/api_keys/seat_class_pricing→pro`, `auto_schedule/white_label/bulk_import→enterprise`); returns 402 with `TIER_INSUFFICIENT` on mismatch; SUPER_ADMIN bypasses; CUSTOMER passes for `operator_reviews`.
+- `migrations/009_subscription_tier_and_corporate.sql` — adds `subscription_tier` to operators; `customer_type`, `credit_limit_kobo`, `company_name`, `contact_email` to customers.
+
+### P15-T2: Durable Objects Real-Time Seat Fan-Out
+- `src/durables/trip-seat-do.ts` — `TripSeatDO` class; WebSocket set per trip; `/ws` endpoint upgrades connection; `/broadcast` POST fans message to all connected clients; `{ type: 'seat_changed', seat }` payload.
+- `wrangler.toml` — `TRIP_SEAT_DO` durable object binding + `ASSETS_R2` R2 bucket.
+- `src/api/seat-inventory.ts` — `broadcastSeatChange()` helper; `GET /trips/:id/ws` WebSocket proxy; DO broadcasts on reserve, reserve-batch, confirm, release.
+
+### P15-T3: Booking Portal Updates
+- `src/api/booking-portal.ts` — `requireTierFeature` on `POST /trips/ai-search` (ai_search), `POST /trips/:id/waitlist` (waiting_list), `POST /reviews` (operator_reviews).
+- Credit payment (`payment_method=credit`) for corporate customers: checks `customer_type='corporate'`, deducts from `credit_limit_kobo`, sets `payment_status='completed'` immediately; returns 402 if insufficient credit.
+- `POST /corporate-accounts` — create corporate account (TENANT_ADMIN+); accepts `company_name, contact_name, contact_phone, credit_limit_naira`.
+- `GET /corporate-accounts` — list corporate accounts (TENANT_ADMIN+).
+- `GET /corporate-accounts/:id/statement` — monthly credit statement with booking list.
+
+### P15-T4: Operator Management Updates
+- `src/api/operator-management.ts` — `requireTierFeature` on `PUT /routes/:id/fare-matrix` (seat_class_pricing), `GET /reports/revenue` (analytics), `POST /api-keys` (api_keys).
+- `POST /schedules` — create recurring trip schedule (auto_schedule tier); fields: `route_id, departure_time, recurrence, recurrence_days, horizon_days`.
+- `GET /branding` — fetch operator branding from TENANT_CONFIG_KV (mounted at `/api/operator/branding`).
+- `PUT /config/branding` — store branding config in TENANT_CONFIG_KV (white_label tier); validates hex colors.
+- `POST /config/logo` — upload logo to ASSETS_R2 (white_label tier); supports PNG/JPEG/SVG/WebP; returns public URL.
+- `POST /import/routes` — bulk route import up to 500 rows (bulk_import tier); per-row status.
+- `POST /import/vehicles` — bulk vehicle import up to 500 rows (bulk_import tier).
+- `POST /import/drivers` — bulk driver import up to 500 rows (bulk_import tier).
+
+### P15-T5: Frontend Updates
+- `src/app.tsx` — `useLiveSeatUpdates(tripId, onSeatChange)` hook: WebSocket to `/api/trips/:id/ws`, auto-reconnects every 3s on disconnect, cleans up on unmount.
+- `AgentPOSModule` — wired with `useLiveSeatUpdates`; live seat status merged into `seatAvailability` state; unavailable seats auto-deselected.
+- `AppContent` — white-label branding detection on login: fetches `/api/operator/branding`, applies `--waka-primary`/`--waka-secondary` CSS variables, updates `document.title` and favicon.

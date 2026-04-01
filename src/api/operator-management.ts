@@ -4,7 +4,7 @@
  * Invariants: Multi-tenancy (operator_id), Nigeria-First, Build Once Use Infinitely
  */
 import { Hono } from 'hono';
-import { requireRole, publishEvent, nanoid } from '@webwaka/core';
+import { requireRole, requireTierFeature, publishEvent, nanoid } from '@webwaka/core';
 import type { AppContext, DbOperator, DbRoute, DbVehicle, DbTrip, DbDriver } from './types';
 import { genId, parsePagination, metaResponse, requireFields, applyTenantScope } from './types';
 import { getOperatorConfig, validateOperatorConfig } from '../lib/operator-config.js';
@@ -191,7 +191,7 @@ operatorManagementRouter.patch('/routes/:id', requireRole(['SUPER_ADMIN', 'TENAN
 // ============================================================
 // P08-T2: PUT /routes/:id/fare-matrix — set seat-class pricing (TENANT_ADMIN+)
 // ============================================================
-operatorManagementRouter.put('/routes/:id/fare-matrix', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+operatorManagementRouter.put('/routes/:id/fare-matrix', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), requireTierFeature('seat_class_pricing'), async (c) => {
   const id = c.req.param('id');
   const body = await c.req.json() as Record<string, unknown>;
   const db = c.env.DB;
@@ -1672,7 +1672,7 @@ operatorManagementRouter.patch('/drivers/:id', requireRole(['SUPER_ADMIN', 'TENA
 // ============================================================
 // GET /reports/revenue — operator revenue analytics
 // ============================================================
-operatorManagementRouter.get('/reports/revenue', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
+operatorManagementRouter.get('/reports/revenue', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), requireTierFeature('analytics'), async (c) => {
   const q = c.req.query();
   const db = c.env.DB;
   const now = Date.now();
@@ -2518,7 +2518,7 @@ operatorManagementRouter.get('/reports', requireRole(['SUPER_ADMIN', 'TENANT_ADM
 // P11-T1: Operator API Keys Management
 // ============================================================
 
-operatorManagementRouter.post('/api-keys', requireRole(['TENANT_ADMIN']), async (c) => {
+operatorManagementRouter.post('/api-keys', requireRole(['TENANT_ADMIN']), requireTierFeature('api_keys'), async (c) => {
   const body = await c.req.json() as Record<string, unknown>;
   const err = requireFields(body, ['name', 'scope']);
   if (err) return c.json({ success: false, error: err }, 400);
@@ -2661,4 +2661,325 @@ operatorManagementRouter.patch('/profile', requireRole(['SUPER_ADMIN', 'TENANT_A
     }
     return c.json({ success: false, error: 'Failed to update profile' }, 500);
   }
+});
+
+// ============================================================
+// P15-T5: POST /schedules — create a recurring trip schedule (auto_schedule tier)
+// Body: { route_id, vehicle_id?, driver_id?, departure_time, recurrence?, recurrence_days?, horizon_days? }
+// ============================================================
+operatorManagementRouter.post('/schedules', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), requireTierFeature('auto_schedule'), async (c) => {
+  const body = await c.req.json() as Record<string, unknown>;
+  const err = requireFields(body, ['route_id', 'departure_time']);
+  if (err) return c.json({ success: false, error: err }, 400);
+
+  const { route_id, vehicle_id, driver_id, departure_time, recurrence, recurrence_days, horizon_days } = body as {
+    route_id: string; vehicle_id?: string; driver_id?: string; departure_time: string;
+    recurrence?: string; recurrence_days?: string; horizon_days?: number;
+  };
+
+  const db = c.env.DB;
+  const jwtUser = c.get('user');
+  if (!jwtUser) return c.json({ success: false, error: 'Unauthorized' }, 401);
+  const now = Date.now();
+
+  const operatorRow = await db.prepare(
+    `SELECT id FROM operators WHERE id = ? AND deleted_at IS NULL`
+  ).bind(jwtUser.operatorId ?? '').first<{ id: string }>();
+  if (!operatorRow) return c.json({ success: false, error: 'Operator not found' }, 404);
+
+  const route = await db.prepare(
+    `SELECT id FROM routes WHERE id = ? AND operator_id = ? AND deleted_at IS NULL`
+  ).bind(route_id, operatorRow.id).first<{ id: string }>();
+  if (!route) return c.json({ success: false, error: 'Route not found or not owned by operator' }, 404);
+
+  const id = genId('sched');
+  try {
+    await db.prepare(
+      `INSERT INTO schedules (id, operator_id, route_id, vehicle_id, driver_id, departure_time, recurrence, recurrence_days, horizon_days, active, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`
+    ).bind(
+      id, operatorRow.id, route_id,
+      vehicle_id ?? null, driver_id ?? null,
+      departure_time,
+      recurrence ?? 'daily',
+      recurrence_days ?? null,
+      horizon_days ?? 30,
+      now,
+    ).run();
+
+    return c.json({
+      success: true,
+      data: { id, operator_id: operatorRow.id, route_id, vehicle_id: vehicle_id ?? null, driver_id: driver_id ?? null, departure_time, recurrence: recurrence ?? 'daily', recurrence_days: recurrence_days ?? null, horizon_days: horizon_days ?? 30, active: true, created_at: now },
+    }, 201);
+  } catch {
+    return c.json({ success: false, error: 'Failed to create schedule' }, 500);
+  }
+});
+
+// ============================================================
+// P15-T5: GET /branding — fetch own operator branding (TENANT_ADMIN+)
+// Returns primary_color, secondary_color, brand_name, logo_url, tagline
+// Used by frontend post-login to apply white-label CSS variables
+// Mounted at /api/operator/branding
+// ============================================================
+operatorManagementRouter.get('/branding', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
+  const jwtUser = c.get('user');
+  if (!jwtUser) return c.json({ success: false, error: 'Unauthorized' }, 401);
+  const operatorId = jwtUser.operatorId ?? '';
+
+  if (!c.env.TENANT_CONFIG_KV) {
+    return c.json({ success: true, data: null });
+  }
+
+  try {
+    const raw = await c.env.TENANT_CONFIG_KV.get(`branding:${operatorId}`);
+    if (!raw) return c.json({ success: true, data: null });
+    return c.json({ success: true, data: JSON.parse(raw) });
+  } catch {
+    return c.json({ success: true, data: null });
+  }
+});
+
+// ============================================================
+// P15-T5: PUT /config/branding — white-label branding config (white_label tier)
+// Body: { primary_color, secondary_color, logo_url?, brand_name, tagline? }
+// Stored in TENANT_CONFIG_KV under key: branding:{operatorId}
+// ============================================================
+operatorManagementRouter.put('/config/branding', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), requireTierFeature('white_label'), async (c) => {
+  const body = await c.req.json() as Record<string, unknown>;
+  const err = requireFields(body, ['primary_color', 'brand_name']);
+  if (err) return c.json({ success: false, error: err }, 400);
+
+  const { primary_color, secondary_color, logo_url, brand_name, tagline } = body as {
+    primary_color: string; secondary_color?: string; logo_url?: string;
+    brand_name: string; tagline?: string;
+  };
+
+  const jwtUser = c.get('user');
+  if (!jwtUser) return c.json({ success: false, error: 'Unauthorized' }, 401);
+  const operatorId = jwtUser.operatorId ?? '';
+
+  const hexColorRegex = /^#[0-9A-Fa-f]{6}$/;
+  if (!hexColorRegex.test(primary_color)) {
+    return c.json({ success: false, error: 'primary_color must be a valid hex color (e.g., #FF6B00)' }, 400);
+  }
+  if (secondary_color && !hexColorRegex.test(secondary_color)) {
+    return c.json({ success: false, error: 'secondary_color must be a valid hex color (e.g., #1A1A1A)' }, 400);
+  }
+
+  const branding = { primary_color, secondary_color: secondary_color ?? null, logo_url: logo_url ?? null, brand_name, tagline: tagline ?? null, updated_at: Date.now() };
+
+  if (!c.env.TENANT_CONFIG_KV) {
+    return c.json({ success: false, error: 'Branding store unavailable' }, 503);
+  }
+
+  await c.env.TENANT_CONFIG_KV.put(`branding:${operatorId}`, JSON.stringify(branding));
+
+  return c.json({ success: true, data: branding });
+});
+
+// ============================================================
+// P15-T5: POST /config/logo — upload operator logo to R2 and store URL
+// Body: multipart/form-data with file field "logo"
+// Stored in ASSETS_R2; URL returned and saved in branding KV config
+// ============================================================
+operatorManagementRouter.post('/config/logo', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), requireTierFeature('white_label'), async (c) => {
+  const jwtUser = c.get('user');
+  if (!jwtUser) return c.json({ success: false, error: 'Unauthorized' }, 401);
+  const operatorId = jwtUser.operatorId ?? '';
+
+  const formData = await c.req.formData().catch(() => null);
+  if (!formData) return c.json({ success: false, error: 'Expected multipart/form-data' }, 400);
+
+  const file = formData.get('logo');
+  if (!file || !(file instanceof File)) return c.json({ success: false, error: 'logo file is required' }, 400);
+
+  if (!c.env.ASSETS_R2) return c.json({ success: false, error: 'Asset storage unavailable' }, 503);
+
+  const allowedTypes = ['image/png', 'image/jpeg', 'image/svg+xml', 'image/webp'];
+  if (!allowedTypes.includes(file.type)) {
+    return c.json({ success: false, error: `Unsupported image type: ${file.type}. Allowed: png, jpeg, svg, webp` }, 400);
+  }
+
+  const ext = file.type === 'image/svg+xml' ? 'svg' : file.type.split('/')[1];
+  const key = `logos/${operatorId}/logo.${ext}`;
+  const bytes = await file.arrayBuffer();
+
+  await c.env.ASSETS_R2.put(key, bytes, { httpMetadata: { contentType: file.type } });
+
+  const logoUrl = `https://assets.webwaka.ng/${key}`;
+
+  // Update branding KV if it exists
+  if (c.env.TENANT_CONFIG_KV) {
+    const existing = await c.env.TENANT_CONFIG_KV.get(`branding:${operatorId}`);
+    const current = existing ? JSON.parse(existing) as Record<string, unknown> : {};
+    await c.env.TENANT_CONFIG_KV.put(`branding:${operatorId}`, JSON.stringify({ ...current, logo_url: logoUrl, updated_at: Date.now() }));
+  }
+
+  return c.json({ success: true, data: { logo_url: logoUrl, key } });
+});
+
+// ============================================================
+// P15-T5: Bulk CSV Import (bulk_import tier)
+// POST /import/routes   — { rows: Array<{ origin, destination, distance_km, duration_minutes, base_fare_naira }> }
+// POST /import/vehicles — { rows: Array<{ plate_number, vehicle_type, model, total_seats }> }
+// POST /import/drivers  — { rows: Array<{ name, phone, license_number }> }
+// ============================================================
+
+operatorManagementRouter.post('/import/routes', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), requireTierFeature('bulk_import'), async (c) => {
+  const body = await c.req.json() as Record<string, unknown>;
+  if (!Array.isArray(body['rows']) || body['rows'].length === 0) {
+    return c.json({ success: false, error: 'rows array is required and must not be empty' }, 400);
+  }
+  if (body['rows'].length > 500) {
+    return c.json({ success: false, error: 'Maximum 500 rows per import' }, 400);
+  }
+
+  const jwtUser = c.get('user');
+  if (!jwtUser) return c.json({ success: false, error: 'Unauthorized' }, 401);
+  const db = c.env.DB;
+
+  const operatorRow = await db.prepare(
+    `SELECT id FROM operators WHERE id = ? AND deleted_at IS NULL`
+  ).bind(jwtUser.operatorId ?? '').first<{ id: string }>();
+  if (!operatorRow) return c.json({ success: false, error: 'Operator not found' }, 404);
+
+  const now = Date.now();
+  const results: Array<{ row: number; status: string; id?: string; error?: string }> = [];
+
+  type RouteRow = { origin?: unknown; destination?: unknown; distance_km?: unknown; duration_minutes?: unknown; base_fare_naira?: unknown };
+  let rowIdx = 0;
+  for (const row of body['rows'] as RouteRow[]) {
+    const i = rowIdx++;
+    if (!row.origin || !row.destination || typeof row.base_fare_naira !== 'number') {
+      results.push({ row: i, status: 'error', error: 'origin, destination, and base_fare_naira are required' });
+      continue;
+    }
+    const id = genId('rt');
+    try {
+      await db.prepare(
+        `INSERT INTO routes (id, operator_id, origin, destination, distance_km, duration_minutes, base_fare, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`
+      ).bind(
+        id, operatorRow.id, String(row.origin), String(row.destination),
+        Number(row.distance_km ?? 0), Number(row.duration_minutes ?? 0),
+        Math.round(Number(row.base_fare_naira) * 100),
+        now, now,
+      ).run();
+      results.push({ row: i, status: 'ok', id });
+    } catch (e: unknown) {
+      results.push({ row: i, status: 'error', error: e instanceof Error ? e.message : 'Insert failed' });
+    }
+  }
+
+  const succeeded = results.filter(r => r.status === 'ok').length;
+  const failed = results.filter(r => r.status === 'error').length;
+  return c.json({ success: true, data: { succeeded, failed, results } });
+});
+
+operatorManagementRouter.post('/import/vehicles', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), requireTierFeature('bulk_import'), async (c) => {
+  const body = await c.req.json() as Record<string, unknown>;
+  if (!Array.isArray(body['rows']) || body['rows'].length === 0) {
+    return c.json({ success: false, error: 'rows array is required and must not be empty' }, 400);
+  }
+  if (body['rows'].length > 500) {
+    return c.json({ success: false, error: 'Maximum 500 rows per import' }, 400);
+  }
+
+  const jwtUser = c.get('user');
+  if (!jwtUser) return c.json({ success: false, error: 'Unauthorized' }, 401);
+  const db = c.env.DB;
+
+  const operatorRow = await db.prepare(
+    `SELECT id FROM operators WHERE id = ? AND deleted_at IS NULL`
+  ).bind(jwtUser.operatorId ?? '').first<{ id: string }>();
+  if (!operatorRow) return c.json({ success: false, error: 'Operator not found' }, 404);
+
+  const now = Date.now();
+  const results: Array<{ row: number; status: string; id?: string; error?: string }> = [];
+
+  type VehicleRow = { plate_number?: unknown; vehicle_type?: unknown; model?: unknown; total_seats?: unknown };
+  let vIdx = 0;
+  for (const row of body['rows'] as VehicleRow[]) {
+    const i = vIdx++;
+    if (!row.plate_number || !row.vehicle_type) {
+      results.push({ row: i, status: 'error', error: 'plate_number and vehicle_type are required' });
+      continue;
+    }
+    const id = genId('veh');
+    try {
+      await db.prepare(
+        `INSERT INTO vehicles (id, operator_id, plate_number, vehicle_type, model, total_seats, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`
+      ).bind(
+        id, operatorRow.id,
+        String(row.plate_number).toUpperCase().trim(),
+        String(row.vehicle_type),
+        row.model ? String(row.model) : null,
+        Number(row.total_seats ?? 14),
+        now, now,
+      ).run();
+      results.push({ row: i, status: 'ok', id });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Insert failed';
+      results.push({ row: i, status: 'error', error: msg.includes('UNIQUE') ? `Plate ${String(row.plate_number)} already exists` : msg });
+    }
+  }
+
+  const succeeded = results.filter(r => r.status === 'ok').length;
+  const failed = results.filter(r => r.status === 'error').length;
+  return c.json({ success: true, data: { succeeded, failed, results } });
+});
+
+operatorManagementRouter.post('/import/drivers', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), requireTierFeature('bulk_import'), async (c) => {
+  const body = await c.req.json() as Record<string, unknown>;
+  if (!Array.isArray(body['rows']) || body['rows'].length === 0) {
+    return c.json({ success: false, error: 'rows array is required and must not be empty' }, 400);
+  }
+  if (body['rows'].length > 500) {
+    return c.json({ success: false, error: 'Maximum 500 rows per import' }, 400);
+  }
+
+  const jwtUser = c.get('user');
+  if (!jwtUser) return c.json({ success: false, error: 'Unauthorized' }, 401);
+  const db = c.env.DB;
+
+  const operatorRow = await db.prepare(
+    `SELECT id FROM operators WHERE id = ? AND deleted_at IS NULL`
+  ).bind(jwtUser.operatorId ?? '').first<{ id: string }>();
+  if (!operatorRow) return c.json({ success: false, error: 'Operator not found' }, 404);
+
+  const now = Date.now();
+  const results: Array<{ row: number; status: string; id?: string; error?: string }> = [];
+
+  type DriverRow = { name?: unknown; phone?: unknown; license_number?: unknown };
+  let dIdx = 0;
+  for (const row of body['rows'] as DriverRow[]) {
+    const i = dIdx++;
+    if (!row.name || !row.phone) {
+      results.push({ row: i, status: 'error', error: 'name and phone are required' });
+      continue;
+    }
+    const id = genId('drv');
+    try {
+      await db.prepare(
+        `INSERT INTO drivers (id, operator_id, name, phone, license_number, status, created_at, updated_at, deleted_at)
+         VALUES (?, ?, ?, ?, ?, 'active', ?, ?, NULL)`
+      ).bind(
+        id, operatorRow.id,
+        String(row.name).trim(),
+        String(row.phone).trim(),
+        row.license_number ? String(row.license_number).trim() : null,
+        now, now,
+      ).run();
+      results.push({ row: i, status: 'ok', id });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Insert failed';
+      results.push({ row: i, status: 'error', error: msg.includes('UNIQUE') ? `Phone ${String(row.phone)} already registered` : msg });
+    }
+  }
+
+  const succeeded = results.filter(r => r.status === 'ok').length;
+  const failed = results.filter(r => r.status === 'error').length;
+  return c.json({ success: true, data: { succeeded, failed, results } });
 });

@@ -254,6 +254,57 @@ function TripSearchModule() {
 }
 
 // ============================================================
+// P15-T6: useLiveSeatUpdates — WebSocket hook for real-time seat change notifications
+// Connects to /trips/:id/ws (DO proxy) and invokes onSeatChange on each update.
+// ============================================================
+type LiveSeatStatus = 'available' | 'reserved' | 'confirmed' | 'blocked';
+interface LiveSeatPayload { type: 'seat_changed'; seat: { id: string; status: LiveSeatStatus } }
+
+function useLiveSeatUpdates(tripId: string, onSeatChange: (seat: { id: string; status: LiveSeatStatus }) => void) {
+  const onSeatChangeRef = React.useRef(onSeatChange);
+  onSeatChangeRef.current = onSeatChange;
+
+  useEffect(() => {
+    if (!tripId) return;
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/api/trips/${tripId}/ws`;
+    let ws: WebSocket | null = null;
+    let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
+
+    const connect = () => {
+      if (cancelled) return;
+      try {
+        ws = new WebSocket(wsUrl);
+        ws.onmessage = (ev) => {
+          try {
+            const data = JSON.parse(ev.data as string) as LiveSeatPayload;
+            if (data.type === 'seat_changed' && data.seat) {
+              onSeatChangeRef.current(data.seat);
+            }
+          } catch { /* ignore malformed frames */ }
+        };
+        ws.onclose = () => {
+          if (!cancelled) {
+            reconnectTimeout = setTimeout(connect, 3000);
+          }
+        };
+        ws.onerror = () => { ws?.close(); };
+      } catch { /* WebSocket not available (non-browser env) */ }
+    };
+
+    connect();
+
+    return () => {
+      cancelled = true;
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      ws?.close();
+    };
+  }, [tripId]);
+}
+
+// ============================================================
 // Agent POS Module (TRN-2) — P07-enhanced with receipt, ID capture, float reconciliation, parks, session switcher
 // ============================================================
 const ID_TYPES = ['NIN', 'BVN', 'passport', 'drivers_license'] as const;
@@ -361,6 +412,21 @@ function AgentPOSModule({ online }: { online: boolean }) {
       .catch(() => setSeatAvailability(null))
       .finally(() => setSeatsLoading(false));
   }, [tripId]);
+
+  // P15-T6: Live seat updates via WebSocket (Durable Object fan-out)
+  useLiveSeatUpdates(tripId, useCallback((updatedSeat) => {
+    setSeatAvailability(prev => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        seats: prev.seats.map(s => s.id === updatedSeat.id ? { ...s, status: updatedSeat.status } : s),
+      };
+    });
+    // Deselect seat if it became unavailable remotely
+    if (updatedSeat.status !== 'available') {
+      setSelectedSeats(prev => prev.filter(id => id !== updatedSeat.id));
+    }
+  }, []));
 
   // Auto-fill amount from trip base_fare × seat count
   useEffect(() => {
@@ -3002,6 +3068,37 @@ function AppContent() {
     const id = setInterval(refresh, 30_000);
     return () => clearInterval(id);
   }, [isAuthenticated, hasRole]);
+
+  // P15-T6: White-label branding detection — fetch branding config for operator and apply CSS variables
+  useEffect(() => {
+    if (!isAuthenticated || !user?.operator_id) return;
+    const fetchBranding = async () => {
+      try {
+        const token = localStorage.getItem('waka_token') ?? sessionStorage.getItem('waka_token') ?? '';
+        const res = await fetch('/api/operator/branding', {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        if (!res.ok) return;
+        const data = await res.json() as { primary_color?: string; secondary_color?: string; brand_name?: string; logo_url?: string };
+        if (data.primary_color) {
+          document.documentElement.style.setProperty('--waka-primary', data.primary_color);
+        }
+        if (data.secondary_color) {
+          document.documentElement.style.setProperty('--waka-secondary', data.secondary_color);
+        }
+        if (data.brand_name && data.brand_name.trim()) {
+          document.title = data.brand_name;
+        }
+        if (data.logo_url) {
+          const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]') ?? document.createElement('link') as HTMLLinkElement;
+          link.rel = 'icon';
+          link.href = data.logo_url;
+          document.head.appendChild(link);
+        }
+      } catch { /* branding is a progressive enhancement — silently ignore fetch failures */ }
+    };
+    void fetchBranding();
+  }, [isAuthenticated, user?.operator_id]);
 
   // T013: Flush offline queue when coming back online
   useEffect(() => {
