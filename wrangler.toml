@@ -43,6 +43,25 @@ name = "webwaka-transport-api-prod"
 [env.production.triggers]
 crons = ["* * * * *", "0 0 * * *"]
 
+# ============================================================
+# P15-T2: Durable Objects — Real-Time Seat Updates (production)
+# ============================================================
+[[env.production.durable_objects.bindings]]
+name = "TRIP_SEAT_DO"
+class_name = "TripSeatDO"
+
+[[env.production.migrations]]
+tag = "v1"
+new_classes = ["TripSeatDO"]
+
+# ============================================================
+# P15-T4: R2 Bucket — Operator Branding Assets (production)
+# ============================================================
+[[env.production.r2_buckets]]
+binding = "ASSETS_R2"
+bucket_name = "webwaka-operator-assets"
+
+
 [[env.production.d1_databases]]
 binding = "DB"
 database_name = "webwaka-transport-db-prod"
