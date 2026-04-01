@@ -102,7 +102,7 @@ jobs:
         run: npx wrangler deploy --env production
 
       - name: Run post-deploy migrations (production)
-      continue-on-error: true
+        continue-on-error: true
         env:
           MIGRATION_SECRET: ${{ secrets.MIGRATION_SECRET }}
           WORKER_URL: ${{ secrets.WORKER_URL }}
