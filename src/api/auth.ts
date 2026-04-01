@@ -84,7 +84,7 @@ authRouter.post('/otp/request', async (c) => {
       // Non-fatal: OTP is stored in KV; dev_code returned if SMS is not configured
     }
   } else {
-    console.log(`[auth] OTP for ${phone}: ${code} (SMS not configured — dev mode)`);
+    console.warn(`[auth/otp] SMS not configured — dev_otp returned in response (DEVELOPMENT MODE ONLY)`);
   }
 
   return c.json({

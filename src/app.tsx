@@ -268,15 +268,43 @@ function useLiveSeatUpdates(tripId: string, onSeatChange: (seat: { id: string; s
     if (!tripId) return;
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/api/trips/${tripId}/ws`;
+    const wsUrl = `${protocol}//${window.location.host}/api/seat-inventory/trips/${tripId}/ws`;
     let ws: WebSocket | null = null;
     let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
     let cancelled = false;
+    let consecutiveFailures = 0;
+    const FALLBACK_AFTER_FAILURES = 5;
+    const POLL_INTERVAL_MS = 10_000;
+
+    // Fallback: poll seat availability every 10s when WebSocket is unavailable
+    const startPolling = () => {
+      if (pollInterval) return;
+      pollInterval = setInterval(() => {
+        if (cancelled) return;
+        api.getSeatAvailability(tripId).then(data => {
+          for (const seat of data.seats) {
+            onSeatChangeRef.current({ id: seat.id, status: seat.status });
+          }
+        }).catch(() => {});
+      }, POLL_INTERVAL_MS);
+    };
+
+    const stopPolling = () => {
+      if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+    };
 
     const connect = () => {
       if (cancelled) return;
       try {
+        if (!('WebSocket' in window)) { startPolling(); return; }
         ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+          consecutiveFailures = 0;
+          stopPolling(); // WebSocket recovered — stop polling
+        };
+
         ws.onmessage = (ev) => {
           try {
             const data = JSON.parse(ev.data as string) as LiveSeatPayload;
@@ -285,19 +313,31 @@ function useLiveSeatUpdates(tripId: string, onSeatChange: (seat: { id: string; s
             }
           } catch { /* ignore malformed frames */ }
         };
+
         ws.onclose = () => {
           if (!cancelled) {
-            reconnectTimeout = setTimeout(connect, 3000);
+            consecutiveFailures++;
+            if (consecutiveFailures >= FALLBACK_AFTER_FAILURES) {
+              // Switch to polling fallback after repeated WS failures
+              startPolling();
+            } else {
+              reconnectTimeout = setTimeout(connect, 3000);
+            }
           }
         };
+
         ws.onerror = () => { ws?.close(); };
-      } catch { /* WebSocket not available (non-browser env) */ }
+      } catch {
+        // WebSocket constructor unavailable — use polling
+        startPolling();
+      }
     };
 
     connect();
 
     return () => {
       cancelled = true;
+      stopPolling();
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
       ws?.close();
     };

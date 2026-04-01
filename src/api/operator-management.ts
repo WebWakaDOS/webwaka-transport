@@ -5,7 +5,7 @@
  */
 import { Hono } from 'hono';
 import { requireRole, requireTierFeature, publishEvent, nanoid } from '@webwaka/core';
-import type { AppContext, DbOperator, DbRoute, DbVehicle, DbTrip, DbDriver } from './types';
+import type { AppContext, HonoCtx, DbOperator, DbRoute, DbVehicle, DbTrip, DbDriver } from './types';
 import { genId, parsePagination, metaResponse, requireFields, applyTenantScope } from './types';
 import { getOperatorConfig, validateOperatorConfig } from '../lib/operator-config.js';
 import { sendSms } from '../lib/sms.js';
@@ -2796,12 +2796,23 @@ operatorManagementRouter.post('/config/logo', requireRole(['SUPER_ADMIN', 'TENAN
 
   if (!c.env.ASSETS_R2) return c.json({ success: false, error: 'Asset storage unavailable' }, 503);
 
-  const allowedTypes = ['image/png', 'image/jpeg', 'image/svg+xml', 'image/webp'];
+  // Only PNG and JPEG are allowed for logos (SVG/WebP excluded for XSS/compat safety)
+  const allowedTypes = ['image/png', 'image/jpeg'];
   if (!allowedTypes.includes(file.type)) {
-    return c.json({ success: false, error: `Unsupported image type: ${file.type}. Allowed: png, jpeg, svg, webp` }, 400);
+    return c.json({ success: false, error: `Unsupported media type: ${file.type}. Only image/png and image/jpeg are accepted.` }, 415);
   }
 
-  const ext = file.type === 'image/svg+xml' ? 'svg' : file.type.split('/')[1];
+  // File size limit: 2MB
+  const MAX_LOGO_BYTES = 2 * 1024 * 1024;
+  if (file.size > MAX_LOGO_BYTES) {
+    return c.json({ success: false, error: `Logo file too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Maximum is 2MB.` }, 413);
+  }
+
+  if (file.size === 0) {
+    return c.json({ success: false, error: 'Logo file is empty' }, 400);
+  }
+
+  const ext = file.type === 'image/png' ? 'png' : 'jpg';
   const key = `logos/${operatorId}/logo.${ext}`;
   const bytes = await file.arrayBuffer();
 
@@ -2821,18 +2832,82 @@ operatorManagementRouter.post('/config/logo', requireRole(['SUPER_ADMIN', 'TENAN
 
 // ============================================================
 // P15-T5: Bulk CSV Import (bulk_import tier)
-// POST /import/routes   — { rows: Array<{ origin, destination, distance_km, duration_minutes, base_fare_naira }> }
-// POST /import/vehicles — { rows: Array<{ plate_number, vehicle_type, model, total_seats }> }
-// POST /import/drivers  — { rows: Array<{ name, phone, license_number }> }
+// POST /import/routes   — multipart/form-data, field 'file', CSV: origin,destination,base_fare_naira,duration_minutes[,distance_km]
+// POST /import/vehicles — multipart/form-data, field 'file', CSV: plate_number,vehicle_type[,model,total_seats]
+// POST /import/drivers  — multipart/form-data, field 'file', CSV: name,phone[,license_number]
+//
+// Response: { created: string[], skipped: number, errors: Array<{ row, column?, reason }> }
+// Max 500 data rows per import; rows 501+ are ignored with a note.
 // ============================================================
 
-operatorManagementRouter.post('/import/routes', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), requireTierFeature('bulk_import'), async (c) => {
-  const body = await c.req.json() as Record<string, unknown>;
-  if (!Array.isArray(body['rows']) || body['rows'].length === 0) {
-    return c.json({ success: false, error: 'rows array is required and must not be empty' }, 400);
+/** Parse a CSV text string into array of row objects keyed by header column name. */
+function parseCsvFile(text: string): { headers: string[]; rows: Record<string, string>[] } {
+  const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').filter(l => l.trim() !== '');
+  if (lines.length === 0) return { headers: [], rows: [] };
+
+  const splitLine = (line: string): string[] => {
+    const result: string[] = [];
+    let cur = '';
+    let inQuote = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (inQuote && line[i + 1] === '"') { cur += '"'; i++; }
+        else { inQuote = !inQuote; }
+      } else if (ch === ',' && !inQuote) {
+        result.push(cur.trim());
+        cur = '';
+      } else {
+        cur += ch;
+      }
+    }
+    result.push(cur.trim());
+    return result;
+  };
+
+  const headers = splitLine(lines[0] ?? '').map(h => h.toLowerCase().replace(/\s+/g, '_'));
+  const rows: Record<string, string>[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = splitLine(lines[i] ?? '');
+    const row: Record<string, string> = {};
+    headers.forEach((h, idx) => { row[h] = cols[idx] ?? ''; });
+    rows.push(row);
   }
-  if (body['rows'].length > 500) {
-    return c.json({ success: false, error: 'Maximum 500 rows per import' }, 400);
+  return { headers, rows };
+}
+
+/** Shared helper: read and parse a CSV file from multipart form data. */
+async function readCsvFromFormData(c: HonoCtx): Promise<{ error: string; status: number } | { headers: string[]; rows: Record<string, string>[]; truncated: number }> {
+  const formData = await c.req.formData().catch(() => null);
+  if (!formData) return { error: 'Expected multipart/form-data with a "file" field', status: 400 };
+
+  const file = formData.get('file');
+  if (!file || !(file instanceof File)) return { error: 'file field is required', status: 400 };
+  if (file.size === 0) return { error: 'Uploaded CSV file is empty', status: 400 };
+
+  const MAX_CSV_BYTES = 5 * 1024 * 1024; // 5MB
+  if (file.size > MAX_CSV_BYTES) return { error: 'CSV file too large (max 5MB)', status: 413 };
+
+  const text = await file.text();
+  const { headers, rows } = parseCsvFile(text);
+  if (rows.length === 0) return { error: 'CSV file contains no data rows', status: 400 };
+
+  const MAX_ROWS = 500;
+  const truncated = Math.max(0, rows.length - MAX_ROWS);
+  return { headers, rows: rows.slice(0, MAX_ROWS), truncated };
+}
+
+operatorManagementRouter.post('/import/routes', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), requireTierFeature('bulk_import'), async (c) => {
+  const csvResult = await readCsvFromFormData(c);
+  if ('error' in csvResult) return c.json({ success: false, error: csvResult.error }, csvResult.status as 400 | 413);
+
+  const { headers, rows, truncated } = csvResult;
+
+  // Validate required columns exist in header
+  const REQUIRED_COLS = ['origin', 'destination', 'base_fare_naira'];
+  const missingCols = REQUIRED_COLS.filter(col => !headers.includes(col));
+  if (missingCols.length > 0) {
+    return c.json({ success: false, error: `CSV missing required columns: ${missingCols.join(', ')}. Expected header: origin,destination,base_fare_naira,duration_minutes[,distance_km]` }, 400);
   }
 
   const jwtUser = c.get('user');
@@ -2845,45 +2920,47 @@ operatorManagementRouter.post('/import/routes', requireRole(['SUPER_ADMIN', 'TEN
   if (!operatorRow) return c.json({ success: false, error: 'Operator not found' }, 404);
 
   const now = Date.now();
-  const results: Array<{ row: number; status: string; id?: string; error?: string }> = [];
+  const created: string[] = [];
+  const errors: Array<{ row: number; column?: string; reason: string }> = [];
 
-  type RouteRow = { origin?: unknown; destination?: unknown; distance_km?: unknown; duration_minutes?: unknown; base_fare_naira?: unknown };
-  let rowIdx = 0;
-  for (const row of body['rows'] as RouteRow[]) {
-    const i = rowIdx++;
-    if (!row.origin || !row.destination || typeof row.base_fare_naira !== 'number') {
-      results.push({ row: i, status: 'error', error: 'origin, destination, and base_fare_naira are required' });
-      continue;
-    }
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]!;
+    const origin = row['origin']?.trim();
+    const destination = row['destination']?.trim();
+    const base_fare_naira = parseFloat(row['base_fare_naira'] ?? '');
+    const duration_minutes = parseInt(row['duration_minutes'] ?? '0', 10);
+    const distance_km = parseFloat(row['distance_km'] ?? '0');
+
+    if (!origin) { errors.push({ row: i + 2, column: 'origin', reason: 'origin is required' }); continue; }
+    if (!destination) { errors.push({ row: i + 2, column: 'destination', reason: 'destination is required' }); continue; }
+    if (isNaN(base_fare_naira) || base_fare_naira <= 0) { errors.push({ row: i + 2, column: 'base_fare_naira', reason: 'base_fare_naira must be a positive number' }); continue; }
+    if (row['duration_minutes'] && (isNaN(duration_minutes) || duration_minutes <= 0)) { errors.push({ row: i + 2, column: 'duration_minutes', reason: 'duration_minutes must be a positive integer' }); continue; }
+
     const id = genId('rt');
     try {
       await db.prepare(
         `INSERT INTO routes (id, operator_id, origin, destination, distance_km, duration_minutes, base_fare, status, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`
-      ).bind(
-        id, operatorRow.id, String(row.origin), String(row.destination),
-        Number(row.distance_km ?? 0), Number(row.duration_minutes ?? 0),
-        Math.round(Number(row.base_fare_naira) * 100),
-        now, now,
-      ).run();
-      results.push({ row: i, status: 'ok', id });
+      ).bind(id, operatorRow.id, origin, destination, isNaN(distance_km) ? 0 : distance_km, duration_minutes, Math.round(base_fare_naira * 100), now, now).run();
+      created.push(id);
     } catch (e: unknown) {
-      results.push({ row: i, status: 'error', error: e instanceof Error ? e.message : 'Insert failed' });
+      errors.push({ row: i + 2, reason: e instanceof Error ? e.message : 'Insert failed' });
     }
   }
 
-  const succeeded = results.filter(r => r.status === 'ok').length;
-  const failed = results.filter(r => r.status === 'error').length;
-  return c.json({ success: true, data: { succeeded, failed, results } });
+  return c.json({ success: true, data: { created, skipped: truncated, errors, ...(truncated > 0 ? { note: `${truncated} rows beyond the 500-row limit were ignored` } : {}) } });
 });
 
 operatorManagementRouter.post('/import/vehicles', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), requireTierFeature('bulk_import'), async (c) => {
-  const body = await c.req.json() as Record<string, unknown>;
-  if (!Array.isArray(body['rows']) || body['rows'].length === 0) {
-    return c.json({ success: false, error: 'rows array is required and must not be empty' }, 400);
-  }
-  if (body['rows'].length > 500) {
-    return c.json({ success: false, error: 'Maximum 500 rows per import' }, 400);
+  const csvResult = await readCsvFromFormData(c);
+  if ('error' in csvResult) return c.json({ success: false, error: csvResult.error }, csvResult.status as 400 | 413);
+
+  const { headers, rows, truncated } = csvResult;
+
+  const REQUIRED_COLS = ['plate_number', 'vehicle_type'];
+  const missingCols = REQUIRED_COLS.filter(col => !headers.includes(col));
+  if (missingCols.length > 0) {
+    return c.json({ success: false, error: `CSV missing required columns: ${missingCols.join(', ')}. Expected header: plate_number,vehicle_type[,model,total_seats]` }, 400);
   }
 
   const jwtUser = c.get('user');
@@ -2896,48 +2973,45 @@ operatorManagementRouter.post('/import/vehicles', requireRole(['SUPER_ADMIN', 'T
   if (!operatorRow) return c.json({ success: false, error: 'Operator not found' }, 404);
 
   const now = Date.now();
-  const results: Array<{ row: number; status: string; id?: string; error?: string }> = [];
+  const created: string[] = [];
+  const errors: Array<{ row: number; column?: string; reason: string }> = [];
 
-  type VehicleRow = { plate_number?: unknown; vehicle_type?: unknown; model?: unknown; total_seats?: unknown };
-  let vIdx = 0;
-  for (const row of body['rows'] as VehicleRow[]) {
-    const i = vIdx++;
-    if (!row.plate_number || !row.vehicle_type) {
-      results.push({ row: i, status: 'error', error: 'plate_number and vehicle_type are required' });
-      continue;
-    }
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]!;
+    const plate_number = row['plate_number']?.trim().toUpperCase();
+    const vehicle_type = row['vehicle_type']?.trim();
+    const model = row['model']?.trim() || null;
+    const total_seats = parseInt(row['total_seats'] ?? '14', 10);
+
+    if (!plate_number) { errors.push({ row: i + 2, column: 'plate_number', reason: 'plate_number is required' }); continue; }
+    if (!vehicle_type) { errors.push({ row: i + 2, column: 'vehicle_type', reason: 'vehicle_type is required' }); continue; }
+
     const id = genId('veh');
     try {
       await db.prepare(
         `INSERT INTO vehicles (id, operator_id, plate_number, vehicle_type, model, total_seats, status, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`
-      ).bind(
-        id, operatorRow.id,
-        String(row.plate_number).toUpperCase().trim(),
-        String(row.vehicle_type),
-        row.model ? String(row.model) : null,
-        Number(row.total_seats ?? 14),
-        now, now,
-      ).run();
-      results.push({ row: i, status: 'ok', id });
+      ).bind(id, operatorRow.id, plate_number, vehicle_type, model, isNaN(total_seats) ? 14 : total_seats, now, now).run();
+      created.push(id);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Insert failed';
-      results.push({ row: i, status: 'error', error: msg.includes('UNIQUE') ? `Plate ${String(row.plate_number)} already exists` : msg });
+      errors.push({ row: i + 2, reason: msg.includes('UNIQUE') ? `Plate ${plate_number} already exists` : msg });
     }
   }
 
-  const succeeded = results.filter(r => r.status === 'ok').length;
-  const failed = results.filter(r => r.status === 'error').length;
-  return c.json({ success: true, data: { succeeded, failed, results } });
+  return c.json({ success: true, data: { created, skipped: truncated, errors, ...(truncated > 0 ? { note: `${truncated} rows beyond the 500-row limit were ignored` } : {}) } });
 });
 
 operatorManagementRouter.post('/import/drivers', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), requireTierFeature('bulk_import'), async (c) => {
-  const body = await c.req.json() as Record<string, unknown>;
-  if (!Array.isArray(body['rows']) || body['rows'].length === 0) {
-    return c.json({ success: false, error: 'rows array is required and must not be empty' }, 400);
-  }
-  if (body['rows'].length > 500) {
-    return c.json({ success: false, error: 'Maximum 500 rows per import' }, 400);
+  const csvResult = await readCsvFromFormData(c);
+  if ('error' in csvResult) return c.json({ success: false, error: csvResult.error }, csvResult.status as 400 | 413);
+
+  const { headers, rows, truncated } = csvResult;
+
+  const REQUIRED_COLS = ['name', 'phone'];
+  const missingCols = REQUIRED_COLS.filter(col => !headers.includes(col));
+  if (missingCols.length > 0) {
+    return c.json({ success: false, error: `CSV missing required columns: ${missingCols.join(', ')}. Expected header: name,phone[,license_number]` }, 400);
   }
 
   const jwtUser = c.get('user');
@@ -2950,36 +3024,30 @@ operatorManagementRouter.post('/import/drivers', requireRole(['SUPER_ADMIN', 'TE
   if (!operatorRow) return c.json({ success: false, error: 'Operator not found' }, 404);
 
   const now = Date.now();
-  const results: Array<{ row: number; status: string; id?: string; error?: string }> = [];
+  const created: string[] = [];
+  const errors: Array<{ row: number; column?: string; reason: string }> = [];
 
-  type DriverRow = { name?: unknown; phone?: unknown; license_number?: unknown };
-  let dIdx = 0;
-  for (const row of body['rows'] as DriverRow[]) {
-    const i = dIdx++;
-    if (!row.name || !row.phone) {
-      results.push({ row: i, status: 'error', error: 'name and phone are required' });
-      continue;
-    }
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]!;
+    const name = row['name']?.trim();
+    const phone = row['phone']?.trim();
+    const license_number = row['license_number']?.trim() || null;
+
+    if (!name) { errors.push({ row: i + 2, column: 'name', reason: 'name is required' }); continue; }
+    if (!phone) { errors.push({ row: i + 2, column: 'phone', reason: 'phone is required' }); continue; }
+
     const id = genId('drv');
     try {
       await db.prepare(
         `INSERT INTO drivers (id, operator_id, name, phone, license_number, status, created_at, updated_at, deleted_at)
          VALUES (?, ?, ?, ?, ?, 'active', ?, ?, NULL)`
-      ).bind(
-        id, operatorRow.id,
-        String(row.name).trim(),
-        String(row.phone).trim(),
-        row.license_number ? String(row.license_number).trim() : null,
-        now, now,
-      ).run();
-      results.push({ row: i, status: 'ok', id });
+      ).bind(id, operatorRow.id, name, phone, license_number, now, now).run();
+      created.push(id);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Insert failed';
-      results.push({ row: i, status: 'error', error: msg.includes('UNIQUE') ? `Phone ${String(row.phone)} already registered` : msg });
+      errors.push({ row: i + 2, reason: msg.includes('UNIQUE') ? `Phone ${phone} already registered` : msg });
     }
   }
 
-  const succeeded = results.filter(r => r.status === 'ok').length;
-  const failed = results.filter(r => r.status === 'error').length;
-  return c.json({ success: true, data: { succeeded, failed, results } });
+  return c.json({ success: true, data: { created, skipped: truncated, errors, ...(truncated > 0 ? { note: `${truncated} rows beyond the 500-row limit were ignored` } : {}) } });
 });

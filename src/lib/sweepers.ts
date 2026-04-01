@@ -43,7 +43,7 @@ export async function sweepAbandonedBookings(env: Env): Promise<void> {
 
     if (!abandoned.results || abandoned.results.length === 0) return;
 
-    console.log(`[AbandonedSweeper] Cancelling ${abandoned.results.length} abandoned bookings`);
+    console.warn(`[AbandonedSweeper] Cancelling ${abandoned.results.length} abandoned bookings`);
 
     for (const booking of abandoned.results) {
       try {
@@ -79,7 +79,7 @@ export async function sweepAbandonedBookings(env: Env): Promise<void> {
           now
         ).run();
 
-        console.log(`[AbandonedSweeper] Cancelled booking ${booking.id}`);
+        console.warn(`[AbandonedSweeper] Cancelled booking ${booking.id}`);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`[AbandonedSweeper] Failed to cancel booking ${booking.id}: ${msg}`);
@@ -114,7 +114,7 @@ export async function sweepExpiredReservations(env: Env): Promise<void> {
 
     if (!expired.results || expired.results.length === 0) return;
 
-    console.log(`[SeatSweeper] Releasing ${expired.results.length} expired reservations`);
+    console.warn(`[SeatSweeper] Releasing ${expired.results.length} expired reservations`);
 
     await db
       .prepare(
@@ -150,7 +150,7 @@ export async function sweepExpiredReservations(env: Env): Promise<void> {
         .run();
     }
 
-    console.log(`[SeatSweeper] Released ${expired.results.length} seats`);
+    console.warn(`[SeatSweeper] Released ${expired.results.length} seats`);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[SeatSweeper] Error: ${msg}`);
@@ -178,7 +178,7 @@ export async function drainEventBus(env: Env): Promise<void> {
 
     if (!pending.results || pending.results.length === 0) return;
 
-    console.log(`[EventBus] Draining ${pending.results.length} pending events`);
+    console.warn(`[EventBus] Draining ${pending.results.length} pending events`);
 
     for (const evt of pending.results as Record<string, unknown>[]) {
       try {
@@ -191,7 +191,7 @@ export async function drainEventBus(env: Env): Promise<void> {
           .bind(now, evt['id'])
           .run();
 
-        console.log(`[EventBus] Processed: ${evt['event_type']} id=${evt['id']}`);
+        console.warn(`[EventBus] Processed: ${evt['event_type']} id=${evt['id']}`);
       } catch (err: unknown) {
         const errMsg = err instanceof Error ? err.message : 'Unknown error';
         const retryCount = ((evt['retry_count'] as number) ?? 0) + 1;
@@ -258,7 +258,7 @@ async function deliverEvent(evt: Record<string, unknown>, env: Env): Promise<voi
 
   // booking:ABANDONED → log (future: SMS to customer)
   if (eventType === 'booking:ABANDONED') {
-    console.log(`[EventBus] booking:ABANDONED — SMS notification not yet wired`);
+    console.warn(`[EventBus] booking:ABANDONED — SMS notification not yet wired`);
     return;
   }
 
@@ -351,7 +351,7 @@ async function deliverEvent(evt: Record<string, unknown>, env: Env): Promise<voi
           // SMS failed — non-fatal, review_prompt_sent_at stays NULL so it retries next drain
         }
       }
-      console.log(`[EventBus] trip.state_changed→completed review prompts sent=${sent}, trip=${tripId}`);
+      console.warn(`[EventBus] trip.state_changed→completed review prompts sent=${sent}, trip=${tripId}`);
     } catch (err) {
       console.error('[EventBus] trip.state_changed handler error (non-fatal):', err instanceof Error ? err.message : err);
     }
@@ -398,7 +398,7 @@ async function deliverEvent(evt: Record<string, unknown>, env: Env): Promise<voi
           failed++;
         }
       }
-      console.log(`[EventBus] trip:DELAYED SMS — sent=${sent}, failed=${failed}, trip=${tripId}`);
+      console.warn(`[EventBus] trip:DELAYED SMS — sent=${sent}, failed=${failed}, trip=${tripId}`);
     } catch (err) {
       console.error('[EventBus] trip:DELAYED handler error (non-fatal):', err instanceof Error ? err.message : err);
     }
@@ -447,7 +447,7 @@ export async function sweepExpiredPII(env: Env): Promise<void> {
 
     if (!stale.results || stale.results.length === 0) return;
 
-    console.log(`[NDPR/PII] Anonymizing ${stale.results.length} expired customer records`);
+    console.warn(`[NDPR/PII] Anonymizing ${stale.results.length} expired customer records`);
 
     for (const row of stale.results) {
       try {
@@ -468,7 +468,7 @@ export async function sweepExpiredPII(env: Env): Promise<void> {
           now
         ).run();
 
-        console.log(`[NDPR/PII] Anonymized customer ${row.id}`);
+        console.warn(`[NDPR/PII] Anonymized customer ${row.id}`);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`[NDPR/PII] Failed to anonymize ${row.id}: ${msg}`);
@@ -504,7 +504,7 @@ export async function purgeExpiredFinancialData(env: Env): Promise<void> {
     const txAffected = (txResult.meta as { changes?: number })?.changes ?? 0;
 
     if (bookingsAffected > 0 || txAffected > 0) {
-      console.log(`[NDPR/Financial] Purged ${bookingsAffected} bookings, ${txAffected} transactions (7yr TTL)`);
+      console.warn(`[NDPR/Financial] Purged ${bookingsAffected} bookings, ${txAffected} transactions (7yr TTL)`);
 
       const evtId = `evt_fin_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       await db.prepare(
@@ -543,7 +543,7 @@ export async function sweepExpiredWaitlistNotifications(env: Env): Promise<void>
 
     if (!expired.results || expired.results.length === 0) return;
 
-    console.log(`[WaitlistSweeper] Expiring ${expired.results.length} stale waitlist notifications`);
+    console.warn(`[WaitlistSweeper] Expiring ${expired.results.length} stale waitlist notifications`);
 
     for (const wl of expired.results) {
       try {
@@ -584,7 +584,7 @@ export async function sweepExpiredWaitlistNotifications(env: Env): Promise<void>
           }
         }
 
-        console.log(`[WaitlistSweeper] Expired waitlist entry ${wl.id}`);
+        console.warn(`[WaitlistSweeper] Expired waitlist entry ${wl.id}`);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`[WaitlistSweeper] Failed for entry ${wl.id}: ${msg}`);
@@ -632,7 +632,7 @@ export async function sweepVehicleMaintenanceDue(env: Env): Promise<void> {
         ).run();
       } catch { /* skip individual failures */ }
     }
-    console.log(`[VehicleMaintenanceSweeper] Checked ${records.results.length} vehicles`);
+    console.warn(`[VehicleMaintenanceSweeper] Checked ${records.results.length} vehicles`);
   } catch (err: unknown) {
     console.error(`[VehicleMaintenanceSweeper] Error: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -671,7 +671,7 @@ export async function sweepVehicleDocumentExpiry(env: Env): Promise<void> {
         ).run();
       } catch { /* skip individual failures */ }
     }
-    console.log(`[VehicleDocSweeper] Checked ${docs.results.length} documents`);
+    console.warn(`[VehicleDocSweeper] Checked ${docs.results.length} documents`);
   } catch (err: unknown) {
     console.error(`[VehicleDocSweeper] Error: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -710,7 +710,7 @@ export async function sweepDriverDocumentExpiry(env: Env): Promise<void> {
         ).run();
       } catch { /* skip individual failures */ }
     }
-    console.log(`[DriverDocSweeper] Checked ${docs.results.length} documents`);
+    console.warn(`[DriverDocSweeper] Checked ${docs.results.length} documents`);
   } catch (err: unknown) {
     console.error(`[DriverDocSweeper] Error: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -800,7 +800,7 @@ export async function sweepBookingReminders(env: Env): Promise<void> {
 
     const total = due24h.results.length + due2h.results.length;
     if (total > 0) {
-      console.log(`[BookingReminders] ${due24h.results.length} 24h + ${due2h.results.length} 2h reminders sent`);
+      console.warn(`[BookingReminders] ${due24h.results.length} 24h + ${due2h.results.length} 2h reminders sent`);
     }
   } catch (err: unknown) {
     console.error(`[BookingReminders] Error: ${err instanceof Error ? err.message : String(err)}`);

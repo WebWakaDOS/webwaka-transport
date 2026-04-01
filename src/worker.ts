@@ -258,7 +258,7 @@ app.post('/webhooks/paystack', async (c) => {
           ).bind(now, now, seatId).run();
         }
 
-        console.log(`[webhook/paystack] charge.success — confirmed booking ${booking.id}`);
+        console.warn(`[webhook/paystack] charge.success — confirmed booking ${booking.id}`);
       }
     }
   }
@@ -318,7 +318,7 @@ app.post('/webhooks/flutterwave', async (c) => {
           ).bind(now, now, seatId).run();
         }
 
-        console.log(`[webhook/flutterwave] charge.completed — confirmed booking ${booking.id}`);
+        console.warn(`[webhook/flutterwave] charge.completed — confirmed booking ${booking.id}`);
       }
     }
   }

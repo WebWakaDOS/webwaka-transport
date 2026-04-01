@@ -363,7 +363,8 @@ bookingPortalRouter.post('/bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN'
       ).bind(customer_id).first<{ customer_type: string; credit_limit_kobo: number }>();
 
       if (!corpCustomer || corpCustomer.customer_type !== 'corporate') {
-        return c.json({ success: false, error: 'Credit payment is only available for corporate accounts' }, 403);
+        // 422 Unprocessable Entity: request is well-formed but customer is not eligible for credit
+        return c.json({ success: false, error: 'Credit payment is only available for corporate accounts' }, 422);
       }
 
       const new_credit_balance = corpCustomer.credit_limit_kobo - total_amount;
@@ -376,17 +377,23 @@ bookingPortalRouter.post('/bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN'
         }, 402);
       }
 
-      await db.prepare(
-        `UPDATE customers SET credit_limit_kobo = ? WHERE id = ?`
-      ).bind(new_credit_balance, customer_id).run();
-
+      // Atomic D1 batch: decrement credit and insert booking in a single roundtrip
       initialPaymentStatus = 'completed';
+      await db.batch([
+        db.prepare(
+          `UPDATE customers SET credit_limit_kobo = ? WHERE id = ?`
+        ).bind(new_credit_balance, customer_id),
+        db.prepare(
+          `INSERT INTO bookings (id, customer_id, trip_id, seat_ids, passenger_names, total_amount, status, payment_status, payment_method, payment_reference, is_guest, origin_stop_id, destination_stop_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(id, customer_id, trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, initialPaymentStatus, payment_method, payment_reference, isGuest ? 1 : 0, validatedOriginStopId, validatedDestStopId, now),
+      ]);
+    } else {
+      await db.prepare(
+        `INSERT INTO bookings (id, customer_id, trip_id, seat_ids, passenger_names, total_amount, status, payment_status, payment_method, payment_reference, is_guest, origin_stop_id, destination_stop_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(id, customer_id, trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, initialPaymentStatus, payment_method, payment_reference, isGuest ? 1 : 0, validatedOriginStopId, validatedDestStopId, now).run();
     }
-
-    await db.prepare(
-      `INSERT INTO bookings (id, customer_id, trip_id, seat_ids, passenger_names, total_amount, status, payment_status, payment_method, payment_reference, is_guest, origin_stop_id, destination_stop_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(id, customer_id, trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, initialPaymentStatus, payment_method, payment_reference, isGuest ? 1 : 0, validatedOriginStopId, validatedDestStopId, now).run();
 
     return c.json({
       success: true,

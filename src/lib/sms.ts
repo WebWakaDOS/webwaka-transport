@@ -102,7 +102,7 @@ class AfricasTalkingProvider implements SmsProvider {
 
 class DevSmsProvider implements SmsProvider {
   async send(phone: string, message: string): Promise<void> {
-    console.log(`[SMS/dev] To: ${phone} | Message: ${message}`);
+    console.warn(`[SMS/dev] Message queued (DEVELOPMENT MODE — no SMS provider configured). Length=${message.length}`);
   }
 }
 
