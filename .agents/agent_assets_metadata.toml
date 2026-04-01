@@ -24,3 +24,9 @@ id = "qzCwXVExS6_TeZ5XUgn0P"
 uri = "file://webwaka-qa-prompts.md"
 type = "text"
 title = "WebWaka — QA & Verification Prompts (15 Phases)"
+
+[[outputs]]
+id = "ZwmEUTANFoWeuaBaiITQ4"
+uri = "file://docs/webwaka-transport-enhancement-research.md"
+type = "text"
+title = "WebWaka Transport — Deep Research & Enhancement Roadmap (v2.0, April 2026)"
