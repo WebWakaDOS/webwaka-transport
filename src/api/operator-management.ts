@@ -854,9 +854,10 @@ operatorManagementRouter.post('/trips/:id/transition', requireRole(['SUPER_ADMIN
 });
 
 // ============================================================
-// P05-T1: POST /trips/:id/location — GPS location update (DRIVER+)
+// P05-T1: POST|PATCH /trips/:id/location — GPS location update (DRIVER+)
 // Body: { latitude, longitude, accuracy_meters? }
 // 204 No Content on success
+// PATCH is the REST-idiomatic method; POST retained for backwards compatibility
 // ============================================================
 operatorManagementRouter.post('/trips/:id/location', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'DRIVER']), async (c) => {
   const id = c.req.param('id');
@@ -915,6 +916,53 @@ operatorManagementRouter.post('/trips/:id/location', requireRole(['SUPER_ADMIN',
       });
     } catch { /* non-fatal */ }
 
+    return new Response(null, { status: 204 });
+  } catch {
+    return c.json({ success: false, error: 'Failed to update trip location' }, 500);
+  }
+});
+// PATCH alias for REST-idiomatic clients (TRN-4)
+operatorManagementRouter.patch('/trips/:id/location', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'DRIVER']), async (c) => {
+  const id = c.req.param('id');
+  const body = await c.req.json() as Record<string, unknown>;
+  const { latitude, longitude, accuracy_meters } = body as { latitude?: unknown; longitude?: unknown; accuracy_meters?: unknown };
+  if (typeof latitude !== 'number' || typeof longitude !== 'number') {
+    return c.json({ success: false, error: 'latitude and longitude are required numbers' }, 400);
+  }
+  if (latitude < -90 || latitude > 90) {
+    return c.json({ success: false, error: 'latitude must be between -90 and 90' }, 400);
+  }
+  if (longitude < -180 || longitude > 180) {
+    return c.json({ success: false, error: 'longitude must be between -180 and 180' }, 400);
+  }
+  const db = c.env.DB;
+  const now = Date.now();
+  const user = c.get('user');
+  try {
+    const trip = await db.prepare(
+      `SELECT id, state, operator_id FROM trips WHERE id = ? AND deleted_at IS NULL`
+    ).bind(id).first<{ id: string; state: string; operator_id: string }>();
+    if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
+    if (trip.state === 'completed' || trip.state === 'cancelled') {
+      return c.json({ success: false, error: 'trip_not_active', message: `Trip is ${trip.state} — location updates not accepted` }, 422);
+    }
+    const operatorId = user?.operatorId;
+    if (user?.role !== 'SUPER_ADMIN' && operatorId && trip.operator_id !== operatorId) {
+      return c.json({ success: false, error: 'Forbidden — trip belongs to a different operator' }, 403);
+    }
+    await db.prepare(
+      `UPDATE trips SET current_latitude = ?, current_longitude = ?, location_updated_at = ?, updated_at = ? WHERE id = ?`
+    ).bind(latitude, longitude, now, now, id).run();
+    try {
+      await publishEvent(db, {
+        event_type: 'trip.location_updated',
+        aggregate_id: id,
+        aggregate_type: 'trip',
+        payload: { trip_id: id, lat: latitude, lng: longitude, accuracy_meters: typeof accuracy_meters === 'number' ? accuracy_meters : null, updated_at: now, updated_by: user?.id },
+        tenant_id: trip.operator_id,
+        timestamp: now,
+      });
+    } catch { /* non-fatal */ }
     return new Response(null, { status: 204 });
   } catch {
     return c.json({ success: false, error: 'Failed to update trip location' }, 500);

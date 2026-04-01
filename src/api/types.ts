@@ -28,6 +28,8 @@ export interface Env {
   SENDGRID_API_KEY?: string;
   TRIP_SEAT_DO?: DurableObjectNamespace;
   ASSETS_R2?: R2Bucket;
+  CENTRAL_MGMT_URL?: string;
+  INTER_SERVICE_SECRET?: string;
 }
 
 export type HonoVariables = {

@@ -466,14 +466,14 @@ bookingPortalRouter.patch('/bookings/:id/confirm', requireRole(['SUPER_ADMIN', '
 
   try {
     const booking = await db.prepare(
-      `SELECT b.*, r.origin, r.destination, t.departure_time, c.phone as customer_phone, c.name as customer_name
+      `SELECT b.*, r.origin, r.destination, t.departure_time, t.operator_id as trip_operator_id, c.phone as customer_phone, c.name as customer_name
        FROM bookings b
        JOIN trips t ON t.id = b.trip_id
        JOIN routes r ON r.id = t.route_id
        JOIN customers c ON c.id = b.customer_id
        WHERE b.id = ?`
     ).bind(id).first<DbBooking & {
-      origin: string; destination: string; departure_time: number;
+      origin: string; destination: string; departure_time: number; trip_operator_id: string;
       customer_phone: string | null; customer_name: string | null;
     }>();
 
@@ -530,7 +530,7 @@ bookingPortalRouter.patch('/bookings/:id/confirm', requireRole(['SUPER_ADMIN', '
     await notifyBookingConfirmed(
       c.env,
       id,
-      booking.tenant_id ?? '',
+      booking.trip_operator_id ?? '',
       booking.total_amount ?? 0,
       payment_reference ?? booking.payment_reference ?? '',
     ).catch((err) => console.error('[transport] central-mgmt notify failed:', err));
@@ -619,7 +619,7 @@ bookingPortalRouter.patch('/bookings/:id/cancel', requireRole(['SUPER_ADMIN', 'T
       await notifyBookingRefunded(
         c.env,
         id,
-        booking.tenant_id ?? '',
+        booking.operator_id ?? '',
         refund_amount_kobo ?? 0,
         refund_reference,
       ).catch((err) => console.error('[transport] central-mgmt refund notify failed:', err));
