@@ -1047,7 +1047,7 @@ bookingPortalRouter.post('/reviews', requireRole(['CUSTOMER', 'STAFF', 'TENANT_A
 
   const ratingNum = Number(rating);
   if (!Number.isInteger(ratingNum) || ratingNum < 1 || ratingNum > 5) {
-    return c.json({ success: false, error: 'Rating must be an integer between 1 and 5' }, 422);
+    return c.json({ success: false, error: 'Rating must be an integer between 1 and 5' }, 400);
   }
 
   const db = c.env.DB;
@@ -1129,15 +1129,13 @@ bookingPortalRouter.get('/operators/:id/reviews', async (c) => {
   try {
     const [reviewsRes, summaryRes] = await Promise.all([
       db.prepare(
-        `SELECT r.id, r.rating, r.review_text, r.created_at,
-                c.name as customer_name
+        `SELECT r.id, r.rating, r.review_text, r.created_at
          FROM operator_reviews r
-         JOIN customers c ON c.id = r.customer_id
          WHERE r.operator_id = ? AND r.deleted_at IS NULL
          ORDER BY r.created_at DESC
          LIMIT ? OFFSET ?`
       ).bind(operatorId, lim, off).all<{
-        id: string; rating: number; review_text: string | null; created_at: number; customer_name: string;
+        id: string; rating: number; review_text: string | null; created_at: number;
       }>(),
       db.prepare(
         `SELECT COUNT(id) as total_reviews, ROUND(AVG(CAST(rating AS REAL)), 1) as avg_rating

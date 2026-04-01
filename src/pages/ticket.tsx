@@ -11,6 +11,7 @@ interface BookingDetail {
   customer_id: string;
   trip_id: string;
   seat_ids: string;
+  seat_numbers?: string[];
   passenger_names: string;
   total_amount: number;
   status: string;
@@ -103,11 +104,15 @@ export function TicketPage({ bookingId }: TicketPageProps) {
   const passengerNames: string[] = JSON.parse(booking.passenger_names) as string[];
   const shortRef = booking.id.slice(-8).toUpperCase();
 
+  const seatLabels = (booking.seat_numbers && booking.seat_numbers.length > 0)
+    ? booking.seat_numbers.join(', ')
+    : `${seatIds.length} seat${seatIds.length !== 1 ? 's' : ''}`;
+
   const whatsAppText = [
     'WebWaka Booking Confirmed! ✅',
     `Route: ${booking.origin} → ${booking.destination}`,
     `Date: ${formatDate(booking.departure_time)}`,
-    `Seat(s): ${seatIds.length}`,
+    `Seat(s): ${seatLabels}`,
     `Passenger: ${passengerNames[0] ?? 'Passenger'}`,
     `Ref: ${shortRef}`,
     `View ticket: https://webwaka.ng/b/${booking.id}`,

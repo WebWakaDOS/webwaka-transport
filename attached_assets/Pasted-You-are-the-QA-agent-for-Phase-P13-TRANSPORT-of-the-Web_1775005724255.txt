@@ -1,0 +1,54 @@
+You are the QA agent for Phase P13-TRANSPORT of the WebWaka platform.
+Target repo: webwaka-transport
+
+Deeply verify P13-TRANSPORT (Channel Expansion). Fix every issue. Do not declare verified until all checks pass.
+
+=== VERIFICATION CHECKLIST ===
+
+--- P13-T1: WhatsApp Sharing ---
+1. Confirm the receipt component has a "Share via WhatsApp" button.
+2. Confirm the e-ticket page (/b/:bookingId) also has a "Share via WhatsApp" button.
+3. Confirm the button uses wa.me/?text= deep link (not wa.me/send, not api.whatsapp.com, not any WhatsApp Business API endpoint).
+4. Confirm the text is URL-encoded (encodeURIComponent is called on the message string).
+5. Confirm the message includes: route, date, seat numbers, passenger name, booking reference, and the ticket URL.
+6. Confirm the button has target="_blank" rel="noopener noreferrer" to open in a new tab/app.
+7. Check: does the message contain any unencoded special characters (₦, →, etc.) that could break the URL? Test the URL encoding with a route name that contains special characters.
+8. Confirm the button is styled in WhatsApp green (#25D366) with appropriate contrast for text readability.
+
+--- P13-T2: Operator Reviews ---
+1. Confirm POST /api/booking/reviews requires authenticated CUSTOMER role.
+2. Confirm the booking must belong to the authenticated customer (cannot review someone else's trip).
+3. Confirm the trip must be in 'completed' state before a review is accepted. A review on an in-progress trip returns 422.
+4. Confirm duplicate reviews for the same booking return 409.
+5. Confirm rating is validated as an integer between 1 and 5. Rating = 0, rating = 6, rating = 2.5 must all return 400.
+6. Confirm GET /api/booking/operators/:id/reviews is public and returns avg_rating, total_reviews, and paginated reviews.
+7. Confirm reviews do NOT expose any customer PII (no customer name, phone, or email in the review list).
+8. Confirm GET /api/booking/trips/search includes avg_rating for each operator in the trip results.
+9. Confirm the post-trip review prompt SMS is sent from drainEventBus when a trip.state_changed event fires for 'completed' state.
+10. Confirm review_prompt_sent_at is set after the SMS is sent, preventing duplicate prompts.
+11. Check: what if the customer has NDPR-anonymized phone? The SMS should be skipped. Confirm the guard exists.
+
+--- P13-T3: Full i18n ---
+1. Read src/core/i18n/index.ts. Confirm the translations object has at minimum 4 language keys: english, yoruba, igbo, hausa.
+2. Audit the booking flow translation keys. Confirm the following key categories have non-empty, non-English-copy translations in ALL three vernacular languages:
+- Search form labels (From, To, Date, Search Trips)
+- Trip list labels (Available seats, Book Now, Sold Out)
+- Seat selection labels (Select your seat, Available, Reserved, Window, Aisle, VIP)
+- Payment flow (Proceed to Payment, Total Amount, Pay Now)
+- Confirmation (Booking Confirmed, View E-Ticket)
+- Error messages (Seat no longer available, Payment failed)
+- Common (Loading, Back, Cancel, Confirm, Done)
+3. Confirm language auto-detection is implemented: navigator.language is read on app init and mapped to the correct language key.
+4. Confirm a language selector dropdown exists in the booking portal header.
+5. Confirm the selected language is stored in localStorage and persists across page reloads.
+6. Confirm the i18n system is actually used in the booking portal components — that text strings are pulled from the i18n module, not hardcoded in English. Spot-check at least 5 different UI text elements.
+7. Check: what happens if navigator.language returns a value not in the mapping (e.g. 'fr-FR')? It should fall back to English. Confirm this fallback exists.
+
+--- FINAL CHECKS ---
+1. Run tsc --noEmit — zero errors.
+2. Start the dev server. Change the browser language to Yoruba (or manually set localStorage language to 'yoruba'). Reload the booking portal. Confirm UI text is in Yoruba.
+3. Navigate to the e-ticket page. Confirm the WhatsApp share button is present and the link is correctly encoded.
+4. Open browser developer tools → Network tab. Navigate to a trip search. Confirm avg_rating appears in the trip search API response.
+
+Report every issue found and every fix applied.
+```
