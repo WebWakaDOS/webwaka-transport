@@ -12,7 +12,7 @@ class_name = "TripSeatDO"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["TripSeatDO"]
+new_sqlite_classes = ["TripSeatDO"]
 
 # ============================================================
 # P15-T4: R2 Bucket — Operator Branding Assets
@@ -52,7 +52,7 @@ class_name = "TripSeatDO"
 
 [[env.production.migrations]]
 tag = "v1"
-new_classes = ["TripSeatDO"]
+new_sqlite_classes = ["TripSeatDO"]
 
 # ============================================================
 # P15-T4: R2 Bucket — Operator Branding Assets (production)
