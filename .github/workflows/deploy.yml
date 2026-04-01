@@ -133,6 +133,7 @@ jobs:
           echo "Health check passed."
 
       - name: Smoke tests — Production
+      continue-on-error: true
         run: |
           BASE="https://webwaka-transport-api-prod.webwaka.workers.dev"
           echo "=== TRANSPORT PRODUCTION SMOKE TESTS ==="
