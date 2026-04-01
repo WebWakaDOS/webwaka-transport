@@ -9,6 +9,7 @@ import { requireRole, requireTierFeature, nanoid, generateJWT } from '@webwaka/c
 import type { AppContext, DbBooking, DbCustomer } from './types';
 import { genId, parsePagination, metaResponse, requireFields } from './types';
 import { publishEvent } from '../core/events/index';
+import { notifyBookingConfirmed, notifyBookingRefunded } from '../core/central-mgmt';
 import { sendSms } from '../lib/sms.js';
 import { getOperatorConfig } from '../lib/operator-config.js';
 import { initiatePaystackRefund } from '../lib/payments.js';
@@ -525,6 +526,15 @@ bookingPortalRouter.patch('/bookings/:id/confirm', requireRole(['SUPER_ADMIN', '
       timestamp: now,
     });
 
+    // Notify central-mgmt ledger of confirmed booking payment (non-fatal)
+    await notifyBookingConfirmed(
+      c.env,
+      id,
+      booking.tenant_id ?? '',
+      booking.total_amount ?? 0,
+      payment_reference ?? booking.payment_reference ?? '',
+    ).catch((err) => console.error('[transport] central-mgmt notify failed:', err));
+
     return c.json({ success: true, data: { id, status: 'confirmed', payment_status: 'completed', confirmed_at: now } });
   } catch {
     return c.json({ success: false, error: 'Failed to confirm booking' }, 500);
@@ -605,6 +615,14 @@ bookingPortalRouter.patch('/bookings/:id/cancel', requireRole(['SUPER_ADMIN', 'T
         payload: { booking_id: id, refund_reference, refund_amount_kobo },
         timestamp: now,
       }).catch(() => {});
+      // Notify central-mgmt ledger of refund (non-fatal)
+      await notifyBookingRefunded(
+        c.env,
+        id,
+        booking.tenant_id ?? '',
+        refund_amount_kobo ?? 0,
+        refund_reference,
+      ).catch((err) => console.error('[transport] central-mgmt refund notify failed:', err));
     }
 
     // P08-T4: Notify the first waitlisted customer for this trip after seats are freed
