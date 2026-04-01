@@ -86,10 +86,3 @@ id = "cc380305413147f8ac35058bd0bcb9c0"
 [[env.production.queues.producers]]
 binding = "TRANSPORT_EVENTS"
 queue = "webwaka-transport-events-prod"
-
-[[env.production.queues.consumers]]
-queue = "webwaka-transport-events-prod"
-max_batch_size = 25
-max_batch_timeout = 5
-max_retries = 5
-dead_letter_queue = "webwaka-transport-events-dlq-prod"
