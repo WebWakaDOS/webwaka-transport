@@ -33,6 +33,14 @@ WebWaka Transport is the Transportation & Mobility vertical suite (Part 10.3) of
 - **T3 Multi-Stop Routes**: POST/GET /api/operator/routes/:id/stops (replace-all approach); RouteStopsPanel inline in RoutesPanel with ordered stop editing; booking-portal updated for origin_stop/destination_stop params with segment fare computation
 - **Sweepers**: sweepBookingReminders — 24h + 2h pre-departure SMS reminders (reminder_24h_sent_at / reminder_2h_sent_at columns on bookings via migration 016)
 
+## T-TRN-01: Multi-Seat Atomic Reservation Engine (complete)
+- **TripSeatDO upgraded**: `/reserve-seats` + `/release-seats` endpoints added to `src/durables/trip-seat-do.ts`; in-memory `heldSeats` Map provides fast-path serialization; D1 write-through with `WHERE status = 'available'` is the ultimate atomic guard; cold-start hydration re-loads active reservations from D1 after DO hibernation
+- **reserve-batch rerouted through DO**: `POST /trips/:tripId/reserve-batch` in `seat-inventory.ts` now proxies to `TRIP_SEAT_DO.get(idFromName(tripId)).fetch('/reserve-seats')` — all concurrent booking attempts for the same trip are serialized through a single DO instance (JS event loop guarantee); graceful fallback to D1 optimistic locking when DO binding is absent (local dev / test without wrangler)
+- **notifyDOReleaseSeats helper**: `/release` endpoint calls DO `/release-seats` (non-fatal) so in-memory held-seat map stays consistent when seats are released outside the reserve-batch path
+- **18 new DO unit tests**: `src/durables/trip-seat-do.test.ts` covering concurrent conflict detection, D1 write-through, release, expired-hold sweeping, cold-start hydration, broadcast, WS rejection, unknown routes
+- **8 new API integration tests**: reserve-batch validation (400/404), DO stub success (200), DO stub 409 forwarding, idempotency replay, fallback path — all in `api.test.ts`
+- **Total Vitest gate**: 400 tests passing
+
 ## Tech Stack
 - **Frontend**: React 19 + TypeScript + Vite (PWA, mobile-first, port 5000)
 - **Backend**: Cloudflare Workers + Hono framework

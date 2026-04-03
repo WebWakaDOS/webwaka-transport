@@ -246,7 +246,10 @@ seatInventoryRouter.post('/trips/:id/reserve', async (c) => {
 
 // ============================================================
 // POST /trips/:tripId/reserve-batch — atomic multi-seat reservation
-// Idempotent via IDEMPOTENCY_KV. Uses optimistic locking (version).
+// T-TRN-01: Routed through TripSeatDO for true serialization.
+// Idempotent via IDEMPOTENCY_KV. DO eliminates double-booking races
+// across multiple Worker instances that D1 optimistic locking alone
+// cannot prevent (concurrent reads see same version before any write).
 // ============================================================
 seatInventoryRouter.post('/trips/:tripId/reserve-batch', async (c) => {
   const tripId = c.req.param('tripId');
@@ -277,129 +280,169 @@ seatInventoryRouter.post('/trips/:tripId/reserve-batch', async (c) => {
     }
   }
 
-  const now = Date.now();
-
-  // P03-T1: Configurable TTL sourced from operator config
+  // 2. P03-T1: Configurable TTL sourced from operator config
   const tripForBatchConfig = await db.prepare(
     `SELECT operator_id FROM trips WHERE id = ? AND deleted_at IS NULL`
   ).bind(tripId).first<{ operator_id: string }>();
-  const batchOperatorId = tripForBatchConfig?.operator_id ?? '';
+  if (!tripForBatchConfig) {
+    return c.json({ success: false, error: 'Trip not found' }, 404);
+  }
+  const batchOperatorId = tripForBatchConfig.operator_id;
   const batchOpConfig = await getOperatorConfig(c.env, batchOperatorId);
   const batchIsOnline = Boolean(c.req.header('Origin'));
   const batchTtlMs = batchIsOnline ? batchOpConfig.online_reservation_ttl_ms : batchOpConfig.reservation_ttl_ms;
-  const expiresAt = now + batchTtlMs;
 
-  // Expire stale reservations for this trip before checking availability
-  await db.prepare(
-    `UPDATE seats SET status = 'available', reserved_by = NULL, reservation_token = NULL, reservation_expires_at = NULL
-     WHERE trip_id = ? AND status = 'reserved' AND reservation_expires_at < ?`
-  ).bind(tripId, now).run();
-
-  // 2. Read all requested seats in a single query
+  // 3. Verify all requested seats exist for this trip
   const seatIdList = seat_ids as string[];
   const placeholders = seatIdList.map(() => '?').join(', ');
   const seatsResult = await db.prepare(
-    `SELECT id, status, version FROM seats WHERE trip_id = ? AND id IN (${placeholders})`
-  ).bind(tripId, ...seatIdList).all<{ id: string; status: string; version: number }>();
+    `SELECT id FROM seats WHERE trip_id = ? AND id IN (${placeholders})`
+  ).bind(tripId, ...seatIdList).all<{ id: string }>();
 
   if (seatsResult.results.length !== seatIdList.length) {
     return c.json({ success: false, error: 'One or more seats not found for this trip' }, 404);
   }
 
-  // 3. Check all seats are available
-  const unavailable = seatsResult.results.find(s => s.status !== 'available');
-  if (unavailable) {
-    return c.json({
-      success: false,
-      error: 'seat_unavailable',
-      seat_id: unavailable.id,
-      message: 'One or more seats are not available',
-    }, 409);
-  }
-
-  // 4. Generate reservation tokens for each seat — nanoid('tok', 32) gives
+  // 4. Generate reservation tokens — nanoid('tok', 32) gives
   //    a cryptographically-random 32-char suffix making tokens unguessable
   const tokenMap: Record<string, string> = {};
-  for (const seat of seatsResult.results) {
-    tokenMap[seat.id] = nanoid('tok', 32);
+  for (const seatId of seatIdList) {
+    tokenMap[seatId] = nanoid('tok', 32);
   }
 
-  // 5. Build D1 batch with optimistic locking (version check prevents double-booking)
-  const updateStmts = seatsResult.results.map(seat =>
-    db.prepare(
-      `UPDATE seats SET status = 'reserved', reserved_by = ?, reservation_token = ?,
-       reservation_expires_at = ?, version = version + 1, updated_at = ?
-       WHERE id = ? AND status = 'available' AND version = ?`
-    ).bind(user_id, tokenMap[seat.id]!, expiresAt, now, seat.id, seat.version)
-  );
-
-  // 6. Execute the batch atomically
-  const batchResults = await db.batch(updateStmts);
-
-  // 7. Check for concurrent conflicts (changes = 0 means another agent grabbed this seat)
-  const failedSeats = seatsResult.results.filter((_, i) => {
-    const res = batchResults[i] as { meta?: { changes?: number } } | undefined;
-    return (res?.meta?.changes ?? 0) === 0;
-  });
-
-  if (failedSeats.length > 0) {
-    // Compensating transaction: release any seats that did succeed
-    const successSeats = seatsResult.results.filter((_, i) => {
-      const res = batchResults[i] as { meta?: { changes?: number } } | undefined;
-      return (res?.meta?.changes ?? 0) > 0;
-    });
-    if (successSeats.length > 0) {
-      await db.batch(
-        successSeats.map(seat =>
-          db.prepare(
-            `UPDATE seats SET status = 'available', reserved_by = NULL, reservation_token = NULL,
-             reservation_expires_at = NULL, updated_at = ?
-             WHERE id = ? AND reservation_token = ?`
-          ).bind(now, seat.id, tokenMap[seat.id]!)
-        )
-      ).catch(() => {});
-    }
-    return c.json({
-      success: false,
-      error: 'concurrent_conflict',
-      message: 'Seat taken by another agent — please retry',
-    }, 409);
-  }
-
-  // 8. Build the token list for the response
-  const tokens = seatsResult.results.map(seat => ({
-    seat_id: seat.id,
-    token: tokenMap[seat.id]!,
-    expires_at: expiresAt,
-  }));
-
-  // P15-T2: Broadcast seat changes to DO (non-fatal)
-  for (const seat of seatsResult.results) {
-    broadcastSeatChange(c.env, tripId, { id: seat.id, status: 'reserved' });
-  }
-
-  // 9. Publish platform event (non-fatal — event bus failure must not block booking)
-  const trip = await db.prepare(
-    `SELECT operator_id FROM trips WHERE id = ? AND deleted_at IS NULL`
-  ).bind(tripId).first<{ operator_id: string }>();
-
-  if (trip) {
-    publishEvent(db, {
-      event_type: 'seat.batch_reserved',
-      aggregate_id: tripId,
-      aggregate_type: 'trip',
-      payload: { trip_id: tripId, seat_ids: seatIdList, user_id, tokens },
-      tenant_id: trip.operator_id,
-      timestamp: now,
-    }).catch(() => {});
-  }
-
-  const responseBody = {
-    success: true,
-    data: { tokens, expires_at: expiresAt, ttl_seconds: Math.round(batchTtlMs / 1000) },
+  // 5. T-TRN-01: Route through Durable Object for true serialization.
+  //    The DO is keyed per-trip so all concurrent booking attempts for the
+  //    same trip are funnelled through a single JS event loop instance.
+  //    Fall back to a direct D1 path when the DO binding is not present
+  //    (local dev without wrangler, or tests that omit TRIP_SEAT_DO).
+  let responseBody: {
+    success: boolean;
+    data: { tokens: { seat_id: string; token: string; expires_at: number }[]; expires_at: number; ttl_seconds: number };
   };
 
-  // 10. Cache success response for 24 hours for idempotency replay
+  if (c.env.TRIP_SEAT_DO) {
+    const doId = c.env.TRIP_SEAT_DO.idFromName(tripId);
+    const stub = c.env.TRIP_SEAT_DO.get(doId);
+
+    let doRes: Response;
+    try {
+      doRes = await stub.fetch(new Request('https://do/reserve-seats', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ seat_ids: seatIdList, user_id, ttl_ms: batchTtlMs, trip_id: tripId, tokens: tokenMap }),
+      }));
+    } catch {
+      return c.json({ success: false, error: 'Reservation service temporarily unavailable' }, 503);
+    }
+
+    if (!doRes.ok) {
+      const doBody = await doRes.json() as Record<string, unknown>;
+      return c.json(doBody, doRes.status as 400 | 404 | 409 | 500 | 503);
+    }
+
+    const doData = await doRes.json() as {
+      success: boolean;
+      data: { tokens: { seat_id: string; token: string; expires_at: number }[]; expires_at: number };
+    };
+
+    responseBody = {
+      success: true,
+      data: {
+        tokens: doData.data.tokens,
+        expires_at: doData.data.expires_at,
+        ttl_seconds: Math.round(batchTtlMs / 1000),
+      },
+    };
+  } else {
+    // ── Fallback path: direct D1 optimistic locking (no DO binding) ──────
+    const now = Date.now();
+    const expiresAt = now + batchTtlMs;
+
+    // Expire stale reservations before checking availability
+    await db.prepare(
+      `UPDATE seats SET status = 'available', reserved_by = NULL, reservation_token = NULL, reservation_expires_at = NULL
+       WHERE trip_id = ? AND status = 'reserved' AND reservation_expires_at < ?`
+    ).bind(tripId, now).run();
+
+    const seatsWithVersion = await db.prepare(
+      `SELECT id, status, version FROM seats WHERE trip_id = ? AND id IN (${placeholders})`
+    ).bind(tripId, ...seatIdList).all<{ id: string; status: string; version: number }>();
+
+    const unavailable = seatsWithVersion.results.find(s => s.status !== 'available');
+    if (unavailable) {
+      return c.json({
+        success: false,
+        error: 'seat_unavailable',
+        seat_id: unavailable.id,
+        message: 'One or more seats are not available',
+      }, 409);
+    }
+
+    const updateStmts = seatsWithVersion.results.map(seat =>
+      db.prepare(
+        `UPDATE seats SET status = 'reserved', reserved_by = ?, reservation_token = ?,
+         reservation_expires_at = ?, version = version + 1, updated_at = ?
+         WHERE id = ? AND status = 'available' AND version = ?`
+      ).bind(user_id, tokenMap[seat.id]!, expiresAt, now, seat.id, seat.version)
+    );
+
+    const batchResults = await db.batch(updateStmts);
+    const failedSeats = seatsWithVersion.results.filter((_, i) => {
+      const res = batchResults[i] as { meta?: { changes?: number } } | undefined;
+      return (res?.meta?.changes ?? 0) === 0;
+    });
+
+    if (failedSeats.length > 0) {
+      const successSeats = seatsWithVersion.results.filter((_, i) => {
+        const res = batchResults[i] as { meta?: { changes?: number } } | undefined;
+        return (res?.meta?.changes ?? 0) > 0;
+      });
+      if (successSeats.length > 0) {
+        await db.batch(
+          successSeats.map(seat =>
+            db.prepare(
+              `UPDATE seats SET status = 'available', reserved_by = NULL, reservation_token = NULL,
+               reservation_expires_at = NULL, updated_at = ?
+               WHERE id = ? AND reservation_token = ?`
+            ).bind(now, seat.id, tokenMap[seat.id]!)
+          )
+        ).catch(() => {});
+      }
+      return c.json({
+        success: false,
+        error: 'concurrent_conflict',
+        message: 'Seat taken by another agent — please retry',
+      }, 409);
+    }
+
+    const tokens = seatIdList.map(seatId => ({
+      seat_id: seatId,
+      token: tokenMap[seatId]!,
+      expires_at: expiresAt,
+    }));
+
+    responseBody = {
+      success: true,
+      data: { tokens, expires_at: expiresAt, ttl_seconds: Math.round(batchTtlMs / 1000) },
+    };
+  }
+
+  // 6. Broadcast seat changes to connected WebSocket clients (non-fatal)
+  for (const seatId of seatIdList) {
+    broadcastSeatChange(c.env, tripId, { id: seatId, status: 'reserved' });
+  }
+
+  // 7. Publish platform event (non-fatal — event bus failure must not block booking)
+  publishEvent(db, {
+    event_type: 'seat.batch_reserved',
+    aggregate_id: tripId,
+    aggregate_type: 'trip',
+    payload: { trip_id: tripId, seat_ids: seatIdList, user_id, tokens: responseBody.data.tokens },
+    tenant_id: batchOperatorId,
+    timestamp: Date.now(),
+  }).catch(() => {});
+
+  // 8. Cache success response for 24 hours for idempotency replay
   if (kv) {
     kv.put(idempotencyKvKey, JSON.stringify(responseBody), { expirationTtl: 86_400 }).catch(() => {});
   }
@@ -537,6 +580,9 @@ seatInventoryRouter.post('/trips/:id/release', async (c) => {
        WHERE id = ? AND trip_id = ? AND reservation_token = ?`
     ).bind(now, seat_id, tripId, token).run();
 
+    // T-TRN-01: Notify DO so its in-memory held-seat map stays consistent (non-fatal)
+    notifyDOReleaseSeats(c.env, tripId, [seat_id], { [seat_id]: token });
+
     broadcastSeatChange(c.env, tripId, { id: seat_id, status: 'available' });
 
     return c.json({ success: true, data: { seat_id, trip_id: tripId, status: 'available' } });
@@ -643,6 +689,29 @@ function broadcastSeatChange(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type: 'seat_changed', seat }),
+    })).catch(() => {});
+  } catch { /* non-fatal */ }
+}
+
+// ============================================================
+// T-TRN-01: Notify DO to remove seats from its in-memory held-seat map.
+// Called by the HTTP /release endpoint so the DO stays in sync when
+// seats are released outside the reserve-batch path. Non-fatal.
+// ============================================================
+function notifyDOReleaseSeats(
+  env: { TRIP_SEAT_DO?: DurableObjectNamespace },
+  tripId: string,
+  seatIds: string[],
+  tokens: Record<string, string>,
+): void {
+  if (!env.TRIP_SEAT_DO || seatIds.length === 0) return;
+  try {
+    const doId = env.TRIP_SEAT_DO.idFromName(tripId);
+    const stub = env.TRIP_SEAT_DO.get(doId);
+    stub.fetch(new Request('https://do/release-seats', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ seat_ids: seatIds, tokens, trip_id: tripId }),
     })).catch(() => {});
   } catch { /* non-fatal */ }
 }
