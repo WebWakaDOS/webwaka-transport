@@ -14,6 +14,12 @@
  * D1 is always the source of truth; the DO writes through on every reservation.
  * In-memory state is re-hydrated from D1 on the first request after hibernation.
  *
+ * Cloudflare invariants honoured:
+ *   - All background D1 work uses this.ctx.waitUntil() so the runtime keeps the
+ *     isolate alive until those promises settle (never fire-and-forget raw).
+ *   - Compensating rollback (partial batch failure) is registered with waitUntil
+ *     so it cannot be silently GC'd when the error Response is returned.
+ *
  * Endpoints:
  *   POST /reserve-seats  — atomically reserve N seats for a trip
  *   POST /release-seats  — release previously held seats (token-verified)
@@ -169,6 +175,18 @@ export class TripSeatDO implements DurableObject {
       return Response.json({ success: false, error: 'trip_id and user_id are required' }, { status: 400 });
     }
 
+    // BUG-2 FIX: validate every seat_id has a non-empty token before touching D1.
+    // A missing token would store reservation_token = NULL in D1, making the seat
+    // unreleasable via the token-based release endpoint until the TTL sweeper runs.
+    const missingTokens = seat_ids.filter(id => !tokens[id]);
+    if (missingTokens.length > 0) {
+      return Response.json({
+        success: false,
+        error: 'missing_tokens',
+        message: `Missing reservation token for seat(s): ${missingTokens.join(', ')}`,
+      }, { status: 400 });
+    }
+
     // 1. Hydrate from D1 if this DO just woke from hibernation
     await this.hydrate(trip_id);
 
@@ -186,7 +204,9 @@ export class TripSeatDO implements DurableObject {
       }, { status: 409 });
     }
 
-    // 4. Write through to D1 — the WHERE clause is the ultimate atomic guard
+    // 4. Write through to D1 — the WHERE clause is the ultimate atomic guard.
+    //    No version check needed here because the DO itself serialises requests
+    //    for this trip; AND status = 'available' is sufficient.
     const now = Date.now();
     const expiresAt = now + ttl_ms;
     const db = this.env.DB;
@@ -207,32 +227,39 @@ export class TripSeatDO implements DurableObject {
       return Response.json({ success: false, error: 'Failed to write reservation to database' }, { status: 500 });
     }
 
-    // 5. Detect any seats that didn't update (status was not 'available' in D1)
+    // 5. Detect seats that didn't update (another path reserved them before us)
     const failedIds = seat_ids.filter((_, i) => (batchResults[i]?.meta?.changes ?? 0) === 0);
 
     if (failedIds.length > 0) {
-      // Compensating transaction: release any seats that DID succeed
+      // BUG-1 FIX: use ctx.waitUntil() for compensating rollback so the Cloudflare
+      // runtime keeps the isolate alive until the promise settles — never raw .catch().
       const successIds = seat_ids.filter((_, i) => (batchResults[i]?.meta?.changes ?? 0) > 0);
       if (successIds.length > 0) {
-        db.batch(
-          successIds.map(seatId =>
-            db.prepare(
-              `UPDATE seats
-               SET status = 'available', reserved_by = NULL, reservation_token = NULL,
-                   reservation_expires_at = NULL, updated_at = ?
-               WHERE id = ? AND reservation_token = ?`
-            ).bind(now, seatId, tokens[seatId])
-          )
-        ).catch(() => {});
+        this.ctx.waitUntil(
+          db.batch(
+            successIds.map(seatId =>
+              db.prepare(
+                `UPDATE seats
+                 SET status = 'available', reserved_by = NULL, reservation_token = NULL,
+                     reservation_expires_at = NULL, updated_at = ?
+                 WHERE id = ? AND trip_id = ? AND reservation_token = ?`
+              ).bind(now, seatId, trip_id, tokens[seatId])
+            )
+          ).catch(() => {})
+        );
       }
+
+      // BUG-3 FIX: include conflicted_seats so callers know which seats caused
+      // the conflict and can surface accurate UX / retry targeted subsets.
       return Response.json({
         success: false,
         error: 'concurrent_conflict',
+        conflicted_seats: failedIds,
         message: 'Seat taken by another agent — please retry',
       }, { status: 409 });
     }
 
-    // 6. Update in-memory state — now the DO knows these seats are held
+    // 6. Update in-memory state — the DO now considers these seats held
     for (const seatId of seat_ids) {
       this.heldSeats.set(seatId, {
         token: tokens[seatId]!,
@@ -255,8 +282,10 @@ export class TripSeatDO implements DurableObject {
   }
 
   // ── POST /release-seats ───────────────────────────────────────────────────
-  // Token-verified release: removes from in-memory map AND updates D1.
-  // Called by the HTTP release endpoint so DO state stays consistent.
+  // Token-verified release: removes from in-memory map AND syncs D1.
+  // The HTTP /release endpoint already updated D1 before calling this, so
+  // the D1 write here is belt-and-suspenders (future direct callers).
+  // BUG-1 FIX: D1 sync registered with ctx.waitUntil() — never raw .catch().
   private async handleReleaseSeats(request: Request): Promise<Response> {
     let body: ReleaseSeatsBody;
     try {
@@ -274,19 +303,22 @@ export class TripSeatDO implements DurableObject {
     const now = Date.now();
     const db = this.env.DB;
 
-    // Release in D1 — only if the token matches (prevents unauthorized release)
-    db.batch(
-      seat_ids.map(seatId =>
-        db.prepare(
-          `UPDATE seats
-           SET status = 'available', reserved_by = NULL, reservation_token = NULL,
-               reservation_expires_at = NULL, updated_at = ?
-           WHERE id = ? AND trip_id = ? AND reservation_token = ?`
-        ).bind(now, seatId, trip_id, tokens[seatId])
-      )
-    ).catch(() => {});
+    // BUG-1 FIX: register D1 release with waitUntil so runtime keeps isolate alive.
+    // Token-verified WHERE clause prevents unauthorised release at the D1 level.
+    this.ctx.waitUntil(
+      db.batch(
+        seat_ids.map(seatId =>
+          db.prepare(
+            `UPDATE seats
+             SET status = 'available', reserved_by = NULL, reservation_token = NULL,
+                 reservation_expires_at = NULL, updated_at = ?
+             WHERE id = ? AND trip_id = ? AND reservation_token = ?`
+          ).bind(now, seatId, trip_id, tokens[seatId])
+        )
+      ).catch(() => {})
+    );
 
-    // Update in-memory state
+    // Update in-memory state synchronously before returning
     for (const seatId of seat_ids) {
       this.heldSeats.delete(seatId);
     }

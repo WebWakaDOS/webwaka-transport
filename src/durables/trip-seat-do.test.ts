@@ -14,13 +14,26 @@
  *   6. Cold-start hydration loads active reservations from D1
  *   7. /broadcast fans out messages to connected WebSocket clients
  *   8. Unknown routes return 404
+ *
+ * Bug-fix coverage (BUG-1 / BUG-2 / BUG-3):
+ *   BUG-1: Background D1 ops use ctx.waitUntil() — mock executes them so
+ *          compensating rollback side-effects are visible in test assertions.
+ *   BUG-2: Missing token for any seat_id returns 400 before touching D1.
+ *   BUG-3: concurrent_conflict 409 includes conflicted_seats array.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { TripSeatDO } from './trip-seat-do.js';
 
 // ── Mock DurableObjectState ──────────────────────────────────────────────────
-function makeMockCtx(): DurableObjectState {
+// waitUntil tracks promises so test helpers can flush them, verifying that
+// background D1 operations (compensating rollback, release sync) actually run.
+interface MockCtx extends DurableObjectState {
+  _waitUntilPromises: Promise<unknown>[];
+}
+
+function makeMockCtx(): MockCtx {
   const store = new Map<string, unknown>();
+  const pending: Promise<unknown>[] = [];
   return {
     id: { toString: () => 'mock-do-id', name: 'trp_test' } as DurableObjectId,
     storage: {
@@ -37,7 +50,9 @@ function makeMockCtx(): DurableObjectState {
         fn({ get: async () => undefined, put: async () => {}, delete: async () => {}, list: async () => new Map() } as unknown as DurableObjectTransaction),
       transactionSync: () => undefined,
     } as unknown as DurableObjectStorage,
-    waitUntil: () => {},
+    // BUG-1: mock executes the promise so background D1 side-effects are testable
+    waitUntil: (p: Promise<unknown>) => { pending.push(p); },
+    _waitUntilPromises: pending,
     blockConcurrencyWhile: async (fn: () => Promise<unknown>) => fn(),
     acceptWebSocket: () => { throw new Error('not implemented'); },
     getWebSockets: () => [],
@@ -45,7 +60,14 @@ function makeMockCtx(): DurableObjectState {
     getWebSocketAutoResponseTimestamp: () => null,
     getTags: () => [],
     abort: () => {},
-  } as unknown as DurableObjectState;
+  } as unknown as MockCtx;
+}
+
+/** Flush all pending waitUntil promises registered since the last call. */
+async function flushWaitUntil(ctx: MockCtx): Promise<void> {
+  const batch = [...ctx._waitUntilPromises];
+  ctx._waitUntilPromises.length = 0;
+  await Promise.allSettled(batch);
 }
 
 // ── Mock D1 Database ─────────────────────────────────────────────────────────
@@ -141,6 +163,12 @@ function makeEnv(db: any) {
 // ── Helper: create DO instance ───────────────────────────────────────────────
 function makeDO(db: any) {
   return new TripSeatDO(makeMockCtx(), makeEnv(db));
+}
+
+/** Returns both the DO and its MockCtx so tests can call flushWaitUntil(ctx). */
+function makeDOWithCtx(db: any): { do_: TripSeatDO; ctx: MockCtx } {
+  const ctx = makeMockCtx();
+  return { do_: new TripSeatDO(ctx, makeEnv(db)), ctx };
 }
 
 // ── Helper: POST /reserve-seats ──────────────────────────────────────────────
@@ -285,6 +313,85 @@ describe('TripSeatDO: /reserve-seats', () => {
     expect(body.data.expires_at).toBeGreaterThanOrEqual(before + ttlMs);
     expect(body.data.expires_at).toBeLessThanOrEqual(before + ttlMs + 500);
   });
+
+  // ── BUG-2 fix: missing token validation ────────────────────────────────────
+  it('BUG-2: returns 400 when tokens map is missing an entry for a seat_id', async () => {
+    // s1 has no token in the map — this used to silently write NULL to D1
+    const res = await reserveSeats(do_, {
+      seat_ids: ['s1', 's2'],
+      tokens: { s2: 'tok_s2_only' }, // s1 is missing
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json() as any;
+    expect(body.error).toBe('missing_tokens');
+    expect(body.message).toContain('s1');
+    // D1 must not have been touched — seat remains available
+    const seat = db._seats.find((s: any) => s.id === 's1');
+    expect(seat.status).toBe('available');
+    expect(seat.reservation_token).toBeUndefined();
+  });
+
+  it('BUG-2: returns 400 when tokens map is completely absent', async () => {
+    const res = await do_.fetch(new Request('https://do/reserve-seats', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        seat_ids: ['s1'],
+        user_id: 'usr_1',
+        ttl_ms: 30_000,
+        trip_id: 'trp_1',
+        tokens: {},
+      }),
+    }));
+    expect(res.status).toBe(400);
+    const body = await res.json() as any;
+    expect(body.error).toBe('missing_tokens');
+  });
+
+  // ── BUG-3 fix: concurrent_conflict includes conflicted_seats ───────────────
+  it('BUG-3: concurrent_conflict 409 includes conflicted_seats array', async () => {
+    // Simulate s1 reserved in D1 externally (bypassing DO memory)
+    db._seats[0]!.status = 'reserved';
+    db._seats[0]!.reservation_token = 'external_token';
+
+    // DO memory doesn't know — fresh DO, not hydrated yet
+    const res = await reserveSeats(do_, { seat_ids: ['s1'], tokens: { s1: 'tok_new' } });
+    expect(res.status).toBe(409);
+    const body = await res.json() as any;
+    // Must be concurrent_conflict (from D1, not seat_unavailable from memory)
+    expect(body.error).toBe('concurrent_conflict');
+    // BUG-3 fix: conflicted_seats must now be present
+    expect(Array.isArray(body.conflicted_seats)).toBe(true);
+    expect(body.conflicted_seats).toContain('s1');
+  });
+
+  // ── BUG-1 fix: compensating rollback via ctx.waitUntil() ──────────────────
+  it('BUG-1: compensating rollback via waitUntil restores partial D1 writes', async () => {
+    // Set up: s1 is available, s2 is reserved externally in D1 (DO memory clean)
+    const { do_: doWithCtx, ctx } = makeDOWithCtx(db);
+    db._seats[1]!.status = 'reserved'; // s2 reserved externally
+    db._seats[1]!.reservation_token = 'external_tok_s2';
+
+    // Attempt to reserve s1+s2 together.
+    // Expected: s1 write succeeds (changes=1), s2 write fails (changes=0)
+    // → 409 returned, compensating rollback registered via waitUntil
+    const res = await reserveSeats(doWithCtx, {
+      seat_ids: ['s1', 's2'],
+      tokens: { s1: 'tok_s1_new', s2: 'tok_s2_new' },
+    });
+    expect(res.status).toBe(409);
+    const body = await res.json() as any;
+    expect(body.error).toBe('concurrent_conflict');
+    expect(body.conflicted_seats).toContain('s2');
+
+    // BUG-1 fix: flush waitUntil promises — the compensating rollback for s1 runs
+    await flushWaitUntil(ctx);
+
+    // s1 must be back to 'available' — the compensating rollback ran via waitUntil
+    const s1 = db._seats.find((s: any) => s.id === 's1');
+    expect(s1.status).toBe('available');
+    expect(s1.reservation_token).toBeNull();
+  });
 });
 
 describe('TripSeatDO: /release-seats', () => {
@@ -300,15 +407,22 @@ describe('TripSeatDO: /release-seats', () => {
   });
 
   it('releases a held seat so it can be reserved again', async () => {
+    // Use makeDOWithCtx so we can flush the waitUntil D1-release promise before
+    // the second reservation — otherwise D1 still shows s1 as 'reserved'.
+    const { do_: doWC, ctx } = makeDOWithCtx(db);
+
     // Reserve
-    await reserveSeats(do_, { seat_ids: ['s1'], tokens: { s1: 'tok_rel' } });
+    await reserveSeats(doWC, { seat_ids: ['s1'], tokens: { s1: 'tok_rel' } });
 
     // Release
-    const relRes = await releaseSeats(do_, { seat_ids: ['s1'], tokens: { s1: 'tok_rel' } });
+    const relRes = await releaseSeats(doWC, { seat_ids: ['s1'], tokens: { s1: 'tok_rel' } });
     expect(relRes.status).toBe(200);
 
-    // Should now be re-reservable (DO memory cleared)
-    const res2 = await reserveSeats(do_, { seat_ids: ['s1'], tokens: { s1: 'tok_new' } });
+    // Flush the waitUntil D1-sync promise so mock D1 reflects the release
+    await flushWaitUntil(ctx);
+
+    // Should now be re-reservable (DO memory AND D1 both cleared)
+    const res2 = await reserveSeats(doWC, { seat_ids: ['s1'], tokens: { s1: 'tok_new' } });
     expect(res2.status).toBe(200);
   });
 

@@ -430,6 +430,37 @@ describe('TRN-1: Seat Inventory API', () => {
     expect(body.conflicted_seats).toContain('sd3');
   });
 
+  it('POST /trips/:tripId/reserve-batch forwards concurrent_conflict 409 with conflicted_seats from DO stub (BUG-3)', async () => {
+    db._tables.trips.push({ id: 'trp_do3', operator_id: 'opr_1', deleted_at: null });
+    db._tables.seats.push({ id: 'sd4', trip_id: 'trp_do3', status: 'available' });
+    db._tables.seats.push({ id: 'sd5', trip_id: 'trp_do3', status: 'available' });
+
+    const mockDoStub = {
+      fetch: async (_req: Request) => new Response(JSON.stringify({
+        success: false,
+        error: 'concurrent_conflict',
+        conflicted_seats: ['sd5'],
+        message: 'Seat taken by another agent — please retry',
+      }), { status: 409, headers: { 'Content-Type': 'application/json' } }),
+    };
+    const mockDO = {
+      idFromName: (_name: string) => 'mock-id',
+      get: (_id: any) => mockDoStub,
+    };
+
+    const res = await seatInventoryRouter.request('/trips/trp_do3/reserve-batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ seat_ids: ['sd4', 'sd5'], user_id: 'usr_1', idempotency_key: 'idem_do3' }),
+    }, { DB: db, TRIP_SEAT_DO: mockDO });
+    expect(res.status).toBe(409);
+    const body = await res.json() as any;
+    expect(body.error).toBe('concurrent_conflict');
+    // BUG-3 fix: concurrent_conflict must include conflicted_seats so clients know which seat caused the conflict
+    expect(Array.isArray(body.conflicted_seats)).toBe(true);
+    expect(body.conflicted_seats).toContain('sd5');
+  });
+
   it('POST /trips/:tripId/reserve-batch returns idempotent cached response on replay', async () => {
     db._tables.trips.push({ id: 'trp_idem', operator_id: 'opr_1', deleted_at: null });
     db._tables.seats.push({ id: 'si1', trip_id: 'trp_idem', status: 'available' });
