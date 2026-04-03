@@ -35,7 +35,7 @@
     "@types/qrcode": "^1.5.6",
     "@webwaka/core": "github:WebWakaDOS/webwaka-core#main",
     "dexie": "^4.4.2",
-    "hono": "^4.12.9",
+    "hono": "^4.12.10",
     "jsqr": "^1.4.0",
     "pdf-lib": "^1.17.1",
     "qrcode": "^1.5.4",
@@ -43,12 +43,12 @@
     "react-dom": "^19.2.4"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260331.1",
-    "@playwright/test": "^1.58.2",
+    "@cloudflare/workers-types": "^4.20260403.1",
+    "@playwright/test": "^1.59.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
-    "@types/node": "^25.5.0",
+    "@types/node": "^25.5.2",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
@@ -58,6 +58,6 @@
     "typescript": "^5.9.3",
     "vite": "^8.0.3",
     "vitest": "^3.2.4",
-    "wrangler": "^4.79.0"
+    "wrangler": "^4.80.0"
   }
 }
