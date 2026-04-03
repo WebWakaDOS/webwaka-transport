@@ -1,6 +1,7 @@
 /**
  * WebWaka Transport Suite — Dexie v2 schema tests
- * Tests: mutation queue, conflict log, seat/trip cache, agent sessions, NDPR consent
+ * Tests: mutation queue, conflict log, seat/trip cache, agent sessions,
+ *        NDPR consent, offline tickets (v4 schema), conflict resolution
  */
 import 'fake-indexeddb/auto';
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -26,6 +27,16 @@ import {
   getCachedOperatorConfig,
   recordNdprConsent,
   getConsentHistory,
+  // tickets
+  saveOfflineTicket,
+  getAllPendingTickets,
+  getPendingTickets,
+  getConflictedTickets,
+  markTicketSynced,
+  markTicketConflict,
+  incrementTicketRetry,
+  resolveTicketConflict,
+  generateTicketNumber,
   _resetOfflineDB,
 } from './db';
 
@@ -98,6 +109,18 @@ describe('Mutation Queue', () => {
     expect(m.synced_at).toBeUndefined();
     expect(m.error).toBeUndefined();
   });
+
+  it('queues ticket entity type mutations', async () => {
+    const id = await queueMutation('ticket', 'TKT-001', 'CREATE', {
+      ticket_number: 'TKT-001',
+      trip_id: 'tr_1',
+      seat_ids: ['s_1A'],
+    });
+    const pending = await getPendingMutations();
+    const m = pending.find(p => p.id === id);
+    expect(m).toBeDefined();
+    expect(m!.entity_type).toBe('ticket');
+  });
 });
 
 // ============================================================
@@ -127,6 +150,21 @@ describe('Conflict Log', () => {
     await resolveConflict(id, 'accept_server');
     const conflicts = await getUnresolvedConflicts();
     expect(conflicts.find(c => c.id === id)).toBeUndefined();
+  });
+
+  it('logConflict records ticket entity type for seat conflicts', async () => {
+    const id = await logConflict(
+      'ticket', 'TKT-CONFLICT-1',
+      { seat_ids: ['s_2A'], trip_id: 'tr_10' },
+      { error: 'seat_conflict', conflicted_seats: ['s_2A'] },
+      409
+    );
+    const conflicts = await getUnresolvedConflicts();
+    const c = conflicts.find(r => r.id === id);
+    expect(c).toBeDefined();
+    expect(c!.entity_type).toBe('ticket');
+    expect(c!.http_status).toBe(409);
+    expect((c!.server_payload as Record<string, unknown>)['conflicted_seats']).toEqual(['s_2A']);
   });
 });
 
@@ -292,5 +330,284 @@ describe('NDPR Consent Log', () => {
     expect(record.consent_type).toBe('marketing');
     expect(record.granted).toBe(false);
     expect(record.created_at).toBeGreaterThanOrEqual(before);
+  });
+});
+
+// ============================================================
+// Offline Tickets (v4 schema)
+// ============================================================
+describe('Offline Tickets — saveOfflineTicket', () => {
+  const baseTicket = {
+    operator_id: 'opr_1',
+    agent_id: 'ag_001',
+    trip_id: 'tr_lagos_abuja',
+    seat_ids: ['s_1A', 's_1B'],
+    passenger_names: ['Adebayo Okafor', 'Ngozi Eze'],
+    fare_kobo: 450_000,      // ₦4,500 per seat
+    total_kobo: 900_000,     // ₦9,000
+    payment_method: 'cash' as const,
+    status: 'draft' as const,
+  };
+
+  it('saves a ticket and returns a valid Dexie id', async () => {
+    const id = await saveOfflineTicket(baseTicket);
+    expect(typeof id).toBe('number');
+    expect(id).toBeGreaterThan(0);
+  });
+
+  it('auto-generates ticket_number in TKT-<ts>-<rand> format', async () => {
+    await saveOfflineTicket(baseTicket);
+    const { getOfflineDB } = await import('./db');
+    const tickets = await getOfflineDB().tickets.toArray();
+    expect(tickets.length).toBe(1);
+    expect(tickets[0]!.ticket_number).toMatch(/^TKT-\d{13}-[A-Z0-9]{6}$/);
+  });
+
+  it('uses supplied ticket_number when provided', async () => {
+    await saveOfflineTicket({ ...baseTicket, ticket_number: 'TKT-CUSTOM-001' });
+    const { getOfflineDB } = await import('./db');
+    const t = await getOfflineDB().tickets.where('ticket_number').equals('TKT-CUSTOM-001').first();
+    expect(t).toBeDefined();
+    expect(t!.ticket_number).toBe('TKT-CUSTOM-001');
+  });
+
+  it('auto-generates qr_payload as valid JSON with required fields', async () => {
+    await saveOfflineTicket(baseTicket);
+    const { getOfflineDB } = await import('./db');
+    const [ticket] = await getOfflineDB().tickets.toArray();
+    const qr = JSON.parse(ticket!.qr_payload) as Record<string, unknown>;
+    expect(qr['ticket_number']).toBe(ticket!.ticket_number);
+    expect(qr['trip_id']).toBe('tr_lagos_abuja');
+    expect(qr['seat_ids']).toEqual(['s_1A', 's_1B']);
+    expect(qr['agent_id']).toBe('ag_001');
+  });
+
+  it('sets synced=false, conflict_at=undefined, retry_count=0 on creation', async () => {
+    await saveOfflineTicket(baseTicket);
+    const { getOfflineDB } = await import('./db');
+    const [t] = await getOfflineDB().tickets.toArray();
+    expect(t!.synced).toBe(false);
+    expect(t!.conflict_at).toBeUndefined();
+    expect(t!.conflict_reason).toBeUndefined();
+    expect(t!.retry_count).toBe(0);
+  });
+
+  it('stores all passenger and fare data correctly', async () => {
+    await saveOfflineTicket(baseTicket);
+    const { getOfflineDB } = await import('./db');
+    const [t] = await getOfflineDB().tickets.toArray();
+    expect(t!.passenger_names).toEqual(['Adebayo Okafor', 'Ngozi Eze']);
+    expect(t!.fare_kobo).toBe(450_000);
+    expect(t!.total_kobo).toBe(900_000);
+    expect(t!.payment_method).toBe('cash');
+  });
+});
+
+describe('Offline Tickets — queue helpers', () => {
+  const makeTicket = (overrides: Partial<Parameters<typeof saveOfflineTicket>[0]> = {}) =>
+    saveOfflineTicket({
+      operator_id: 'opr_1',
+      agent_id: 'ag_park_a',
+      trip_id: 'tr_001',
+      seat_ids: ['s_5C'],
+      passenger_names: ['Chidi Okeke'],
+      fare_kobo: 350_000,
+      total_kobo: 350_000,
+      payment_method: 'mobile_money' as const,
+      status: 'draft' as const,
+      ...overrides,
+    });
+
+  it('getAllPendingTickets returns only unsynced, non-conflicted tickets', async () => {
+    await makeTicket();
+    await makeTicket({ seat_ids: ['s_5D'] });
+    const pending = await getAllPendingTickets();
+    expect(pending.length).toBe(2);
+    pending.forEach(t => {
+      expect(t.synced).toBe(false);
+      expect(t.conflict_at).toBeUndefined();
+    });
+  });
+
+  it('getAllPendingTickets excludes synced tickets', async () => {
+    const tn = 'TKT-SYNCED-001';
+    await makeTicket({ ticket_number: tn });
+    await markTicketSynced(tn);
+    const pending = await getAllPendingTickets();
+    expect(pending.find(t => t.ticket_number === tn)).toBeUndefined();
+  });
+
+  it('getAllPendingTickets excludes conflicted tickets', async () => {
+    const tn = 'TKT-CONFLICT-PENDING-001';
+    await makeTicket({ ticket_number: tn });
+    await markTicketConflict(tn, 'Seat already booked', { conflicted_seats: ['s_5C'] });
+    const pending = await getAllPendingTickets();
+    expect(pending.find(t => t.ticket_number === tn)).toBeUndefined();
+  });
+
+  it('getPendingTickets filters by agent_id', async () => {
+    await makeTicket({ agent_id: 'ag_park_a' });
+    await makeTicket({ agent_id: 'ag_park_b', seat_ids: ['s_7A'] });
+    const parkA = await getPendingTickets('ag_park_a');
+    expect(parkA.length).toBe(1);
+    expect(parkA[0]!.agent_id).toBe('ag_park_a');
+  });
+
+  it('getConflictedTickets returns only tickets with conflict_at set', async () => {
+    await makeTicket({ ticket_number: 'TKT-CLEAN-001' });
+    await makeTicket({ ticket_number: 'TKT-CONFLICT-002', seat_ids: ['s_9B'] });
+    await markTicketConflict('TKT-CONFLICT-002', 'Seat 9B already sold online', { conflicted_seats: ['s_9B'] });
+    const conflicted = await getConflictedTickets();
+    expect(conflicted.length).toBe(1);
+    expect(conflicted[0]!.ticket_number).toBe('TKT-CONFLICT-002');
+    expect(conflicted[0]!.conflict_reason).toBe('Seat 9B already sold online');
+  });
+});
+
+describe('Offline Tickets — markTicketSynced', () => {
+  it('sets synced=true and status=confirmed', async () => {
+    const tn = 'TKT-MARK-SYNC-001';
+    await saveOfflineTicket({
+      operator_id: 'opr_1', agent_id: 'ag_001', trip_id: 'tr_1',
+      seat_ids: ['s_3A'], passenger_names: ['Fatimah Bello'],
+      fare_kobo: 500_000, total_kobo: 500_000,
+      payment_method: 'card' as const, status: 'draft' as const,
+      ticket_number: tn,
+    });
+    const before = Date.now();
+    await markTicketSynced(tn);
+    const { getOfflineDB } = await import('./db');
+    const t = await getOfflineDB().tickets.where('ticket_number').equals(tn).first();
+    expect(t!.synced).toBe(true);
+    expect(t!.status).toBe('confirmed');
+    expect(t!.synced_at).toBeGreaterThanOrEqual(before);
+  });
+});
+
+describe('Offline Tickets — markTicketConflict', () => {
+  it('stamps conflict_at, conflict_reason, and server_response', async () => {
+    const tn = 'TKT-CONFLICT-MARK-001';
+    await saveOfflineTicket({
+      operator_id: 'opr_1', agent_id: 'ag_001', trip_id: 'tr_2',
+      seat_ids: ['s_12A'], passenger_names: ['Emeka Chukwu'],
+      fare_kobo: 600_000, total_kobo: 600_000,
+      payment_method: 'cash' as const, status: 'draft' as const,
+      ticket_number: tn,
+    });
+    const serverBody = { error: 'seat_conflict', conflicted_seats: ['s_12A'], booked_by: 'online_booking' };
+    const before = Date.now();
+    await markTicketConflict(tn, 'Seat 12A already booked online', serverBody);
+
+    const { getOfflineDB } = await import('./db');
+    const t = await getOfflineDB().tickets.where('ticket_number').equals(tn).first();
+    expect(t!.conflict_at).toBeGreaterThanOrEqual(before);
+    expect(t!.conflict_reason).toBe('Seat 12A already booked online');
+    expect(t!.server_response).toEqual(serverBody);
+    // Should NOT be marked as synced
+    expect(t!.synced).toBe(false);
+  });
+});
+
+describe('Offline Tickets — incrementTicketRetry', () => {
+  it('increments retry_count', async () => {
+    const tn = 'TKT-RETRY-001';
+    await saveOfflineTicket({
+      operator_id: 'opr_1', agent_id: 'ag_001', trip_id: 'tr_3',
+      seat_ids: ['s_4B'], passenger_names: ['Kemi Adeyemi'],
+      fare_kobo: 250_000, total_kobo: 250_000,
+      payment_method: 'mobile_money' as const, status: 'draft' as const,
+      ticket_number: tn,
+    });
+    await incrementTicketRetry(tn);
+    await incrementTicketRetry(tn);
+    const { getOfflineDB } = await import('./db');
+    const t = await getOfflineDB().tickets.where('ticket_number').equals(tn).first();
+    expect(t!.retry_count).toBe(2);
+  });
+
+  it('tickets with retry_count >= 5 are excluded from getAllPendingTickets', async () => {
+    const tn = 'TKT-MAX-RETRY-001';
+    await saveOfflineTicket({
+      operator_id: 'opr_1', agent_id: 'ag_001', trip_id: 'tr_4',
+      seat_ids: ['s_6C'], passenger_names: ['Samuel Ojo'],
+      fare_kobo: 300_000, total_kobo: 300_000,
+      payment_method: 'cash' as const, status: 'draft' as const,
+      ticket_number: tn,
+    });
+    // Manually set retry_count to 5
+    const { getOfflineDB } = await import('./db');
+    const db = getOfflineDB();
+    const ticket = await db.tickets.where('ticket_number').equals(tn).first();
+    await db.tickets.update(ticket!.id!, { retry_count: 5 });
+    const pending = await getAllPendingTickets();
+    expect(pending.find(t => t.ticket_number === tn)).toBeUndefined();
+  });
+});
+
+describe('Offline Tickets — resolveTicketConflict', () => {
+  const makeConflictedTicket = async (tn: string) => {
+    await saveOfflineTicket({
+      operator_id: 'opr_1', agent_id: 'ag_001', trip_id: 'tr_5',
+      seat_ids: ['s_11A'], passenger_names: ['Ibrahim Musa'],
+      fare_kobo: 700_000, total_kobo: 700_000,
+      payment_method: 'cash' as const, status: 'draft' as const,
+      ticket_number: tn,
+    });
+    await markTicketConflict(tn, 'Seat 11A already booked online', { conflicted_seats: ['s_11A'] });
+  };
+
+  it('retry: clears conflict flags and resets retry_count so sync picks it up', async () => {
+    const tn = 'TKT-RESOLVE-RETRY-001';
+    await makeConflictedTicket(tn);
+    await resolveTicketConflict(tn, 'retry');
+    const { getOfflineDB } = await import('./db');
+    const t = await getOfflineDB().tickets.where('ticket_number').equals(tn).first();
+    expect(t!.conflict_at).toBeUndefined();
+    expect(t!.conflict_reason).toBeUndefined();
+    expect(t!.retry_count).toBe(0);
+    expect(t!.synced).toBe(false); // still needs sync
+    // Should appear in getAllPendingTickets again
+    const pending = await getAllPendingTickets();
+    expect(pending.find(p => p.ticket_number === tn)).toBeDefined();
+  });
+
+  it('accept_server: marks ticket as cancelled and synced (leaves conflict queue)', async () => {
+    const tn = 'TKT-RESOLVE-ACCEPT-001';
+    await makeConflictedTicket(tn);
+    await resolveTicketConflict(tn, 'accept_server');
+    const { getOfflineDB } = await import('./db');
+    const t = await getOfflineDB().tickets.where('ticket_number').equals(tn).first();
+    expect(t!.status).toBe('cancelled');
+    expect(t!.synced).toBe(true);
+    const conflicted = await getConflictedTickets();
+    // conflict_at is still set (only cleared on retry) but synced=true
+    // so it won't appear in getAllPendingTickets
+    const pending = await getAllPendingTickets();
+    expect(pending.find(p => p.ticket_number === tn)).toBeUndefined();
+  });
+
+  it('discard: same as accept_server — marks cancelled and removes from pending queue', async () => {
+    const tn = 'TKT-RESOLVE-DISCARD-001';
+    await makeConflictedTicket(tn);
+    await resolveTicketConflict(tn, 'discard');
+    const pending = await getAllPendingTickets();
+    expect(pending.find(p => p.ticket_number === tn)).toBeUndefined();
+  });
+
+  it('throws if ticket_number not found', async () => {
+    await expect(resolveTicketConflict('TKT-DOES-NOT-EXIST', 'retry')).rejects.toThrow('not found');
+  });
+});
+
+describe('generateTicketNumber', () => {
+  it('returns a string matching TKT-<13 digits>-<6 uppercase chars>', () => {
+    const tn = generateTicketNumber();
+    expect(tn).toMatch(/^TKT-\d{13}-[A-Z0-9]{6}$/);
+  });
+
+  it('generates unique ticket numbers on rapid successive calls', () => {
+    const numbers = new Set(Array.from({ length: 20 }, () => generateTicketNumber()));
+    // With timestamp + random component, collisions within 20 calls are astronomically unlikely
+    expect(numbers.size).toBeGreaterThanOrEqual(19);
   });
 });

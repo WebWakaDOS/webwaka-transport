@@ -1,7 +1,7 @@
 /**
  * WebWaka Transport Suite — Offline-First IndexedDB (Dexie v2)
- * Stores pending mutations, offline transactions, cached trip/seat data,
- * agent sessions, conflict logs, and NDPR consent records.
+ * Stores pending mutations, offline transactions, offline tickets,
+ * cached trip/seat data, agent sessions, conflict logs, and NDPR consent.
  * Invariant: Offline-First — all mutations queue locally before syncing.
  */
 import Dexie, { type Table } from 'dexie';
@@ -12,7 +12,7 @@ import Dexie, { type Table } from 'dexie';
 
 export interface OfflineMutation {
   id?: number;
-  entity_type: 'trip' | 'seat' | 'booking' | 'transaction';
+  entity_type: 'trip' | 'seat' | 'booking' | 'transaction' | 'ticket';
   entity_id: string;
   action: 'CREATE' | 'UPDATE' | 'DELETE';
   payload: Record<string, unknown>;
@@ -40,6 +40,46 @@ export interface OfflineTransaction {
   created_at: number;
   synced: boolean;
   synced_at: number | undefined;
+}
+
+/**
+ * OfflineTicket — passenger-facing ticket record.
+ * Distinct from OfflineTransaction (agent ledger entry):
+ * - carries QR payload for boarding scan
+ * - tracks conflict state (seat already booked online)
+ * - carries ticket_number for display on the physical receipt
+ *
+ * Table: `tickets`
+ */
+export interface OfflineTicket {
+  id?: number;
+  ticket_number: string;           // locally generated: TKT-<ts>-<random6>
+  operator_id: string;
+  agent_id: string;
+  trip_id: string;
+  seat_ids: string[];
+  passenger_names: string[];
+  fare_kobo: number;               // per-seat fare in kobo
+  total_kobo: number;              // seat_ids.length × fare_kobo
+  payment_method: 'cash' | 'mobile_money' | 'card';
+  /**
+   * QR payload encoded into the printable QR code.
+   * Format (JSON stringified): { ticket_number, trip_id, seat_ids, agent_id }
+   * Scanned by the supervisor boarding-scan endpoint.
+   */
+  qr_payload: string;
+  status: 'draft' | 'confirmed' | 'cancelled';
+  synced: boolean;
+  synced_at: number | undefined;
+  /**
+   * Conflict tracking — set when the server returns 409 during sync
+   * (e.g., a seat was already confirmed by another agent online).
+   */
+  conflict_at: number | undefined;
+  conflict_reason: string | undefined;
+  server_response: Record<string, unknown> | undefined;
+  retry_count: number;
+  created_at: number;
 }
 
 export interface CachedTrip {
@@ -133,6 +173,7 @@ export interface NdprConsentRecord {
 class TransportOfflineDB extends Dexie {
   mutations!: Table<OfflineMutation>;
   transactions!: Table<OfflineTransaction>;
+  tickets!: Table<OfflineTicket>;
   trips!: Table<CachedTrip>;
   seats!: Table<CachedSeat>;
   bookings!: Table<OfflineBooking>;
@@ -194,6 +235,33 @@ class TransportOfflineDB extends Dexie {
         if (t.synced_at === undefined) t.synced_at = undefined;
       });
     });
+
+    /**
+     * v4 schema: adds the `tickets` table.
+     *
+     * `tickets` is a passenger-facing ticket record that differs from
+     * `transactions` (the agent's ledger entry) in three key ways:
+     *   1. It carries a pre-generated `qr_payload` for boarding scan.
+     *   2. It records `conflict_at` / `conflict_reason` when the server
+     *      returns 409 (seat already booked online) during sync.
+     *   3. It surfaces `ticket_number` for printing on physical receipts.
+     *
+     * Indexes: ticket_number (unique lookup), trip_id, agent_id, synced,
+     *          conflict_at (for the conflict resolution UI).
+     */
+    this.version(4).stores({
+      mutations: '++id, entity_type, entity_id, status, next_retry_at, created_at',
+      transactions: '++id, local_id, agent_id, trip_id, synced, idempotencyKey, created_at',
+      tickets: '++id, ticket_number, trip_id, agent_id, synced, conflict_at, created_at',
+      trips: 'id, operator_id, origin, destination, departure_time, state, cached_at',
+      seats: 'id, trip_id, status, cached_at',
+      bookings: '++id, local_id, customer_id, trip_id, status, synced',
+      agent_sessions: '++id, agent_id, operator_id, expires_at',
+      conflict_log: '++id, entity_type, entity_id, created_at, resolved',
+      operator_config: 'operator_id, cached_at',
+      ndpr_consent: '++id, customer_id, consent_type, created_at',
+    });
+    // No data migration needed for v4 — tickets table is brand new.
   }
 }
 
@@ -357,6 +425,151 @@ export async function incrementTransactionRetry(local_id: string): Promise<void>
     retry_count: newCount,
     error_at: newCount >= 5 ? Date.now() : txn.error_at,
   });
+}
+
+// ============================================================
+// Offline Ticket Helpers (TRN-2 Agent POS — tickets table)
+// ============================================================
+
+/** Generate a human-readable local ticket number, e.g. TKT-1714000000000-a3f7b2 */
+export function generateTicketNumber(): string {
+  const ts = Date.now();
+  const rand = Math.random().toString(36).slice(2, 8).toUpperCase();
+  return `TKT-${ts}-${rand}`;
+}
+
+type NewOfflineTicket = Omit<
+  OfflineTicket,
+  'id' | 'ticket_number' | 'qr_payload' | 'synced' | 'synced_at' | 'conflict_at' | 'conflict_reason' | 'server_response' | 'retry_count' | 'created_at'
+> & {
+  ticket_number?: string;
+  qr_payload?: string;
+  created_at?: number;
+};
+
+/**
+ * Save an offline ticket to Dexie.
+ * Automatically:
+ *   - generates `ticket_number` if not supplied
+ *   - generates `qr_payload` (JSON with ticket_number, trip_id, seat_ids, agent_id)
+ * Returns the Dexie auto-increment id.
+ */
+export async function saveOfflineTicket(ticket: NewOfflineTicket): Promise<number> {
+  const ticket_number = ticket.ticket_number ?? generateTicketNumber();
+  const qr_payload = ticket.qr_payload ?? JSON.stringify({
+    ticket_number,
+    trip_id: ticket.trip_id,
+    seat_ids: ticket.seat_ids,
+    agent_id: ticket.agent_id,
+  });
+
+  const record: Omit<OfflineTicket, 'id'> = {
+    ...ticket,
+    ticket_number,
+    qr_payload,
+    created_at: ticket.created_at ?? Date.now(),
+    synced: false,
+    synced_at: undefined,
+    conflict_at: undefined,
+    conflict_reason: undefined,
+    server_response: undefined,
+    retry_count: 0,
+  };
+  return getOfflineDB().tickets.add(record);
+}
+
+/** All unsynced tickets (no conflict filter) — for the SyncEngine flush. */
+export async function getAllPendingTickets(): Promise<OfflineTicket[]> {
+  const all = await getOfflineDB().tickets.toArray();
+  return all.filter(t => !t.synced && !t.conflict_at && (t.retry_count ?? 0) < 5);
+}
+
+/** Tickets for a specific agent — for the Agent POS "Pending" tab. */
+export async function getPendingTickets(agent_id: string): Promise<OfflineTicket[]> {
+  const rows = await getOfflineDB().tickets
+    .where('agent_id').equals(agent_id)
+    .toArray();
+  return rows.filter(t => !t.synced && !t.conflict_at);
+}
+
+/** Tickets with unresolved seat conflicts — for the conflict resolution UI. */
+export async function getConflictedTickets(): Promise<OfflineTicket[]> {
+  const all = await getOfflineDB().tickets.toArray();
+  return all.filter(t => !!t.conflict_at);
+}
+
+export async function markTicketSynced(ticket_number: string, synced_at?: number): Promise<void> {
+  const db = getOfflineDB();
+  const ticket = await db.tickets.where('ticket_number').equals(ticket_number).first();
+  if (ticket?.id !== undefined) {
+    await db.tickets.update(ticket.id, {
+      synced: true,
+      status: 'confirmed',
+      synced_at: synced_at ?? Date.now(),
+    });
+  }
+}
+
+/**
+ * Mark a ticket as conflicted (409 from server).
+ * Conflicted tickets are surfaced in the conflict resolution UI.
+ * The agent can choose to: retry (re-queue), accept server state (discard),
+ * or transfer the passenger to another seat.
+ */
+export async function markTicketConflict(
+  ticket_number: string,
+  reason: string,
+  server_response: Record<string, unknown>
+): Promise<void> {
+  const db = getOfflineDB();
+  const ticket = await db.tickets.where('ticket_number').equals(ticket_number).first();
+  if (ticket?.id !== undefined) {
+    await db.tickets.update(ticket.id, {
+      conflict_at: Date.now(),
+      conflict_reason: reason,
+      server_response,
+    });
+  }
+}
+
+export async function incrementTicketRetry(ticket_number: string): Promise<void> {
+  const db = getOfflineDB();
+  const ticket = await db.tickets.where('ticket_number').equals(ticket_number).first();
+  if (ticket?.id === undefined) return;
+  await db.tickets.update(ticket.id, {
+    retry_count: (ticket.retry_count ?? 0) + 1,
+  });
+}
+
+/**
+ * Resolve a conflicted ticket.
+ * - `retry`: clears conflict flags, resets retry_count so sync picks it up again
+ * - `accept_server`: marks the ticket as cancelled (server already confirmed another booking)
+ * - `discard`: marks the ticket as cancelled and removes it from the conflict queue
+ */
+export async function resolveTicketConflict(
+  ticket_number: string,
+  resolution: 'retry' | 'accept_server' | 'discard'
+): Promise<void> {
+  const db = getOfflineDB();
+  const ticket = await db.tickets.where('ticket_number').equals(ticket_number).first();
+  if (ticket?.id === undefined) throw new Error(`Ticket ${ticket_number} not found`);
+
+  if (resolution === 'retry') {
+    await db.tickets.update(ticket.id, {
+      conflict_at: undefined,
+      conflict_reason: undefined,
+      server_response: undefined,
+      retry_count: 0,
+    });
+  } else {
+    // accept_server or discard — mark cancelled and flag as "resolved"
+    await db.tickets.update(ticket.id, {
+      status: 'cancelled',
+      synced: true,  // treat as resolved so it leaves the pending queue
+      synced_at: Date.now(),
+    });
+  }
 }
 
 // ============================================================
@@ -524,7 +737,7 @@ export async function getConsentHistory(customer_id: string): Promise<NdprConsen
 }
 
 // ============================================================
-// C-003: Conflict Resolution Helpers
+// C-003: Conflict Resolution Helpers (generic — mutation level)
 // ============================================================
 
 export async function getConflicts(): Promise<ConflictRecord[]> {
