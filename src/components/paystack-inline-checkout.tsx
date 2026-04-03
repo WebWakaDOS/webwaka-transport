@@ -47,18 +47,27 @@ function loadPaystackScript(): Promise<void> {
   return new Promise((resolve, reject) => {
     if (typeof window === 'undefined') { reject(new Error('Not a browser environment')); return; }
     if (window.PaystackPop) { resolve(); return; }
+
+    // Timeout safety — covers the case where the script element exists but its `load`
+    // event already fired (ad blocker, partial load) and new listeners will never fire,
+    // leaving the Promise permanently pending.
+    const timer = setTimeout(() => {
+      reject(new Error('Payment provider took too long to load. Please refresh and try again.'));
+    }, 10_000);
+    const done = (fn: () => void) => { clearTimeout(timer); fn(); };
+
     const existing = document.getElementById('paystack-inline-js');
     if (existing) {
-      existing.addEventListener('load', () => resolve());
-      existing.addEventListener('error', () => reject(new Error('Paystack script failed to load')));
+      existing.addEventListener('load', () => done(resolve));
+      existing.addEventListener('error', () => done(() => reject(new Error('Paystack script failed to load'))));
       return;
     }
     const script = document.createElement('script');
     script.id = 'paystack-inline-js';
     script.src = 'https://js.paystack.co/v1/inline.js';
     script.async = true;
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error('Failed to load Paystack. Check your connection.'));
+    script.onload = () => done(resolve);
+    script.onerror = () => done(() => reject(new Error('Failed to load Paystack. Check your connection.')));
     document.head.appendChild(script);
   });
 }

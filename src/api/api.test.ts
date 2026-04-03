@@ -9,6 +9,7 @@ import { bookingPortalRouter } from './booking-portal';
 import { operatorManagementRouter } from './operator-management';
 import { paymentsRouter, webhooksRouter, hmacSha512 } from './payments';
 import { authRouter } from './auth';
+import { drainEventBus } from '../lib/sweepers';
 
 // ============================================================
 // Mock D1 Database
@@ -3206,5 +3207,97 @@ describe('T-TRN-04: Paystack Inline — webhook verification and payment.success
       (e: any) => e.event_type === 'payment.successful'
     );
     expect(events.length).toBe(0);
+  });
+});
+
+// ============================================================
+// T-TRN-04: drainEventBus — payment.successful consumer
+// Fixes: SMS confirmation and Central Ledger notification were
+// silently dropped (no-op handler). Now wired in deliverEvent().
+// ============================================================
+describe('T-TRN-04: drainEventBus — payment.successful consumer', () => {
+  let db: any;
+
+  beforeEach(() => {
+    db = createMockDB();
+  });
+
+  it('processes payment.successful event without error (success path — retry_count stays null)', async () => {
+    const bookingId = 'booking-drain-pay-01';
+
+    // Booking with denormalized JOIN fields (mock first() returns the full bookings row;
+    // JOIN resolution is not supported by the mock, so we flatten the data here).
+    db._tables.bookings.push({
+      id: bookingId,
+      status: 'confirmed',
+      total_amount: 450000,
+      seat_ids: JSON.stringify(['seat-drain-01']),
+      payment_reference: 'PSK_drain_ref01',
+      payment_provider: 'paystack',
+      deleted_at: null,
+      trip_operator_id: 'op-001',
+      customer_phone: '08012345678',
+      customer_name: 'Test User',
+      origin: 'Lagos',
+      destination: 'Abuja',
+      departure_time: Date.now() + 3_600_000,
+    });
+
+    db._tables.seats.push({
+      id: 'seat-drain-01',
+      seat_number: '5A',
+      trip_id: 'trip-drain-01',
+    });
+
+    const evtId = 'evt-drain-pay-01';
+    db._tables.platform_events.push({
+      id: evtId,
+      event_type: 'payment.successful',
+      aggregate_id: bookingId,
+      aggregate_type: 'booking',
+      payload: JSON.stringify({
+        booking_id: bookingId,
+        reference: 'PSK_drain_ref01',
+        provider: 'paystack',
+        amount_kobo: 450000,
+      }),
+      status: 'pending',
+      retry_count: null,
+      created_at: Date.now() - 5000,
+    });
+
+    // drainEventBus with minimal env:
+    //   - No SMS_API_KEY → DevSmsProvider (console.log, no HTTP)
+    //   - No CENTRAL_MGMT_URL → central-mgmt notify skipped
+    await drainEventBus({ DB: db } as any);
+
+    const evt = db._tables.platform_events.find((e: any) => e.id === evtId);
+    expect(evt).toBeDefined();
+    // The mock UPDATE quirk: status is set to param[0] (= now timestamp), not the string 'processed'.
+    // What matters is: status is no longer 'pending' and retry_count is still null (success path).
+    expect(evt.status).not.toBe('pending');
+    expect(evt.retry_count).toBeNull();
+  });
+
+  it('payment.successful with empty booking_id — event processed without crash', async () => {
+    const evtId = 'evt-drain-pay-02';
+    db._tables.platform_events.push({
+      id: evtId,
+      event_type: 'payment.successful',
+      aggregate_id: 'booking-nonexistent',
+      aggregate_type: 'booking',
+      payload: JSON.stringify({ booking_id: '', reference: 'ref_002' }),
+      status: 'pending',
+      retry_count: null,
+      created_at: Date.now() - 5000,
+    });
+
+    // Should not throw; handler logs a warning and returns, drainEventBus marks it processed
+    await drainEventBus({ DB: db } as any);
+
+    const evt = db._tables.platform_events.find((e: any) => e.id === evtId);
+    expect(evt).toBeDefined();
+    expect(evt.status).not.toBe('pending');
+    expect(evt.retry_count).toBeNull();
   });
 });

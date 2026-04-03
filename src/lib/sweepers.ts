@@ -13,6 +13,7 @@
  */
 import type { Env } from '../worker';
 import { sendSms } from './sms.js';
+import { notifyBookingConfirmed } from '../core/central-mgmt.js';
 
 // ============================================================
 // B-005: Abandoned booking sweeper
@@ -401,6 +402,90 @@ async function deliverEvent(evt: Record<string, unknown>, env: Env): Promise<voi
       console.warn(`[EventBus] trip:DELAYED SMS — sent=${sent}, failed=${failed}, trip=${tripId}`);
     } catch (err) {
       console.error('[EventBus] trip:DELAYED handler error (non-fatal):', err instanceof Error ? err.message : err);
+    }
+    return;
+  }
+
+  // T-TRN-04: payment.successful → SMS booking confirmation + Central Ledger notification
+  // Emitted by confirmBookingById() after Paystack/Flutterwave payment verification.
+  if (eventType === 'payment.successful') {
+    try {
+      const payload = JSON.parse(String(evt['payload'] ?? '{}')) as Record<string, unknown>;
+      const bookingId = String(payload['booking_id'] ?? evt['aggregate_id'] ?? '');
+      if (!bookingId) {
+        console.warn('[EventBus] payment.successful — missing booking_id, skipping');
+        return;
+      }
+
+      const db = env.DB;
+      const row = await db.prepare(
+        `SELECT b.id, b.total_amount, b.seat_ids, b.payment_reference,
+                b.payment_provider, t.operator_id as trip_operator_id,
+                c.phone as customer_phone, c.name as customer_name,
+                r.origin, r.destination, t.departure_time
+         FROM bookings b
+         JOIN trips t ON t.id = b.trip_id
+         JOIN routes r ON r.id = t.route_id
+         JOIN customers c ON c.id = b.customer_id
+         WHERE b.id = ? AND b.deleted_at IS NULL`
+      ).bind(bookingId).first<{
+        id: string; total_amount: number; seat_ids: string;
+        payment_reference: string | null; payment_provider: string | null;
+        trip_operator_id: string | null;
+        customer_phone: string | null; customer_name: string | null;
+        origin: string; destination: string; departure_time: number;
+      }>();
+
+      if (!row) {
+        console.warn(`[EventBus] payment.successful — booking ${bookingId} not found`);
+        return;
+      }
+
+      // Fetch seat numbers for the SMS body
+      const seatIds = JSON.parse(row.seat_ids) as string[];
+      let seatNumbers = '';
+      if (seatIds.length > 0) {
+        const ph = seatIds.map(() => '?').join(', ');
+        const seatsResult = await db.prepare(
+          `SELECT seat_number FROM seats WHERE id IN (${ph})`
+        ).bind(...seatIds).all<{ seat_number: string }>();
+        seatNumbers = seatsResult.results.map(s => s.seat_number).join(', ');
+      }
+
+      // SMS confirmation — NDPR guard applied
+      const phone = String(row.customer_phone ?? '');
+      const origin = String(row.origin ?? '');
+      const destination = String(row.destination ?? '');
+      const departureDate = row.departure_time
+        ? new Date(Number(row.departure_time)).toLocaleDateString('en-NG', {
+            weekday: 'short', day: 'numeric', month: 'short',
+          })
+        : '';
+      const shortId = bookingId.slice(-8).toUpperCase();
+      const message =
+        `WebWaka: Booking confirmed! ${origin} → ${destination}, ${departureDate}, ` +
+        `Seat(s): ${seatNumbers}. Ref: ${shortId}. View: https://webwaka.ng/b/${bookingId}`;
+      if (phone && !phone.startsWith('NDPR_')) {
+        await sendSms(phone, message, env);
+      }
+
+      // Notify Central Ledger — non-fatal
+      await notifyBookingConfirmed(
+        env,
+        bookingId,
+        row.trip_operator_id ?? '',
+        row.total_amount ?? 0,
+        row.payment_reference ?? '',
+      ).catch((err: unknown) => {
+        console.error(
+          '[EventBus] payment.successful central-mgmt notify failed (non-fatal):',
+          err instanceof Error ? err.message : err,
+        );
+      });
+
+      console.warn(`[EventBus] payment.successful — confirmation SMS sent for booking ${bookingId}`);
+    } catch (err) {
+      console.error('[EventBus] payment.successful handler error:', err instanceof Error ? err.message : err);
     }
     return;
   }
