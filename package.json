@@ -30,13 +30,14 @@
     "url": "https://github.com/WebWakaDOS/webwaka-transport/issues"
   },
   "homepage": "https://github.com/WebWakaDOS/webwaka-transport#readme",
-  "description": "WebWaka Transport Suite \u2014 TRN-1 Seat Inventory, TRN-2 Agent Sales, TRN-3 Booking Portal, TRN-4 Operator Management",
+  "description": "WebWaka Transport Suite — TRN-1 Seat Inventory, TRN-2 Agent Sales, TRN-3 Booking Portal, TRN-4 Operator Management",
   "dependencies": {
     "@types/qrcode": "^1.5.6",
     "@webwaka/core": "github:WebWakaDOS/webwaka-core#main",
     "dexie": "^4.4.2",
     "hono": "^4.12.9",
     "jsqr": "^1.4.0",
+    "pdf-lib": "^1.17.1",
     "qrcode": "^1.5.4",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"

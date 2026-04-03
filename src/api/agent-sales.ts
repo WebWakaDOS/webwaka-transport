@@ -102,6 +102,7 @@ agentSalesRouter.post('/transactions', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN
   const {
     agent_id, trip_id, seat_ids, passenger_names, total_amount, payment_method,
     passenger_id_type, passenger_id_number, park_id, ticket_number,
+    next_of_kin_name, next_of_kin_phone,
   } = body as {
     agent_id: string; trip_id: string; seat_ids: string[]; passenger_names: string[];
     total_amount: number; payment_method: string;
@@ -110,6 +111,9 @@ agentSalesRouter.post('/transactions', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN
     // Optional: supplied when syncing an offline ticket so the client-generated
     // ticket_number is preserved in D1 for boarding-scan lookups.
     ticket_number?: string | null;
+    // T-TRN-02: Next-of-kin for FRSC manifest compliance (optional)
+    next_of_kin_name?: string | null;
+    next_of_kin_phone?: string | null;
   };
 
   if (!Number.isInteger(total_amount) || total_amount <= 0) {
@@ -184,9 +188,18 @@ agentSalesRouter.post('/transactions', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN
   try {
     await db.batch([
       db.prepare(
-        `INSERT INTO sales_transactions (id, agent_id, trip_id, seat_ids, passenger_names, total_amount, payment_method, payment_status, sync_status, receipt_id, passenger_id_type, passenger_id_hash, park_id, ticket_number, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', 'synced', ?, ?, ?, ?, ?, ?)`
-      ).bind(id, agent_id, trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, payment_method, receiptId, passenger_id_type ?? null, passenger_id_hash, park_id ?? null, ticket_number ?? null, now),
+        `INSERT INTO sales_transactions
+           (id, agent_id, trip_id, seat_ids, passenger_names, total_amount, payment_method,
+            payment_status, sync_status, receipt_id, passenger_id_type, passenger_id_hash,
+            park_id, ticket_number, next_of_kin_name, next_of_kin_phone, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        id, agent_id, trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names),
+        total_amount, payment_method, 'completed', 'synced', receiptId,
+        passenger_id_type ?? null, passenger_id_hash,
+        park_id ?? null, ticket_number ?? null,
+        next_of_kin_name ?? null, next_of_kin_phone ?? null, now
+      ),
       db.prepare(
         `INSERT INTO receipts (id, transaction_id, agent_id, trip_id, passenger_names, seat_numbers, total_amount, payment_method, qr_code, ticket_number, issued_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`

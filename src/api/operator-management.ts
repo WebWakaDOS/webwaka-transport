@@ -9,6 +9,8 @@ import type { AppContext, HonoCtx, DbOperator, DbRoute, DbVehicle, DbTrip, DbDri
 import { genId, parsePagination, metaResponse, requireFields, applyTenantScope } from './types';
 import { getOperatorConfig, validateOperatorConfig } from '../lib/operator-config.js';
 import { sendSms } from '../lib/sms.js';
+import { generateManifestPdf } from '../core/pdf/manifest.js';
+import type { ManifestPdfInput } from '../core/pdf/manifest.js';
 
 export const operatorManagementRouter = new Hono<AppContext>();
 
@@ -1095,15 +1097,21 @@ operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 
       return c.json({ success: false, error: 'Forbidden — this trip belongs to a different operator' }, 403);
     }
 
-    const [routeRow, bookingsResult, seatsResult, driverRow, agentSalesResult] = await Promise.all([
+    const [routeRow, bookingsResult, seatsResult, driverRow, agentSalesResult, operatorRow] = await Promise.all([
       db.prepare(
         `SELECT origin, destination, base_fare FROM routes WHERE id = ?`
       ).bind(trip.route_id).first<{ origin: string; destination: string; base_fare: number }>(),
       db.prepare(
-        `SELECT id, customer_id, seat_ids, passenger_names, status, payment_status, payment_method, total_amount, boarded_at, created_at
+        `SELECT id, customer_id, seat_ids, passenger_names, status, payment_status, payment_method,
+                total_amount, boarded_at, created_at, next_of_kin_name, next_of_kin_phone
          FROM bookings WHERE trip_id = ? AND deleted_at IS NULL AND status != 'cancelled'
          ORDER BY created_at ASC`
-      ).bind(id).all<{ id: string; customer_id: string; seat_ids: string; passenger_names: string; status: string; payment_status: string; payment_method: string; total_amount: number; boarded_at: number | null; created_at: number }>(),
+      ).bind(id).all<{
+        id: string; customer_id: string; seat_ids: string; passenger_names: string;
+        status: string; payment_status: string; payment_method: string; total_amount: number;
+        boarded_at: number | null; created_at: number;
+        next_of_kin_name: string | null; next_of_kin_phone: string | null;
+      }>(),
       db.prepare(
         `SELECT id FROM seats WHERE trip_id = ?`
       ).bind(id).all<{ id: string }>(),
@@ -1111,15 +1119,23 @@ operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 
         ? db.prepare(`SELECT id, name, phone, license_number FROM drivers WHERE id = ?`)
             .bind(trip.driver_id).first<{ id: string; name: string; phone: string; license_number: string | null }>()
         : Promise.resolve(null),
-      // P07-T5: Include agent-sold tickets in manifest for FRSC compliance
+      // P07-T5 + T-TRN-02: Include agent-sold tickets in manifest for FRSC compliance
       db.prepare(
-        `SELECT st.id, st.agent_id, st.seat_ids, st.passenger_names, st.total_amount, st.payment_method, st.passenger_id_type, st.created_at,
-                a.name AS agent_name
+        `SELECT st.id, st.agent_id, st.seat_ids, st.passenger_names, st.total_amount, st.payment_method,
+                st.passenger_id_type, st.passenger_id_hash, st.next_of_kin_name, st.next_of_kin_phone,
+                st.created_at, a.name AS agent_name
          FROM sales_transactions st
          JOIN agents a ON st.agent_id = a.id
          WHERE st.trip_id = ? AND st.deleted_at IS NULL AND st.payment_status = 'completed'
          ORDER BY st.created_at ASC`
-      ).bind(id).all<{ id: string; agent_id: string; agent_name: string; seat_ids: string; passenger_names: string; total_amount: number; payment_method: string; passenger_id_type: string | null; created_at: number }>(),
+      ).bind(id).all<{
+        id: string; agent_id: string; agent_name: string; seat_ids: string; passenger_names: string;
+        total_amount: number; payment_method: string; passenger_id_type: string | null;
+        passenger_id_hash: string | null;
+        next_of_kin_name: string | null; next_of_kin_phone: string | null; created_at: number;
+      }>(),
+      db.prepare(`SELECT name FROM operators WHERE id = ?`).bind(trip.operator_id)
+        .first<{ name: string }>(),
     ]);
 
     // Pre-load seat number lookup for all seats on this trip
@@ -1161,6 +1177,8 @@ operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 
           boarded_at: bkg.boarded_at,
           booked_at: bkg.created_at,
           qr_payload: `${bkg.id}:${seatIds.join(',')}`,
+          next_of_kin_name: bkg.next_of_kin_name,
+          next_of_kin_phone: bkg.next_of_kin_phone,
         };
       })
     );
@@ -1169,7 +1187,7 @@ operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 
       .filter(b => b.payment_status === 'paid' || b.status === 'confirmed')
       .reduce((sum, b) => sum + b.total_amount, 0);
 
-    // Build agent sales summary for manifest (P07-T5 FRSC compliance)
+    // Build agent sales summary for manifest (P07-T5 + T-TRN-02 FRSC compliance)
     const agentSales = agentSalesResult.results.map(txn => {
       let seatIds: string[] = [];
       let passengerNames: string[] = [];
@@ -1184,6 +1202,9 @@ operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 
         seat_numbers: seatNumbers,
         passenger_names: passengerNames,
         passenger_id_type: txn.passenger_id_type,
+        passenger_id_hash: txn.passenger_id_hash,
+        next_of_kin_name: txn.next_of_kin_name,
+        next_of_kin_phone: txn.next_of_kin_phone,
         payment_method: txn.payment_method,
         total_amount: txn.total_amount,
         sold_at: txn.created_at,
@@ -1209,6 +1230,68 @@ operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 
         headers: {
           'Content-Type': 'text/csv; charset=utf-8',
           'Content-Disposition': `attachment; filename="manifest_${id}_${tripDate}.csv"`,
+        },
+      });
+    }
+
+    // T-TRN-02: PDF manifest — ?format=pdf or Accept: application/pdf
+    // Uses the modular core PDF utility (src/core/pdf/manifest.ts)
+    // NDPR: ID hashes are truncated, next-of-kin phone numbers are masked
+    const wantPdf = acceptHeader.includes('application/pdf') || c.req.query('format') === 'pdf';
+    if (wantPdf) {
+      const tripDate = new Date(trip.departure_time).toISOString().slice(0, 10);
+      let serial = 0;
+
+      // Combine bookings and agent sales into a single passenger list for the PDF
+      const pdfPassengers: ManifestPdfInput['passengers'] = [
+        ...passengers.map(p => ({
+          serial: ++serial,
+          seat_numbers: p.seat_numbers,
+          passenger_names: p.passenger_names,
+          next_of_kin_name: p.next_of_kin_name,
+          next_of_kin_phone: p.next_of_kin_phone,
+          id_type: null,
+          id_hash: null,
+          boarded_at: p.boarded_at,
+          source: 'booking' as const,
+        })),
+        ...agentSales.map(a => ({
+          serial: ++serial,
+          seat_numbers: a.seat_numbers,
+          passenger_names: a.passenger_names,
+          next_of_kin_name: a.next_of_kin_name,
+          next_of_kin_phone: a.next_of_kin_phone,
+          id_type: a.passenger_id_type,
+          id_hash: a.passenger_id_hash,
+          boarded_at: null,
+          source: 'agent' as const,
+        })),
+      ];
+
+      const pdfInput: ManifestPdfInput = {
+        operator_name: operatorRow?.name ?? 'Unknown Operator',
+        trip: {
+          id: trip.id,
+          origin: routeRow?.origin ?? '',
+          destination: routeRow?.destination ?? '',
+          departure_time: trip.departure_time,
+          state: trip.state,
+          plate_number: null,
+        },
+        driver: driverRow
+          ? { name: driverRow.name, phone: driverRow.phone, license_number: driverRow.license_number }
+          : null,
+        passengers: pdfPassengers,
+        total_seats: seatsResult.results.length,
+        generated_at: Date.now(),
+      };
+
+      const pdfBytes = await generateManifestPdf(pdfInput);
+      return new Response(pdfBytes, {
+        headers: {
+          'Content-Type': 'application/pdf',
+          'Content-Disposition': `attachment; filename="manifest_${id}_${tripDate}.pdf"`,
+          'Cache-Control': 'private, no-store',
         },
       });
     }

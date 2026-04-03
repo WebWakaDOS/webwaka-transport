@@ -83,6 +83,9 @@ export interface ManifestEntry {
   booked_at: number;
   boarded_at?: number | null;
   boarded_by?: string | null;
+  // T-TRN-02: Next-of-kin for FRSC manifest compliance
+  next_of_kin_name?: string | null;
+  next_of_kin_phone?: string | null;
 }
 
 export interface TripManifest {
@@ -716,6 +719,22 @@ export class ApiClient {
 
   async getTripManifest(tripId: string): Promise<TripManifest> {
     return this.request<TripManifest>('GET', `/api/operator/trips/${tripId}/manifest`);
+  }
+
+  // T-TRN-02: Download the passenger manifest as a PDF blob.
+  // Resolves with a Blob ready for window.URL.createObjectURL().
+  async downloadManifestPdf(tripId: string): Promise<Blob> {
+    const token = getStoredToken();
+    const headers: Record<string, string> = { Accept: 'application/pdf' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const response = await fetch(`${this.base}/api/operator/trips/${tripId}/manifest?format=pdf`, {
+      headers,
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => 'Unknown error');
+      throw new Error(`PDF download failed (${response.status}): ${text}`);
+    }
+    return response.blob();
   }
 
   async getBookingById(id: string): Promise<Booking> {

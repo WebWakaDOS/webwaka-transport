@@ -9,6 +9,7 @@ import jsQR from 'jsqr';
 import { api, ApiError } from '../api/client';
 import type { Trip, TripDetail, TripManifest, ManifestEntry, BoardingStatus, InspectionRecord } from '../api/client';
 import { queueMutation } from '../core/offline/db';
+import { ManifestExportButtons } from './manifest-export';
 
 // ============================================================
 // Helpers
@@ -659,6 +660,12 @@ function ManifestView({ tripId, onBack }: { tripId: string; onBack: () => void }
               <span><strong>{passengers.length}</strong> passengers</span>
               <span style={{ color: '#16a34a' }}><strong>{boardedCount}</strong> boarded</span>
               <span style={{ color: '#f59e0b' }}><strong>{passengers.length - boardedCount}</strong> pending</span>
+            </div>
+            <div style={{ marginTop: 12 }}>
+              <ManifestExportButtons
+                tripId={tripId}
+                tripLabel={`${manifest.trip.origin}-${manifest.trip.destination}_${new Date(manifest.trip.departure_time).toISOString().slice(0, 10)}`}
+              />
             </div>
           </div>
           {passengers.length === 0 ? (

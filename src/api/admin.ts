@@ -603,6 +603,16 @@ const MIGRATIONS: Migration[] = [
       `ALTER TABLE bookings ADD COLUMN reminder_2h_sent_at INTEGER`,
     ],
   },
+  {
+    name: '017_trn02_manifest_next_of_kin',
+    statements: [
+      // T-TRN-02: Next-of-kin capture for FRSC digital manifest compliance
+      `ALTER TABLE bookings ADD COLUMN next_of_kin_name TEXT`,
+      `ALTER TABLE bookings ADD COLUMN next_of_kin_phone TEXT`,
+      `ALTER TABLE sales_transactions ADD COLUMN next_of_kin_name TEXT`,
+      `ALTER TABLE sales_transactions ADD COLUMN next_of_kin_phone TEXT`,
+    ],
+  },
 ];
 
 export const adminRouter = new Hono<{ Bindings: AdminEnv }>();

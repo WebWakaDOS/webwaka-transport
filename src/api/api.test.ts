@@ -1799,6 +1799,191 @@ describe('Phase 8: GET /trips/:id/manifest — Trip Manifest (TRN-4)', () => {
   });
 });
 
+// ============================================================
+// T-TRN-02: Digital Passenger Manifest Export — next-of-kin, PDF, agent_sales
+// ============================================================
+describe('T-TRN-02: Manifest — next_of_kin fields in JSON response', () => {
+  let db: any;
+  beforeEach(() => {
+    db = createMockDB();
+    const now = Date.now();
+    db._tables.operators.push({
+      id: 'opr_1', name: 'Star Express', code: 'STE', phone: null, email: null,
+      status: 'active', created_at: now, updated_at: now, deleted_at: null,
+    });
+    db._tables.trips.push({
+      id: 'trp_nok1', operator_id: 'opr_1', route_id: 'rte_nok1', state: 'boarding',
+      departure_time: now + 3600_000, deleted_at: null, created_at: now, updated_at: now,
+    });
+    db._tables.routes.push({
+      id: 'rte_nok1', operator_id: 'opr_1', origin: 'Aba', destination: 'Port Harcourt',
+      base_fare: 400000, status: 'active', deleted_at: null, created_at: now, updated_at: now,
+    });
+    db._tables.seats.push(
+      { id: 'nok_s1', trip_id: 'trp_nok1', seat_number: '01', status: 'confirmed', version: 1 },
+      { id: 'nok_s2', trip_id: 'trp_nok1', seat_number: '02', status: 'available', version: 0 },
+    );
+    db._tables.customers.push({
+      id: 'cust_nok1', name: 'Emeka Nwosu', phone: '08099999999',
+      ndpr_consent: 1, status: 'active', deleted_at: null, created_at: now, updated_at: now,
+    });
+    db._tables.bookings.push({
+      id: 'bkg_nok1', customer_id: 'cust_nok1', trip_id: 'trp_nok1',
+      seat_ids: '["nok_s1"]',
+      passenger_names: '["Emeka Nwosu"]',
+      total_amount: 400000, status: 'confirmed', payment_status: 'paid',
+      payment_method: 'cash', payment_reference: 'PAY_NOK1',
+      next_of_kin_name: 'Ngozi Nwosu', next_of_kin_phone: '08011112222',
+      created_at: now, confirmed_at: now, cancelled_at: null, deleted_at: null,
+    });
+  });
+
+  it('manifest JSON includes next_of_kin_name and next_of_kin_phone for bookings', async () => {
+    const res = await operatorManagementRouter.request('/trips/trp_nok1/manifest', {}, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    const p = body.data.passengers[0];
+    expect(p.next_of_kin_name).toBe('Ngozi Nwosu');
+    expect(p.next_of_kin_phone).toBe('08011112222');
+  });
+
+  it('manifest JSON next_of_kin fields are null when not provided', async () => {
+    db._tables.bookings[0].next_of_kin_name = null;
+    db._tables.bookings[0].next_of_kin_phone = null;
+    const res = await operatorManagementRouter.request('/trips/trp_nok1/manifest', {}, makeEnv(db));
+    const body = await res.json() as any;
+    const p = body.data.passengers[0];
+    expect(p.next_of_kin_name).toBeNull();
+    expect(p.next_of_kin_phone).toBeNull();
+  });
+});
+
+describe('T-TRN-02: Manifest — agent_sales includes next_of_kin and passenger_id_hash', () => {
+  let db: any;
+  beforeEach(() => {
+    db = createMockDB();
+    const now = Date.now();
+    db._tables.operators.push({
+      id: 'opr_1', name: 'Star Express', code: 'STE', phone: null, email: null,
+      status: 'active', created_at: now, updated_at: now, deleted_at: null,
+    });
+    db._tables.trips.push({
+      id: 'trp_agtnok', operator_id: 'opr_1', route_id: 'rte_agtnok', state: 'boarding',
+      departure_time: now + 3600_000, deleted_at: null, created_at: now, updated_at: now,
+    });
+    db._tables.routes.push({
+      id: 'rte_agtnok', operator_id: 'opr_1', origin: 'Kano', destination: 'Kaduna',
+      base_fare: 300000, status: 'active', deleted_at: null, created_at: now, updated_at: now,
+    });
+    db._tables.seats.push(
+      { id: 'agtnok_s1', trip_id: 'trp_agtnok', seat_number: '01', status: 'confirmed', version: 1 },
+    );
+    db._tables.agents.push({
+      id: 'agt_nok1', operator_id: 'opr_1', name: 'Bola Agentola', phone: '08077778888',
+      status: 'active', deleted_at: null, created_at: now, updated_at: now,
+    });
+    db._tables.sales_transactions.push({
+      id: 'txn_nok1', agent_id: 'agt_nok1', trip_id: 'trp_agtnok',
+      seat_ids: '["agtnok_s1"]', passenger_names: '["Sule Ibrahim"]',
+      total_amount: 300000, payment_method: 'cash', payment_status: 'completed',
+      sync_status: 'synced', receipt_id: 'rct_nok1',
+      passenger_id_type: 'NIN',
+      passenger_id_hash: 'abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
+      next_of_kin_name: 'Fatima Sule', next_of_kin_phone: '08044445555',
+      created_at: now, deleted_at: null,
+    });
+  });
+
+  it('manifest JSON agent_sales includes next_of_kin and passenger_id_hash', async () => {
+    const res = await operatorManagementRouter.request('/trips/trp_agtnok/manifest', {}, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    const a = body.data.agent_sales[0];
+    expect(a.next_of_kin_name).toBe('Fatima Sule');
+    expect(a.next_of_kin_phone).toBe('08044445555');
+    expect(a.passenger_id_hash).toBe('abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890');
+  });
+
+  it('manifest JSON agent_sales next_of_kin fields are null when not stored', async () => {
+    db._tables.sales_transactions[0].next_of_kin_name = null;
+    db._tables.sales_transactions[0].next_of_kin_phone = null;
+    db._tables.sales_transactions[0].passenger_id_hash = null;
+    const res = await operatorManagementRouter.request('/trips/trp_agtnok/manifest', {}, makeEnv(db));
+    const body = await res.json() as any;
+    const a = body.data.agent_sales[0];
+    expect(a.next_of_kin_name).toBeNull();
+    expect(a.next_of_kin_phone).toBeNull();
+    expect(a.passenger_id_hash).toBeNull();
+  });
+});
+
+describe('T-TRN-02: POST /transactions — stores next_of_kin_name and next_of_kin_phone', () => {
+  let db: any;
+  beforeEach(() => {
+    db = createMockDB();
+    const now = Date.now();
+    db._tables.operators.push({
+      id: 'opr_1', name: 'Star Express', code: 'STE', phone: null, email: null,
+      status: 'active', created_at: now, updated_at: now, deleted_at: null,
+    });
+    db._tables.agents.push({
+      id: 'agt_nok2', operator_id: 'opr_1', name: 'Tunde Park', phone: '08055556666',
+      status: 'active', deleted_at: null, created_at: now, updated_at: now,
+    });
+    db._tables.trips.push({
+      id: 'trp_noksale', operator_id: 'opr_1', route_id: 'rte_1', state: 'boarding',
+      departure_time: now + 3600_000, deleted_at: null, created_at: now, updated_at: now,
+    });
+    db._tables.seats.push({
+      id: 'noksale_s1', trip_id: 'trp_noksale', seat_number: '01', status: 'available', version: 0,
+    });
+  });
+
+  it('stores next_of_kin_name and next_of_kin_phone when provided', async () => {
+    const res = await agentSalesRouter.request('/transactions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        agent_id: 'agt_nok2',
+        trip_id: 'trp_noksale',
+        seat_ids: ['noksale_s1'],
+        passenger_names: ['Chukwudi Eze'],
+        total_amount: 350000,
+        payment_method: 'cash',
+        next_of_kin_name: 'Ada Eze',
+        next_of_kin_phone: '08033334444',
+      }),
+    }, makeEnv(db));
+    expect(res.status).toBe(201);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    const stored = db._tables.sales_transactions.find((t: any) => t.agent_id === 'agt_nok2');
+    expect(stored).toBeDefined();
+    expect(stored.next_of_kin_name).toBe('Ada Eze');
+    expect(stored.next_of_kin_phone).toBe('08033334444');
+  });
+
+  it('stores null for next_of_kin fields when not provided', async () => {
+    const res = await agentSalesRouter.request('/transactions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        agent_id: 'agt_nok2',
+        trip_id: 'trp_noksale',
+        seat_ids: ['noksale_s1'],
+        passenger_names: ['Chukwudi Eze'],
+        total_amount: 350000,
+        payment_method: 'cash',
+      }),
+    }, makeEnv(db));
+    expect(res.status).toBe(201);
+    const stored = db._tables.sales_transactions.find((t: any) => t.agent_id === 'agt_nok2');
+    expect(stored.next_of_kin_name).toBeNull();
+    expect(stored.next_of_kin_phone).toBeNull();
+  });
+});
+
 describe('Phase 8: GET /bookings/:id — Booking Detail (TRN-3)', () => {
   let db: any;
   beforeEach(() => {
