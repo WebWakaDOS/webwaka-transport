@@ -491,19 +491,37 @@ function AgentPOSModule({ online }: { online: boolean }) {
     const agentId = user?.id ?? 'agent';
 
     if (!online) {
-      const { saveOfflineTransaction } = await import('./core/offline/db');
-      await saveOfflineTransaction({
-        local_id: `local_${Date.now()}`,
+      const { saveOfflineTicket, generateTicketNumber } = await import('./core/offline/db');
+      const ticket_number = generateTicketNumber();
+      await saveOfflineTicket({
+        ticket_number,
+        operator_id: user?.operator_id ?? '',
         agent_id: agentId,
         trip_id: tripId,
         seat_ids: selectedSeats,
         passenger_names: passArr,
+        fare_kobo: Math.round(amountKobo / Math.max(1, selectedSeats.length)),
+        total_kobo: amountKobo,
+        payment_method: method,
+        status: 'draft',
+      });
+      // Show an offline receipt so the agent can print or share immediately.
+      // The ticket will be confirmed on the server when connectivity is restored.
+      const trip = trips.find(tr => tr.id === tripId);
+      setReceiptModal({
+        receipt_id: ticket_number,
+        transaction_id: ticket_number,
+        trip_origin: trip?.origin ?? trip?.route_id ?? '—',
+        trip_destination: trip?.destination ?? '—',
+        departure_time: trip?.departure_time ?? Date.now(),
+        agent_name: user?.name ?? undefined,
+        seat_numbers: selectedSeats,
+        passenger_names: passArr,
         total_amount: amountKobo,
         payment_method: method,
-        created_at: Date.now(),
-        synced: false,
+        qr_code: ticket_number,
+        issued_at: Date.now(),
       });
-      alert(t('offline_queued'));
       setSubmitting(false);
       return;
     }

@@ -101,12 +101,15 @@ agentSalesRouter.post('/transactions', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN
 
   const {
     agent_id, trip_id, seat_ids, passenger_names, total_amount, payment_method,
-    passenger_id_type, passenger_id_number, park_id,
+    passenger_id_type, passenger_id_number, park_id, ticket_number,
   } = body as {
     agent_id: string; trip_id: string; seat_ids: string[]; passenger_names: string[];
     total_amount: number; payment_method: string;
     passenger_id_type?: string | null; passenger_id_number?: string | null;
     park_id?: string | null;
+    // Optional: supplied when syncing an offline ticket so the client-generated
+    // ticket_number is preserved in D1 for boarding-scan lookups.
+    ticket_number?: string | null;
   };
 
   if (!Number.isInteger(total_amount) || total_amount <= 0) {
@@ -159,7 +162,13 @@ agentSalesRouter.post('/transactions', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN
     for (const seat of seatChecks) {
       if (!seat || seat.trip_id !== trip_id) return c.json({ success: false, error: 'One or more seats not found for this trip' }, 404);
       if (seat.status === 'confirmed' || seat.status === 'blocked') {
-        return c.json({ success: false, error: `Seat ${seat.id} is ${seat.status} and cannot be sold` }, 409);
+        // Include conflicted_seats so the sync engine can build a precise
+        // conflict reason (e.g. "Seat(s) already booked online: s_1A").
+        return c.json({
+          success: false,
+          error: `Seat ${seat.id} is ${seat.status} and cannot be sold`,
+          conflicted_seats: [seat.id],
+        }, 409);
       }
     }
   } catch {
@@ -175,13 +184,13 @@ agentSalesRouter.post('/transactions', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN
   try {
     await db.batch([
       db.prepare(
-        `INSERT INTO sales_transactions (id, agent_id, trip_id, seat_ids, passenger_names, total_amount, payment_method, payment_status, sync_status, receipt_id, passenger_id_type, passenger_id_hash, park_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', 'synced', ?, ?, ?, ?, ?)`
-      ).bind(id, agent_id, trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, payment_method, receiptId, passenger_id_type ?? null, passenger_id_hash, park_id ?? null, now),
+        `INSERT INTO sales_transactions (id, agent_id, trip_id, seat_ids, passenger_names, total_amount, payment_method, payment_status, sync_status, receipt_id, passenger_id_type, passenger_id_hash, park_id, ticket_number, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', 'synced', ?, ?, ?, ?, ?, ?)`
+      ).bind(id, agent_id, trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, payment_method, receiptId, passenger_id_type ?? null, passenger_id_hash, park_id ?? null, ticket_number ?? null, now),
       db.prepare(
-        `INSERT INTO receipts (id, transaction_id, agent_id, trip_id, passenger_names, seat_numbers, total_amount, payment_method, qr_code, issued_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).bind(receiptId, id, agent_id, trip_id, JSON.stringify(passenger_names), JSON.stringify(seatNumbers), total_amount, payment_method, qrCode, now),
+        `INSERT INTO receipts (id, transaction_id, agent_id, trip_id, passenger_names, seat_numbers, total_amount, payment_method, qr_code, ticket_number, issued_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(receiptId, id, agent_id, trip_id, JSON.stringify(passenger_names), JSON.stringify(seatNumbers), total_amount, payment_method, qrCode, ticket_number ?? null, now),
       ...seat_ids.map(seatId =>
         db.prepare(
           `UPDATE seats SET status = ?, confirmed_by = ?, confirmed_at = ?, updated_at = ? WHERE id = ?`
@@ -205,6 +214,7 @@ agentSalesRouter.post('/transactions', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN
         id, agent_id, trip_id, total_amount, payment_method,
         payment_status: 'completed', receipt_id: receiptId,
         qr_code: qrCode, seat_numbers: seatNumbers,
+        ...(ticket_number ? { ticket_number } : {}),
       },
     }, 201);
   } catch {

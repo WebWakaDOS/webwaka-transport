@@ -755,8 +755,13 @@ export async function resolveConflict(
   const conflict = await db.conflict_log.get(id);
   if (!conflict) throw new Error(`Conflict ${id} not found`);
 
-  if (resolution === 'retry') {
-    // Re-queue the local mutation for another sync attempt
+  if (conflict.entity_type === 'ticket') {
+    // Ticket conflicts are tracked in the `tickets` table — delegate to the
+    // ticket-specific resolver which clears conflict flags (retry) or marks
+    // the ticket cancelled (accept_server / discard).
+    await resolveTicketConflict(conflict.entity_id, resolution);
+  } else if (resolution === 'retry') {
+    // Generic mutation: re-queue the local payload for another sync attempt.
     await db.mutations.add({
       entity_type: conflict.entity_type,
       entity_id: conflict.entity_id,
@@ -772,6 +777,6 @@ export async function resolveConflict(
     });
   }
 
-  // Mark conflict as resolved (both accept_server and discard close the ticket)
+  // Mark conflict as resolved (accept_server and discard both close it)
   await db.conflict_log.update(id, { resolved: true });
 }

@@ -299,7 +299,11 @@ describe('SyncEngine — empty queue', () => {
 // Phase 3: Ticket sync — success paths
 // ============================================================
 describe('SyncEngine Phase 3 — ticket flush (success)', () => {
-  it('sends ticket to POST /api/agent-sales/sync with correct payload shape', async () => {
+  it('sends ticket to POST /api/agent-sales/transactions with correct payload shape', async () => {
+    // Phase 3 tickets are routed to /api/agent-sales/transactions — the
+    // endpoint that atomically validates seat availability and confirms seats.
+    // Sending to /api/agent-sales/sync (old behaviour) always returned 400
+    // because that endpoint has no ticket handler.
     mockFetch.mockResolvedValueOnce(mockOk({ ticket_number: 'TKT-TEST-01', booking_id: 'bk_001' }));
     const engine = new SyncEngine();
     await makeTicket({ ticket_number: 'TKT-TEST-01' });
@@ -307,16 +311,20 @@ describe('SyncEngine Phase 3 — ticket flush (success)', () => {
     expect(result.synced).toBe(1);
     // Verify the URL and method
     const call = mockFetch.mock.calls[0] as [string, RequestInit];
-    expect(call[0]).toBe('/api/agent-sales/sync');
+    expect(call[0]).toBe('/api/agent-sales/transactions');
     expect(call[1]!.method).toBe('POST');
-    // Verify the payload structure
+    // Verify the payload maps OfflineTicket fields to the transactions schema:
+    // total_kobo → total_amount, flat top-level shape (no tickets wrapper).
     const body = JSON.parse(call[1]!.body as string) as Record<string, unknown>;
-    expect(body['tickets']).toHaveLength(1);
-    const sentTicket = (body['tickets'] as Record<string, unknown>[])[0]!;
-    expect(sentTicket['ticket_number']).toBe('TKT-TEST-01');
-    expect(sentTicket['trip_id']).toBe('tr_lagos_abuja');
-    expect(sentTicket['seat_ids']).toEqual(['s_1A']);
-    expect(sentTicket['qr_payload']).toBeDefined();
+    expect(body['agent_id']).toBeDefined();
+    expect(body['trip_id']).toBe('tr_lagos_abuja');
+    expect(body['seat_ids']).toEqual(['s_1A']);
+    expect(body['total_amount']).toBeDefined();
+    expect(body['payment_method']).toBeDefined();
+    expect(body['ticket_number']).toBe('TKT-TEST-01');
+    expect(body['qr_payload']).toBeDefined();
+    // Must NOT use the old { tickets: [...] } wrapper — that shape returns 400
+    expect(body['tickets']).toBeUndefined();
   });
 
   it('marks ticket as synced and confirmed on 200 response', async () => {

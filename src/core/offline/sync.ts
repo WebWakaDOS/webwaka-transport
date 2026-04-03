@@ -187,7 +187,12 @@ export class SyncEngine {
               'Authorization': `Bearer ${this._authToken ?? ''}`,
               'X-Idempotency-Key': tx.idempotencyKey,
             },
-            body: JSON.stringify({ transactions: [tx] }),
+            // agent_id is required at the top level by the server;
+            // include id = local_id so INSERT OR IGNORE deduplicates on replay.
+            body: JSON.stringify({
+              agent_id: tx.agent_id,
+              transactions: [{ ...tx, id: tx.local_id }],
+            }),
           });
           if (response.ok || response.status === 409) {
             await markTransactionSynced(tx.local_id);
@@ -369,23 +374,29 @@ export class SyncEngine {
     ticket: import('./db').OfflineTicket,
     result: SyncResult
   ): Promise<void> {
+    // Route to /api/agent-sales/transactions — the endpoint that atomically
+    // validates seat availability and confirms seats in D1.  The /sync
+    // endpoint only handles the `{ agent_id, transactions }` batch shape
+    // and has no ticket handler; sending tickets there always returns 400.
+    //
+    // Field mapping: OfflineTicket.total_kobo → total_amount (kobo integer)
+    // ticket_number and qr_payload are passed as optional extras so the
+    // server can echo them back in the receipt for boarding-scan compatibility.
     const body = {
-      ticket_number: ticket.ticket_number,
-      trip_id: ticket.trip_id,
       agent_id: ticket.agent_id,
-      operator_id: ticket.operator_id,
+      trip_id: ticket.trip_id,
       seat_ids: ticket.seat_ids,
       passenger_names: ticket.passenger_names,
-      fare_kobo: ticket.fare_kobo,
-      total_kobo: ticket.total_kobo,
+      total_amount: ticket.total_kobo,
       payment_method: ticket.payment_method,
+      ticket_number: ticket.ticket_number,
       qr_payload: ticket.qr_payload,
     };
 
     let response: Response;
     try {
       response = await this._fetchWithAuth(
-        { url: '/api/agent-sales/sync', method: 'POST', body: { tickets: [body] } },
+        { url: '/api/agent-sales/transactions', method: 'POST', body },
         `ticket-${ticket.ticket_number}`
       );
     } catch {
