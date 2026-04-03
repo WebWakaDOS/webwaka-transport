@@ -18,7 +18,7 @@ function createMockDB() {
     trips: [], seats: [], operators: [], routes: [], vehicles: [],
     agents: [], sales_transactions: [], receipts: [], customers: [],
     bookings: [], trip_state_transitions: [], sync_mutations: [], drivers: [],
-    platform_events: [],
+    platform_events: [], fare_rules: [],
   };
 
   function matchesWhere(row: any, whereClause: string, params: any[]): boolean {
@@ -2726,5 +2726,250 @@ describe('C-008: PATCH /users/:id/role — Admin Promotion API', () => {
       body: 'not-json',
     }, makeEnv(db));
     expect(res.status).toBe(400);
+  });
+});
+
+// ============================================================
+// T-TRN-03: Fare Rules CRUD API Tests
+// ============================================================
+describe('T-TRN-03: Fare Rules API', () => {
+  let db: any;
+  const ROUTE_ID = 'rte_fare001';
+  const OPERATOR_ID = 'opr_fare001';
+
+  beforeEach(() => {
+    db = createMockDB();
+    db._tables.operators.push({ id: OPERATOR_ID, name: 'FareOp', code: 'FARE', status: 'active', deleted_at: null, created_at: 1, updated_at: 1 });
+    db._tables.routes.push({
+      id: ROUTE_ID, operator_id: OPERATOR_ID, origin: 'Lagos', destination: 'Abuja',
+      base_fare: 500_000, fare_matrix: null, status: 'active', deleted_at: null, created_at: 1, updated_at: 1,
+    });
+  });
+
+  it('GET /routes/:id/fare-rules returns empty array when no rules', async () => {
+    const res = await operatorManagementRouter.request(`/routes/${ROUTE_ID}/fare-rules`, {
+      method: 'GET',
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data).toEqual([]);
+  });
+
+  it('POST /routes/:id/fare-rules creates an always rule', async () => {
+    const res = await operatorManagementRouter.request(`/routes/${ROUTE_ID}/fare-rules`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Standard Uplift', rule_type: 'always', base_multiplier: 1.3 }),
+    }, makeEnv(db));
+    expect(res.status).toBe(201);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.name).toBe('Standard Uplift');
+    expect(body.data.rule_type).toBe('always');
+    expect(body.data.base_multiplier).toBe(1.3);
+    expect(body.data.id).toMatch(/^far_/);
+  });
+
+  it('POST /routes/:id/fare-rules creates a surge_period rule', async () => {
+    const starts_at = new Date('2026-12-20').getTime();
+    const ends_at = new Date('2026-12-28').getTime();
+    const res = await operatorManagementRouter.request(`/routes/${ROUTE_ID}/fare-rules`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Christmas Surge', rule_type: 'surge_period', base_multiplier: 2.5, starts_at, ends_at }),
+    }, makeEnv(db));
+    expect(res.status).toBe(201);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.starts_at).toBe(starts_at);
+    expect(body.data.ends_at).toBe(ends_at);
+  });
+
+  it('POST /routes/:id/fare-rules rejects invalid rule_type', async () => {
+    const res = await operatorManagementRouter.request(`/routes/${ROUTE_ID}/fare-rules`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Bad Rule', rule_type: 'magic', base_multiplier: 1.5 }),
+    }, makeEnv(db));
+    expect(res.status).toBe(400);
+    const body = await res.json() as any;
+    expect(body.error).toMatch(/rule_type/i);
+  });
+
+  it('POST /routes/:id/fare-rules rejects multiplier > 10', async () => {
+    const res = await operatorManagementRouter.request(`/routes/${ROUTE_ID}/fare-rules`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Insane', rule_type: 'always', base_multiplier: 50 }),
+    }, makeEnv(db));
+    expect(res.status).toBe(400);
+    const body = await res.json() as any;
+    expect(body.error).toMatch(/base_multiplier/i);
+  });
+
+  it('GET /routes/:id/fare-rules returns rules after creation', async () => {
+    // Seed a rule
+    db._tables.fare_rules.push({
+      id: 'far_seed1', operator_id: OPERATOR_ID, route_id: ROUTE_ID,
+      name: 'Weekend', rule_type: 'weekend', base_multiplier: 1.4,
+      starts_at: null, ends_at: null, days_of_week: null, hour_from: null, hour_to: null,
+      class_multipliers: null, priority: 0, is_active: 1, created_at: 1, updated_at: 1, deleted_at: null,
+    });
+
+    const res = await operatorManagementRouter.request(`/routes/${ROUTE_ID}/fare-rules`, {
+      method: 'GET',
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0].name).toBe('Weekend');
+  });
+
+  it('DELETE /routes/:id/fare-rules/:ruleId soft-deletes the rule', async () => {
+    db._tables.fare_rules.push({
+      id: 'far_del1', operator_id: OPERATOR_ID, route_id: ROUTE_ID,
+      name: 'ToDelete', rule_type: 'always', base_multiplier: 1.2,
+      starts_at: null, ends_at: null, days_of_week: null, hour_from: null, hour_to: null,
+      class_multipliers: null, priority: 0, is_active: 1, created_at: 1, updated_at: 1, deleted_at: null,
+    });
+
+    const res = await operatorManagementRouter.request(`/routes/${ROUTE_ID}/fare-rules/far_del1`, {
+      method: 'DELETE',
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.id).toBe('far_del1');
+
+    // Soft-deleted: is_active should be 0
+    const rule = db._tables.fare_rules.find((r: any) => r.id === 'far_del1');
+    expect(rule.is_active).toBe(0);
+    expect(rule.deleted_at).toBeGreaterThan(0);
+  });
+
+  it('DELETE /routes/:id/fare-rules/:ruleId returns 404 for unknown rule', async () => {
+    const res = await operatorManagementRouter.request(`/routes/${ROUTE_ID}/fare-rules/far_ghost`, {
+      method: 'DELETE',
+    }, makeEnv(db));
+    expect(res.status).toBe(404);
+  });
+
+  it('PUT /routes/:id/fare-rules/:ruleId updates rule name and multiplier', async () => {
+    db._tables.fare_rules.push({
+      id: 'far_upd1', operator_id: OPERATOR_ID, route_id: ROUTE_ID,
+      name: 'OldName', rule_type: 'always', base_multiplier: 1.1,
+      starts_at: null, ends_at: null, days_of_week: null, hour_from: null, hour_to: null,
+      class_multipliers: null, priority: 0, is_active: 1, created_at: 1, updated_at: 1, deleted_at: null,
+      route_operator_id: OPERATOR_ID,
+    });
+
+    const res = await operatorManagementRouter.request(`/routes/${ROUTE_ID}/fare-rules/far_upd1`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'NewName', base_multiplier: 1.8 }),
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+  });
+});
+
+// ============================================================
+// T-TRN-03: Booking validation with locked_fare_kobo
+// ============================================================
+describe('T-TRN-03: Booking Fare Lock Integration', () => {
+  let db: any;
+
+  beforeEach(() => {
+    db = createMockDB();
+    const now = Date.now();
+
+    db._tables.operators.push({ id: 'opr_fl1', name: 'FareLockOp', code: 'FLK', status: 'active', deleted_at: null, created_at: now, updated_at: now });
+    db._tables.routes.push({
+      id: 'rte_fl1', operator_id: 'opr_fl1', origin: 'Lagos', destination: 'Abuja',
+      base_fare: 500_000, fare_matrix: null, status: 'active', deleted_at: null, created_at: now, updated_at: now,
+    });
+    // Mock DB can't JOIN — embed route fields directly on the trip row so
+    // first() returns a complete record matching the SELECT projection
+    db._tables.trips.push({
+      id: 'trp_fl1', operator_id: 'opr_fl1', route_id: 'rte_fl1', vehicle_id: 'veh_fl1',
+      departure_time: now + 3_600_000, state: 'scheduled', deleted_at: null,
+      base_fare: 500_000, fare_matrix: null,
+      created_at: now, updated_at: now,
+    });
+    db._tables.customers.push({
+      id: 'cus_fl1', phone: '+2348012345678', ndpr_consent: 1, status: 'active', deleted_at: null, created_at: now, updated_at: now,
+    });
+  });
+
+  // Each test seeds its own seats to avoid mock-DB all() cross-contamination
+  // (all() returns rows matching ANY param — two seats sharing a trip_id would both match)
+
+  it('uses locked_fare_kobo as the authoritative price for the booking', async () => {
+    db._tables.seats.push({
+      id: 'seat_locked', trip_id: 'trp_fl1', operator_id: 'opr_fl1',
+      seat_number: 'A1', seat_class: 'standard', status: 'available',
+      locked_fare_kobo: 750_000, version: 0, created_at: Date.now(), updated_at: Date.now(),
+    });
+    const res = await bookingPortalRouter.request('/bookings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        customer_id: 'cus_fl1', trip_id: 'trp_fl1',
+        seat_ids: ['seat_locked'], passenger_names: ['Test Passenger'],
+        total_amount_kobo: 750_000, payment_method: 'paystack', ndpr_consent: true,
+      }),
+    }, makeEnv(db));
+    expect(res.status).toBe(201);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.total_amount).toBe(750_000);
+    expect(body.data.expected_kobo).toBe(750_000);
+  });
+
+  it('rejects booking when submitted amount mismatches locked fare by >2%', async () => {
+    db._tables.seats.push({
+      id: 'seat_locked2', trip_id: 'trp_fl1', operator_id: 'opr_fl1',
+      seat_number: 'A2', seat_class: 'standard', status: 'available',
+      locked_fare_kobo: 750_000, version: 0, created_at: Date.now(), updated_at: Date.now(),
+    });
+    const res = await bookingPortalRouter.request('/bookings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        customer_id: 'cus_fl1', trip_id: 'trp_fl1',
+        seat_ids: ['seat_locked2'], passenger_names: ['Test Passenger'],
+        total_amount_kobo: 500_000, // Does NOT match locked fare of 750_000
+        payment_method: 'paystack', ndpr_consent: true,
+      }),
+    }, makeEnv(db));
+    expect(res.status).toBe(422);
+    const body = await res.json() as any;
+    expect(body.error).toBe('fare_mismatch');
+    expect(body.expected_kobo).toBe(750_000);
+    expect(body.submitted_kobo).toBe(500_000);
+  });
+
+  it('falls back to base_fare when seat has no locked_fare and no fare rules', async () => {
+    db._tables.seats.push({
+      id: 'seat_unlocked', trip_id: 'trp_fl1', operator_id: 'opr_fl1',
+      seat_number: 'B1', seat_class: 'standard', status: 'available',
+      locked_fare_kobo: null, version: 0, created_at: Date.now(), updated_at: Date.now(),
+    });
+    const res = await bookingPortalRouter.request('/bookings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        customer_id: 'cus_fl1', trip_id: 'trp_fl1',
+        seat_ids: ['seat_unlocked'], passenger_names: ['Passenger'],
+        total_amount_kobo: 500_000, // base_fare with no matrix/rules
+        payment_method: 'paystack', ndpr_consent: true,
+      }),
+    }, makeEnv(db));
+    expect(res.status).toBe(201);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.expected_kobo).toBe(500_000);
   });
 });

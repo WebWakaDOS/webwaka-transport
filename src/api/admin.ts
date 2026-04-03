@@ -613,6 +613,39 @@ const MIGRATIONS: Migration[] = [
       `ALTER TABLE sales_transactions ADD COLUMN next_of_kin_phone TEXT`,
     ],
   },
+  {
+    name: '018_trn03_fare_rules',
+    statements: [
+      // T-TRN-03: Dynamic Fare Matrix Engine
+      // Structured fare rules — replaces ad-hoc JSON blob for queryability + auditability.
+      // Multi-tenant: operator_id scoped. Route-scoped: route_id FK.
+      `CREATE TABLE IF NOT EXISTS fare_rules (
+        id TEXT PRIMARY KEY,
+        operator_id TEXT NOT NULL REFERENCES operators(id),
+        route_id TEXT NOT NULL REFERENCES routes(id),
+        name TEXT NOT NULL,
+        rule_type TEXT NOT NULL DEFAULT 'always',
+        starts_at INTEGER,
+        ends_at INTEGER,
+        days_of_week TEXT,
+        hour_from INTEGER,
+        hour_to INTEGER,
+        class_multipliers TEXT,
+        base_multiplier REAL NOT NULL DEFAULT 1.0,
+        priority INTEGER NOT NULL DEFAULT 0,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        deleted_at INTEGER
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_fare_rules_route ON fare_rules(route_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_fare_rules_operator ON fare_rules(operator_id)`,
+      // Price lock: the fare computed at reservation time is stored on the seat.
+      // This prevents bait-and-switch — if a surge ends between reservation and payment,
+      // the passenger pays the reserved price, not the new price.
+      `ALTER TABLE seats ADD COLUMN locked_fare_kobo INTEGER`,
+    ],
+  },
 ];
 
 export const adminRouter = new Hono<{ Bindings: AdminEnv }>();

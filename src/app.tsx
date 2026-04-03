@@ -14,6 +14,7 @@ import { ConflictLog } from './components/conflict-log';
 import { DriverView } from './components/driver-view';
 import ReceiptModal, { type ReceiptData } from './components/receipt';
 import { OnboardingWizard } from './components/onboarding-wizard';
+import FareRulesPanel from './components/fare-rules-panel';
 import { api, ApiError } from './api/client';
 import type { TripSummary, Route, Vehicle, Trip, OperatorStats, Booking, SeatAvailability, TripManifest, ManifestEntry, Driver, Agent, RevenueReport, RouteRevenue, PlatformOperator, OperatorNotification, DispatchDashboard, DispatchTrip, GroupedRevenueReport, RevenueReportItem, PlatformAnalytics, ApiKey, ApiKeyCreated, RouteStop } from './api/client';
 import { getConflicts } from './core/offline/db';
@@ -1637,6 +1638,7 @@ function RoutesPanel({ onBack }: { onBack: () => void }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [expandedStopsRouteId, setExpandedStopsRouteId] = useState<string | null>(null);
+  const [expandedFareRulesRouteId, setExpandedFareRulesRouteId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1717,14 +1719,25 @@ function RoutesPanel({ onBack }: { onBack: () => void }) {
               }}>{r.status}</span>
             </div>
             <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>ID: {r.id}</div>
-            <button
-              onClick={() => setExpandedStopsRouteId(v => v === r.id ? null : r.id)}
-              style={{ marginTop: 8, background: 'none', border: '1px solid #e2e8f0', borderRadius: 7, color: '#475569', fontSize: 11, padding: '5px 10px', cursor: 'pointer', fontWeight: 600 }}
-            >
-              {expandedStopsRouteId === r.id ? 'Hide Stops ▲' : 'Manage Stops ▼'}
-            </button>
+            <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+              <button
+                onClick={() => setExpandedStopsRouteId(v => v === r.id ? null : r.id)}
+                style={{ background: 'none', border: '1px solid #e2e8f0', borderRadius: 7, color: '#475569', fontSize: 11, padding: '5px 10px', cursor: 'pointer', fontWeight: 600 }}
+              >
+                {expandedStopsRouteId === r.id ? 'Hide Stops ▲' : 'Manage Stops ▼'}
+              </button>
+              <button
+                onClick={() => setExpandedFareRulesRouteId(v => v === r.id ? null : r.id)}
+                style={{ background: 'none', border: '1px solid #bfdbfe', borderRadius: 7, color: '#1e40af', fontSize: 11, padding: '5px 10px', cursor: 'pointer', fontWeight: 600 }}
+              >
+                {expandedFareRulesRouteId === r.id ? 'Hide Fare Rules ▲' : 'Fare Rules ▼'}
+              </button>
+            </div>
             {expandedStopsRouteId === r.id && (
               <RouteStopsPanel routeId={r.id} onClose={() => setExpandedStopsRouteId(null)} />
+            )}
+            {expandedFareRulesRouteId === r.id && (
+              <FareRulesPanel routeId={r.id} routeLabel={`${r.origin} → ${r.destination}`} />
             )}
           </div>
         ))

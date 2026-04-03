@@ -33,6 +33,15 @@ WebWaka Transport is the Transportation & Mobility vertical suite (Part 10.3) of
 - **T3 Multi-Stop Routes**: POST/GET /api/operator/routes/:id/stops (replace-all approach); RouteStopsPanel inline in RoutesPanel with ordered stop editing; booking-portal updated for origin_stop/destination_stop params with segment fare computation
 - **Sweepers**: sweepBookingReminders — 24h + 2h pre-departure SMS reminders (reminder_24h_sent_at / reminder_2h_sent_at columns on bookings via migration 016)
 
+## T-TRN-03: Dynamic Fare Matrix Engine (complete)
+- **Migration 018**: `fare_rules` table (id, operator_id, route_id, name, rule_type, starts_at, ends_at, days_of_week, hour_from, hour_to, class_multipliers, base_multiplier, priority, is_active, timestamps); `ALTER TABLE seats ADD COLUMN locked_fare_kobo INTEGER`
+- **Core pricing engine** (`src/core/pricing/engine.ts`): pure `computeEffectiveFare(baseFare, seatClass, fareRules[], refTimeMs)` + `computeEffectiveFareByClass` + `validateFareRule`; 5 rule types: `surge_period / peak_hours / peak_days / weekend / always`; highest-multiplier-wins (no stacking)
+- **Operator API** (4 endpoints in `operator-management.ts`): `GET/POST/PUT/DELETE /routes/:id/fare-rules`; soft-delete; `GET /routes/:id/effective-fare?ref_time=<ms>` preview; tenant-scoped; gated behind `seat_class_pricing` tier feature
+- **Fare lock**: applied non-fatally as async IIFE after `reserve-batch` succeeds in `seat-inventory.ts`; queries fare_rules by route_id, computes `locked_fare_kobo` per seat class, D1 batch-updates seats
+- **Booking portal** (`booking-portal.ts`): 3-priority fallback on `POST /bookings`: (1) `locked_fare_kobo` on seat, (2) fare_rules engine, (3) legacy `fare_matrix` JSON; ±2% tolerance validation against locked price
+- **UI**: `FareRulesPanel` component (`src/components/fare-rules-panel.tsx`) wired into `RoutesPanel` with "Fare Rules ▼" toggle per route; full CRUD form
+- **Tests**: 37 unit tests in `engine.test.ts` (all rule types, multi-rule priority, no-stacking, class multipliers, validation); 9 API tests for CRUD + fare-lock booking integration; **453 total tests passing**
+
 ## T-TRN-01: Multi-Seat Atomic Reservation Engine (complete)
 - **TripSeatDO upgraded**: `/reserve-seats` + `/release-seats` endpoints added to `src/durables/trip-seat-do.ts`; in-memory `heldSeats` Map provides fast-path serialization; D1 write-through with `WHERE status = 'available'` is the ultimate atomic guard; cold-start hydration re-loads active reservations from D1 after DO hibernation
 - **reserve-batch rerouted through DO**: `POST /trips/:tripId/reserve-batch` in `seat-inventory.ts` now proxies to `TRIP_SEAT_DO.get(idFromName(tripId)).fetch('/reserve-seats')` — all concurrent booking attempts for the same trip are serialized through a single DO instance (JS event loop guarantee); graceful fallback to D1 optimistic locking when DO binding is absent (local dev / test without wrangler)

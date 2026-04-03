@@ -8,6 +8,8 @@ import { publishEvent, nanoid } from '@webwaka/core';
 import type { AppContext, DbTrip, DbSeat } from './types';
 import { genId, parsePagination, metaResponse, requireFields, applyTenantScope } from './types';
 import { getOperatorConfig } from '../lib/operator-config.js';
+import { computeEffectiveFare } from '../core/pricing/engine';
+import type { FareRule } from '../core/pricing/engine';
 
 export type { Env } from './types';
 
@@ -281,9 +283,12 @@ seatInventoryRouter.post('/trips/:tripId/reserve-batch', async (c) => {
   }
 
   // 2. P03-T1: Configurable TTL sourced from operator config
+  // T-TRN-03: Also load route_id + base_fare + departure_time for fare locking
   const tripForBatchConfig = await db.prepare(
-    `SELECT operator_id FROM trips WHERE id = ? AND deleted_at IS NULL`
-  ).bind(tripId).first<{ operator_id: string }>();
+    `SELECT t.operator_id, t.departure_time, r.id as route_id, r.base_fare
+     FROM trips t JOIN routes r ON t.route_id = r.id
+     WHERE t.id = ? AND t.deleted_at IS NULL`
+  ).bind(tripId).first<{ operator_id: string; departure_time: number; route_id: string; base_fare: number }>();
   if (!tripForBatchConfig) {
     return c.json({ success: false, error: 'Trip not found' }, 404);
   }
@@ -293,11 +298,12 @@ seatInventoryRouter.post('/trips/:tripId/reserve-batch', async (c) => {
   const batchTtlMs = batchIsOnline ? batchOpConfig.online_reservation_ttl_ms : batchOpConfig.reservation_ttl_ms;
 
   // 3. Verify all requested seats exist for this trip
+  //    T-TRN-03: Also fetch seat_class so we can lock the effective fare per seat
   const seatIdList = seat_ids as string[];
   const placeholders = seatIdList.map(() => '?').join(', ');
   const seatsResult = await db.prepare(
-    `SELECT id FROM seats WHERE trip_id = ? AND id IN (${placeholders})`
-  ).bind(tripId, ...seatIdList).all<{ id: string }>();
+    `SELECT id, seat_class FROM seats WHERE trip_id = ? AND id IN (${placeholders})`
+  ).bind(tripId, ...seatIdList).all<{ id: string; seat_class: string }>();
 
   if (seatsResult.results.length !== seatIdList.length) {
     return c.json({ success: false, error: 'One or more seats not found for this trip' }, 404);
@@ -426,6 +432,30 @@ seatInventoryRouter.post('/trips/:tripId/reserve-batch', async (c) => {
       data: { tokens, expires_at: expiresAt, ttl_seconds: Math.round(batchTtlMs / 1000) },
     };
   }
+
+  // T-TRN-03: Lock effective fare on each reserved seat (non-fatal)
+  // Prevents bait-and-switch: price is snapshotted at reservation time.
+  // If a surge rule expires before payment, the passenger still pays the reserved price.
+  ;(async () => {
+    try {
+      const fareRules = await db.prepare(
+        `SELECT * FROM fare_rules WHERE route_id = ? AND is_active = 1 AND deleted_at IS NULL`
+      ).bind(tripForBatchConfig.route_id).all<FareRule>();
+      const seatClassMap = new Map(seatsResult.results.map(s => [s.id, s.seat_class]));
+      const lockStmts = seatIdList.map(seatId => {
+        const seatClass = seatClassMap.get(seatId) ?? 'standard';
+        const lockedFare = computeEffectiveFare(
+          tripForBatchConfig.base_fare, seatClass, fareRules.results, tripForBatchConfig.departure_time
+        );
+        return db.prepare(
+          `UPDATE seats SET locked_fare_kobo = ? WHERE id = ?`
+        ).bind(lockedFare, seatId);
+      });
+      await db.batch(lockStmts);
+    } catch {
+      // Non-fatal: fare lock failure must not block the reservation
+    }
+  })();
 
   // 6. Broadcast seat changes to connected WebSocket clients (non-fatal)
   for (const seatId of seatIdList) {

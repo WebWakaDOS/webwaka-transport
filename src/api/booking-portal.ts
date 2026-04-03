@@ -7,6 +7,8 @@
 import { Hono } from 'hono';
 import { requireRole, requireTierFeature, nanoid, generateJWT } from '@webwaka/core';
 import type { AppContext, DbBooking, DbCustomer } from './types';
+import { computeEffectiveFare } from '../core/pricing/engine';
+import type { FareRule } from '../core/pricing/engine';
 import { genId, parsePagination, metaResponse, requireFields } from './types';
 import { publishEvent } from '../core/events/index';
 import { notifyBookingConfirmed, notifyBookingRefunded } from '../core/central-mgmt';
@@ -285,23 +287,42 @@ bookingPortalRouter.post('/bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN'
     if (!customer) return c.json({ success: false, error: 'Customer not found or NDPR consent not given' }, 404);
 
     const trip = await db.prepare(
-      `SELECT t.id, t.state, t.operator_id, t.departure_time, r.base_fare, r.fare_matrix
+      `SELECT t.id, t.state, t.operator_id, t.departure_time, r.id as route_id, r.base_fare, r.fare_matrix
        FROM trips t JOIN routes r ON t.route_id = r.id WHERE t.id = ?`
-    ).bind(trip_id).first<{ id: string; state: string; operator_id: string; departure_time: number; base_fare: number; fare_matrix: string | null }>();
+    ).bind(trip_id).first<{ id: string; state: string; operator_id: string; departure_time: number; route_id: string; base_fare: number; fare_matrix: string | null }>();
     if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
 
-    // P08-T2: Compute expected fare using seat classes and fare matrix
+    // T-TRN-03: Query seats with locked_fare_kobo (set at reservation time)
+    // and seat_class (needed as fallback if no lock exists)
     const seatRows = await db.prepare(
-      `SELECT id, seat_class FROM seats WHERE id IN (${seat_ids.map(() => '?').join(',')}) AND trip_id = ?`
-    ).bind(...seat_ids, trip_id).all<{ id: string; seat_class: string }>();
+      `SELECT id, seat_class, locked_fare_kobo FROM seats WHERE id IN (${seat_ids.map(() => '?').join(',')}) AND trip_id = ?`
+    ).bind(...seat_ids, trip_id).all<{ id: string; seat_class: string; locked_fare_kobo: number | null }>();
 
     if (seatRows.results.length !== seat_ids.length) {
       return c.json({ success: false, error: 'One or more seat IDs not found for this trip' }, 404);
     }
 
-    const fareMatrix: FareMatrix | null = trip.fare_matrix ? JSON.parse(trip.fare_matrix) as FareMatrix : null;
-    const fareByClass = computeFareByClass(trip.base_fare, fareMatrix, trip.departure_time);
+    // T-TRN-03: Authoritative fare computation order:
+    //   1. locked_fare_kobo on the seat (price locked at reservation time) — HIGHEST AUTHORITY
+    //   2. computeEffectiveFare from structured fare_rules table
+    //   3. computeFareByClass from legacy fare_matrix JSON (backward compat)
+    const [fareRulesResult, fareMatrix] = await Promise.all([
+      db.prepare(`SELECT * FROM fare_rules WHERE route_id = ? AND is_active = 1 AND deleted_at IS NULL`)
+        .bind(trip.route_id).all<FareRule>(),
+      Promise.resolve(trip.fare_matrix ? JSON.parse(trip.fare_matrix) as FareMatrix : null),
+    ]);
+
     const expected_kobo = seatRows.results.reduce((sum, seat) => {
+      // Priority 1: locked fare (set at reservation time via reserve-batch)
+      if (seat.locked_fare_kobo !== null && seat.locked_fare_kobo > 0) {
+        return sum + seat.locked_fare_kobo;
+      }
+      // Priority 2: dynamic fare rules engine
+      if (fareRulesResult.results.length > 0) {
+        return sum + computeEffectiveFare(trip.base_fare, seat.seat_class, fareRulesResult.results, trip.departure_time);
+      }
+      // Priority 3: legacy fare matrix JSON fallback
+      const fareByClass = computeFareByClass(trip.base_fare, fareMatrix, trip.departure_time);
       return sum + (fareByClass[seat.seat_class] ?? fareByClass['standard'] ?? trip.base_fare);
     }, 0);
 

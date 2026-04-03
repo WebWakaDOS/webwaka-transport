@@ -11,6 +11,8 @@ import { getOperatorConfig, validateOperatorConfig } from '../lib/operator-confi
 import { sendSms } from '../lib/sms.js';
 import { generateManifestPdf } from '../core/pdf/manifest.js';
 import type { ManifestPdfInput } from '../core/pdf/manifest.js';
+import { computeEffectiveFare, validateFareRule } from '../core/pricing/engine';
+import type { FareRule } from '../core/pricing/engine';
 
 export const operatorManagementRouter = new Hono<AppContext>();
 
@@ -230,6 +232,209 @@ operatorManagementRouter.put('/routes/:id/fare-matrix', requireRole(['SUPER_ADMI
   } catch {
     return c.json({ success: false, error: 'Failed to update fare matrix' }, 500);
   }
+});
+
+// ============================================================
+// T-TRN-03: Fare Rules CRUD — dynamic, named surge/peak rules per route
+// ============================================================
+
+// GET /routes/:id/fare-rules — list all active fare rules for a route (TENANT_ADMIN+)
+operatorManagementRouter.get('/routes/:id/fare-rules', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR']), async (c) => {
+  const routeId = c.req.param('id');
+  const db = c.env.DB;
+  const user = c.get('user');
+  const isSuperAdmin = user?.role === 'SUPER_ADMIN';
+
+  const route = await db.prepare(
+    `SELECT id, operator_id FROM routes WHERE id = ? AND deleted_at IS NULL`
+  ).bind(routeId).first<{ id: string; operator_id: string }>();
+  if (!route) return c.json({ success: false, error: 'Route not found' }, 404);
+  if (!isSuperAdmin && user?.operatorId && route.operator_id !== user.operatorId) {
+    return c.json({ success: false, error: 'Forbidden' }, 403);
+  }
+
+  const rules = await db.prepare(
+    `SELECT * FROM fare_rules WHERE route_id = ? AND deleted_at IS NULL ORDER BY priority DESC, created_at ASC`
+  ).bind(routeId).all<FareRule>();
+  return c.json({ success: true, data: rules.results });
+});
+
+// POST /routes/:id/fare-rules — create a new fare rule (TENANT_ADMIN+)
+operatorManagementRouter.post('/routes/:id/fare-rules', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), requireTierFeature('seat_class_pricing'), async (c) => {
+  const routeId = c.req.param('id');
+  const body = await c.req.json() as Record<string, unknown>;
+  const db = c.env.DB;
+  const user = c.get('user');
+  const isSuperAdmin = user?.role === 'SUPER_ADMIN';
+  const now = Date.now();
+
+  const err = requireFields(body, ['name', 'rule_type', 'base_multiplier']);
+  if (err) return c.json({ success: false, error: err }, 400);
+
+  const valErr = validateFareRule(body);
+  if (valErr) return c.json({ success: false, error: valErr }, 400);
+
+  const route = await db.prepare(
+    `SELECT id, operator_id FROM routes WHERE id = ? AND deleted_at IS NULL`
+  ).bind(routeId).first<{ id: string; operator_id: string }>();
+  if (!route) return c.json({ success: false, error: 'Route not found' }, 404);
+  if (!isSuperAdmin && user?.operatorId && route.operator_id !== user.operatorId) {
+    return c.json({ success: false, error: 'Forbidden' }, 403);
+  }
+
+  const {
+    name, rule_type, base_multiplier, priority,
+    starts_at, ends_at, days_of_week, hour_from, hour_to, class_multipliers,
+  } = body as {
+    name: string; rule_type: string; base_multiplier: number; priority?: number;
+    starts_at?: number; ends_at?: number; days_of_week?: number[];
+    hour_from?: number; hour_to?: number; class_multipliers?: Record<string, number>;
+  };
+
+  const id = genId('far');
+  const operatorId = isSuperAdmin ? route.operator_id : (user?.operatorId ?? route.operator_id);
+
+  try {
+    await db.prepare(
+      `INSERT INTO fare_rules (id, operator_id, route_id, name, rule_type, starts_at, ends_at,
+         days_of_week, hour_from, hour_to, class_multipliers, base_multiplier, priority,
+         is_active, created_at, updated_at, deleted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      id, operatorId, routeId, name, rule_type,
+      starts_at ?? null, ends_at ?? null,
+      days_of_week ? JSON.stringify(days_of_week) : null,
+      hour_from ?? null, hour_to ?? null,
+      class_multipliers ? JSON.stringify(class_multipliers) : null,
+      base_multiplier, priority ?? 0,
+      1, now, now, null
+    ).run();
+
+    const created = await db.prepare(`SELECT * FROM fare_rules WHERE id = ?`).bind(id).first<FareRule>();
+    return c.json({ success: true, data: created }, 201);
+  } catch {
+    return c.json({ success: false, error: 'Failed to create fare rule' }, 500);
+  }
+});
+
+// PUT /routes/:id/fare-rules/:ruleId — update a fare rule (TENANT_ADMIN+)
+operatorManagementRouter.put('/routes/:id/fare-rules/:ruleId', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), requireTierFeature('seat_class_pricing'), async (c) => {
+  const routeId = c.req.param('id');
+  const ruleId = c.req.param('ruleId');
+  const body = await c.req.json() as Record<string, unknown>;
+  const db = c.env.DB;
+  const user = c.get('user');
+  const isSuperAdmin = user?.role === 'SUPER_ADMIN';
+  const now = Date.now();
+
+  const rule = await db.prepare(
+    `SELECT * FROM fare_rules WHERE id = ? AND deleted_at IS NULL`
+  ).bind(ruleId).first<FareRule>();
+  if (!rule || rule.route_id !== routeId) return c.json({ success: false, error: 'Fare rule not found' }, 404);
+  if (!isSuperAdmin && user?.operatorId && rule.operator_id !== user.operatorId) {
+    return c.json({ success: false, error: 'Forbidden' }, 403);
+  }
+
+  if (Object.keys(body).some(k => ['rule_type', 'base_multiplier'].includes(k))) {
+    const valErr = validateFareRule({ ...rule, ...body });
+    if (valErr) return c.json({ success: false, error: valErr }, 400);
+  }
+
+  const {
+    name, rule_type, base_multiplier, priority, is_active,
+    starts_at, ends_at, days_of_week, hour_from, hour_to, class_multipliers,
+  } = body as {
+    name?: string; rule_type?: string; base_multiplier?: number; priority?: number; is_active?: number;
+    starts_at?: number | null; ends_at?: number | null; days_of_week?: number[] | null;
+    hour_from?: number | null; hour_to?: number | null; class_multipliers?: Record<string, number> | null;
+  };
+
+  try {
+    await db.prepare(
+      `UPDATE fare_rules SET
+         name = COALESCE(?, name),
+         rule_type = COALESCE(?, rule_type),
+         base_multiplier = COALESCE(?, base_multiplier),
+         priority = COALESCE(?, priority),
+         is_active = COALESCE(?, is_active),
+         starts_at = ?,
+         ends_at = ?,
+         days_of_week = ?,
+         hour_from = ?,
+         hour_to = ?,
+         class_multipliers = ?,
+         updated_at = ?
+       WHERE id = ?`
+    ).bind(
+      name ?? null, rule_type ?? null, base_multiplier ?? null, priority ?? null, is_active ?? null,
+      starts_at !== undefined ? starts_at : rule.starts_at,
+      ends_at !== undefined ? ends_at : rule.ends_at,
+      days_of_week !== undefined ? (days_of_week ? JSON.stringify(days_of_week) : null) : rule.days_of_week,
+      hour_from !== undefined ? hour_from : rule.hour_from,
+      hour_to !== undefined ? hour_to : rule.hour_to,
+      class_multipliers !== undefined ? (class_multipliers ? JSON.stringify(class_multipliers) : null) : rule.class_multipliers,
+      now, ruleId
+    ).run();
+
+    const updated = await db.prepare(`SELECT * FROM fare_rules WHERE id = ?`).bind(ruleId).first<FareRule>();
+    return c.json({ success: true, data: updated });
+  } catch {
+    return c.json({ success: false, error: 'Failed to update fare rule' }, 500);
+  }
+});
+
+// DELETE /routes/:id/fare-rules/:ruleId — soft-delete a fare rule (TENANT_ADMIN+)
+operatorManagementRouter.delete('/routes/:id/fare-rules/:ruleId', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+  const routeId = c.req.param('id');
+  const ruleId = c.req.param('ruleId');
+  const db = c.env.DB;
+  const user = c.get('user');
+  const isSuperAdmin = user?.role === 'SUPER_ADMIN';
+  const now = Date.now();
+
+  const rule = await db.prepare(
+    `SELECT id, operator_id, route_id FROM fare_rules WHERE id = ? AND deleted_at IS NULL`
+  ).bind(ruleId).first<{ id: string; operator_id: string; route_id: string }>();
+  if (!rule || rule.route_id !== routeId) return c.json({ success: false, error: 'Fare rule not found' }, 404);
+  if (!isSuperAdmin && user?.operatorId && rule.operator_id !== user.operatorId) {
+    return c.json({ success: false, error: 'Forbidden' }, 403);
+  }
+
+  try {
+    await db.prepare(
+      `UPDATE fare_rules SET is_active = ?, deleted_at = ?, updated_at = ? WHERE id = ?`
+    ).bind(0, now, now, ruleId).run();
+    return c.json({ success: true, data: { id: ruleId, deleted_at: now } });
+  } catch {
+    return c.json({ success: false, error: 'Failed to delete fare rule' }, 500);
+  }
+});
+
+// ============================================================
+// T-TRN-03: Preview endpoint — compute effective fare for a route at given time
+// GET /routes/:id/effective-fare?ref_time=<ms> — public preview (STAFF+)
+// ============================================================
+operatorManagementRouter.get('/routes/:id/effective-fare', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR', 'STAFF']), async (c) => {
+  const routeId = c.req.param('id');
+  const refTimeStr = c.req.query('ref_time');
+  const refTimeMs = refTimeStr ? Number(refTimeStr) : Date.now();
+  const db = c.env.DB;
+
+  const route = await db.prepare(
+    `SELECT id, base_fare FROM routes WHERE id = ? AND deleted_at IS NULL`
+  ).bind(routeId).first<{ id: string; base_fare: number }>();
+  if (!route) return c.json({ success: false, error: 'Route not found' }, 404);
+
+  const rules = await db.prepare(
+    `SELECT * FROM fare_rules WHERE route_id = ? AND deleted_at IS NULL AND is_active = 1`
+  ).bind(routeId).all<FareRule>();
+
+  const classes = ['standard', 'window', 'vip', 'front'];
+  const effective: Record<string, number> = {};
+  for (const cls of classes) {
+    effective[cls] = computeEffectiveFare(route.base_fare, cls, rules.results, refTimeMs);
+  }
+  return c.json({ success: true, data: { route_id: routeId, ref_time_ms: refTimeMs, effective_fare_by_class: effective, base_fare: route.base_fare } });
 });
 
 // ============================================================
