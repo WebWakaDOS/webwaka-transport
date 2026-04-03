@@ -307,8 +307,11 @@ bookingPortalRouter.post('/bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN'
     //   2. computeEffectiveFare from structured fare_rules table
     //   3. computeFareByClass from legacy fare_matrix JSON (backward compat)
     const [fareRulesResult, fareMatrix] = await Promise.all([
-      db.prepare(`SELECT * FROM fare_rules WHERE route_id = ? AND is_active = 1 AND deleted_at IS NULL`)
-        .bind(trip.route_id).all<FareRule>(),
+      // Scoped by both route_id AND operator_id — defense-in-depth for multi-tenancy.
+      // route_id alone is sufficient (a route belongs to exactly one operator) but
+      // operator_id makes the tenant boundary explicit and survives any future refactor.
+      db.prepare(`SELECT * FROM fare_rules WHERE route_id = ? AND operator_id = ? AND is_active = 1 AND deleted_at IS NULL`)
+        .bind(trip.route_id, trip.operator_id).all<FareRule>(),
       Promise.resolve(trip.fare_matrix ? JSON.parse(trip.fare_matrix) as FareMatrix : null),
     ]);
 

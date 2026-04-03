@@ -419,15 +419,23 @@ operatorManagementRouter.get('/routes/:id/effective-fare', requireRole(['SUPER_A
   const refTimeStr = c.req.query('ref_time');
   const refTimeMs = refTimeStr ? Number(refTimeStr) : Date.now();
   const db = c.env.DB;
+  const user = c.get('user');
+  const isSuperAdmin = user?.role === 'SUPER_ADMIN';
 
   const route = await db.prepare(
-    `SELECT id, base_fare FROM routes WHERE id = ? AND deleted_at IS NULL`
-  ).bind(routeId).first<{ id: string; base_fare: number }>();
+    `SELECT id, operator_id, base_fare FROM routes WHERE id = ? AND deleted_at IS NULL`
+  ).bind(routeId).first<{ id: string; operator_id: string; base_fare: number }>();
   if (!route) return c.json({ success: false, error: 'Route not found' }, 404);
 
+  // Tenancy check: non-super-admins may only preview fares for their own operator's routes.
+  // Without this guard, a STAFF user at Operator A could read Operator B's fare rules.
+  if (!isSuperAdmin && user?.operatorId && route.operator_id !== user.operatorId) {
+    return c.json({ success: false, error: 'Forbidden' }, 403);
+  }
+
   const rules = await db.prepare(
-    `SELECT * FROM fare_rules WHERE route_id = ? AND deleted_at IS NULL AND is_active = 1`
-  ).bind(routeId).all<FareRule>();
+    `SELECT * FROM fare_rules WHERE route_id = ? AND operator_id = ? AND deleted_at IS NULL AND is_active = 1`
+  ).bind(routeId, route.operator_id).all<FareRule>();
 
   const classes = ['standard', 'window', 'vip', 'front'];
   const effective: Record<string, number> = {};

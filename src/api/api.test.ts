@@ -2873,6 +2873,26 @@ describe('T-TRN-03: Fare Rules API', () => {
     const body = await res.json() as any;
     expect(body.success).toBe(true);
   });
+
+  // ── Bug 3 regression: effective-fare tenancy leak ─────────────────────────
+  it('GET /routes/:id/effective-fare returns 200 for own operator route', async () => {
+    const res = await operatorManagementRouter.request(`/routes/${ROUTE_ID}/effective-fare`, {
+      method: 'GET',
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.base_fare).toBe(500_000);
+    expect(body.data.effective_fare_by_class).toHaveProperty('standard');
+  });
+
+  it('GET /routes/:id/effective-fare returns 404 for unknown route', async () => {
+    const res = await operatorManagementRouter.request('/routes/rte_ghost/effective-fare', {
+      method: 'GET',
+    }, makeEnv(db));
+    // SUPER_ADMIN in test mode — 404 since route does not exist
+    expect(res.status).toBe(404);
+  });
 });
 
 // ============================================================

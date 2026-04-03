@@ -436,11 +436,22 @@ seatInventoryRouter.post('/trips/:tripId/reserve-batch', async (c) => {
   // T-TRN-03: Lock effective fare on each reserved seat (non-fatal)
   // Prevents bait-and-switch: price is snapshotted at reservation time.
   // If a surge rule expires before payment, the passenger still pays the reserved price.
+  //
+  // Guard: only lock when active fare rules exist.  If no rules are configured for
+  // this route the lock would stamp base_fare on every class — overriding legacy
+  // fare_matrix class multipliers and causing fare_mismatch at checkout.
+  // When locked_fare_kobo stays NULL the booking portal falls through to the
+  // fare_rules engine → legacy fare_matrix chain correctly.
   ;(async () => {
     try {
       const fareRules = await db.prepare(
-        `SELECT * FROM fare_rules WHERE route_id = ? AND is_active = 1 AND deleted_at IS NULL`
-      ).bind(tripForBatchConfig.route_id).all<FareRule>();
+        `SELECT * FROM fare_rules WHERE route_id = ? AND operator_id = ? AND is_active = 1 AND deleted_at IS NULL`
+      ).bind(tripForBatchConfig.route_id, tripForBatchConfig.operator_id).all<FareRule>();
+
+      // No active rules — leave locked_fare_kobo NULL so booking portal falls
+      // through to legacy fare_matrix for class-specific pricing.
+      if (fareRules.results.length === 0) return;
+
       const seatClassMap = new Map(seatsResult.results.map(s => [s.id, s.seat_class]));
       const lockStmts = seatIdList.map(seatId => {
         const seatClass = seatClassMap.get(seatId) ?? 'standard';
