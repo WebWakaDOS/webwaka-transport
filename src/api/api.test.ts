@@ -3306,7 +3306,7 @@ describe('T-TRN-04: drainEventBus — payment.successful consumer', () => {
 // ============================================================
 // T-TRN-05: Digital Parcel Waybill Recording
 // logisticsRouter: POST/GET/DELETE /api/logistics/trips/:tripId/parcels
-// emitCargoUnloadedOnTripComplete + drainEventBus forwarding
+// emitCargoUnloadedOnTripEnd + drainEventBus forwarding
 // ============================================================
 describe('T-TRN-05: Logistics — cargo parcel endpoints', () => {
   let db: any;
@@ -3628,5 +3628,70 @@ describe('T-TRN-05: Logistics — cargo parcel endpoints', () => {
     } finally {
       globalThis.fetch = origFetch;
     }
+  });
+
+  // ── T05-14 ──────────────────────────────────────────────────
+  // BUG-FIX: trip cancellation must also flush on-board parcels to 'removed'.
+  // Tests emitCargoUnloadedOnTripEnd directly with reason='trip_cancelled'.
+  it('emitCargoUnloadedOnTripEnd — trip_cancelled marks on-board parcels as removed and emits event', async () => {
+    const { emitCargoUnloadedOnTripEnd } = await import('./logistics');
+    const now = Date.now();
+
+    db._tables.trip_parcels.push(
+      { id: 'prc_can1', trip_id: 'trp_cargo_01', operator_id: 'opr_1', tracking_ref: 'PKG-CAN-A', description: null, weight_kg: null, sender_name: null, receiver_name: null, receiver_phone: null, loaded_at: now - 5000, loaded_by: null, unloaded_at: null, status: 'on_board', created_at: now - 5000 },
+      { id: 'prc_can2', trip_id: 'trp_cargo_01', operator_id: 'opr_1', tracking_ref: 'PKG-CAN-B', description: null, weight_kg: null, sender_name: null, receiver_name: null, receiver_phone: null, loaded_at: now - 3000, loaded_by: null, unloaded_at: null, status: 'on_board', created_at: now - 3000 },
+    );
+
+    await emitCargoUnloadedOnTripEnd(db, 'trp_cargo_01', 'opr_1', now, 'trip_cancelled', 'removed');
+
+    // Both parcels should now be 'removed'
+    const p1 = db._tables.trip_parcels.find((p: any) => p.id === 'prc_can1');
+    const p2 = db._tables.trip_parcels.find((p: any) => p.id === 'prc_can2');
+    expect(p1.status).toBe('removed');
+    expect(p2.status).toBe('removed');
+
+    // Event emitted with trip_cancelled reason
+    const events = db._tables.platform_events.filter((e: any) => e.event_type === 'trip.cargo_unloaded');
+    expect(events.length).toBe(1);
+    const payload = JSON.parse(events[0].payload);
+    expect(payload.reason).toBe('trip_cancelled');
+    expect(payload.tracking_refs).toContain('PKG-CAN-A');
+    expect(payload.tracking_refs).toContain('PKG-CAN-B');
+  });
+
+  // ── T05-15 ──────────────────────────────────────────────────
+  // BUG-FIX: trip completion marks parcels as 'delivered' (not 'removed').
+  // Tests emitCargoUnloadedOnTripEnd directly with reason='trip_completed'.
+  it('emitCargoUnloadedOnTripEnd — trip_completed marks on-board parcels as delivered', async () => {
+    const { emitCargoUnloadedOnTripEnd } = await import('./logistics');
+    const now = Date.now();
+
+    db._tables.trip_parcels.push({
+      id: 'prc_comp1', trip_id: 'trp_cargo_01', operator_id: 'opr_1', tracking_ref: 'PKG-COMP-1',
+      description: null, weight_kg: null, sender_name: null, receiver_name: null, receiver_phone: null,
+      loaded_at: now - 8000, loaded_by: null, unloaded_at: null, status: 'on_board', created_at: now - 8000,
+    });
+
+    await emitCargoUnloadedOnTripEnd(db, 'trp_cargo_01', 'opr_1', now, 'trip_completed', 'delivered');
+
+    const p = db._tables.trip_parcels.find((p: any) => p.id === 'prc_comp1');
+    expect(p.status).toBe('delivered');
+
+    const events = db._tables.platform_events.filter((e: any) => e.event_type === 'trip.cargo_unloaded');
+    expect(events.length).toBe(1);
+    const payload = JSON.parse(events[0].payload);
+    expect(payload.reason).toBe('trip_completed');
+    expect(payload.tracking_refs).toContain('PKG-COMP-1');
+  });
+
+  // ── T05-16 ──────────────────────────────────────────────────
+  // emitCargoUnloadedOnTripEnd is a no-op when no parcels are on_board.
+  it('emitCargoUnloadedOnTripEnd — no-op when no parcels on board', async () => {
+    const { emitCargoUnloadedOnTripEnd } = await import('./logistics');
+    // No parcels pre-populated for this trip
+    await emitCargoUnloadedOnTripEnd(db, 'trp_cargo_01', 'opr_1', Date.now(), 'trip_completed', 'delivered');
+
+    const events = db._tables.platform_events.filter((e: any) => e.event_type === 'trip.cargo_unloaded');
+    expect(events.length).toBe(0);
   });
 });

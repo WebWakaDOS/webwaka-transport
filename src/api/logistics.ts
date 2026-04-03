@@ -17,8 +17,7 @@
 import { Hono } from 'hono';
 import type { AppContext } from './types';
 import { requireFields, genId } from './types';
-import { requireRole } from '@webwaka/core';
-import { publishEvent } from '@webwaka/core';
+import { requireRole, publishEvent } from '@webwaka/core';
 
 export const logisticsRouter = new Hono<AppContext>();
 
@@ -283,14 +282,21 @@ logisticsRouter.delete('/trips/:tripId/parcels/:trackingRef',
 
 // ============================================================
 // Internal helper — emit trip.cargo_unloaded for ALL on-board
-// parcels when a trip transitions to 'completed'.
-// Called from operator-management.ts post-transition hook.
+// parcels when a trip reaches a terminal state.
+//
+// reason:      'trip_completed' | 'trip_cancelled'
+// finalStatus: 'delivered' (completion) | 'removed' (cancellation)
+//
+// Called from operator-management.ts post-transition hook for
+// BOTH completed and cancelled terminal states.
 // ============================================================
-export async function emitCargoUnloadedOnTripComplete(
+export async function emitCargoUnloadedOnTripEnd(
   db: D1Database,
   tripId: string,
   operatorId: string,
-  now: number
+  now: number,
+  reason: 'trip_completed' | 'trip_cancelled',
+  finalStatus: 'delivered' | 'removed'
 ): Promise<void> {
   try {
     const onBoard = await db.prepare(
@@ -302,12 +308,12 @@ export async function emitCargoUnloadedOnTripComplete(
 
     const trackingRefs = onBoard.results.map(p => p.tracking_ref);
 
-    // Batch-update all parcels to 'delivered'
+    // Batch-update all on-board parcels to their final status
     await db.batch(
       onBoard.results.map(p =>
         db.prepare(
           `UPDATE trip_parcels SET status = ?, unloaded_at = ? WHERE id = ?`
-        ).bind('delivered', now, p.id)
+        ).bind(finalStatus, now, p.id)
       )
     );
 
@@ -319,13 +325,13 @@ export async function emitCargoUnloadedOnTripComplete(
         trip_id: tripId,
         operator_id: operatorId,
         tracking_refs: trackingRefs,
-        reason: 'trip_completed',
+        reason,
         unloaded_at: now,
       },
       timestamp: now,
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[logistics] emitCargoUnloadedOnTripComplete failed (non-fatal): ${msg}`);
+    console.error(`[logistics] emitCargoUnloadedOnTripEnd (${reason}) failed (non-fatal): ${msg}`);
   }
 }

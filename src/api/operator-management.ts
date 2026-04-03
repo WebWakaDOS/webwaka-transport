@@ -1062,14 +1062,17 @@ operatorManagementRouter.post('/trips/:id/transition', requireRole(['SUPER_ADMIN
       });
     } catch { /* non-fatal */ }
 
-    // T-TRN-05: emit trip.cargo_unloaded for all on-board parcels when trip completes
-    if (to_state === 'completed') {
-      void (async () => {
-        try {
-          const { emitCargoUnloadedOnTripComplete } = await import('./logistics.js');
-          await emitCargoUnloadedOnTripComplete(db, id, trip.operator_id, now);
-        } catch { /* non-fatal — cargo event must not block the transition response */ }
-      })();
+    // T-TRN-05: emit trip.cargo_unloaded for all on-board parcels when trip reaches a terminal state.
+    // Awaited directly — consistent with publishEvent above. The function has its own internal
+    // try/catch and is non-fatal. Using void IIFE would risk silent data loss in CF Workers
+    // because dangling promises are killed when the Response is returned without waitUntil().
+    if (to_state === 'completed' || to_state === 'cancelled') {
+      try {
+        const { emitCargoUnloadedOnTripEnd } = await import('./logistics.js');
+        const reason = to_state === 'completed' ? 'trip_completed' : 'trip_cancelled';
+        const finalStatus = to_state === 'completed' ? 'delivered' : 'removed';
+        await emitCargoUnloadedOnTripEnd(db, id, trip.operator_id, now, reason, finalStatus);
+      } catch { /* non-fatal */ }
     }
 
     return c.json({ success: true, data: { id, from_state: trip.state, to_state, transitioned_at: now } });
