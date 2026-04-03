@@ -33,6 +33,15 @@ WebWaka Transport is the Transportation & Mobility vertical suite (Part 10.3) of
 - **T3 Multi-Stop Routes**: POST/GET /api/operator/routes/:id/stops (replace-all approach); RouteStopsPanel inline in RoutesPanel with ordered stop editing; booking-portal updated for origin_stop/destination_stop params with segment fare computation
 - **Sweepers**: sweepBookingReminders — 24h + 2h pre-departure SMS reminders (reminder_24h_sent_at / reminder_2h_sent_at columns on bookings via migration 016)
 
+## T-TRN-04: Paystack Inline Payment Integration (complete)
+- **Problem solved**: Redirect to external payment page caused drop-off on Nigerian mobile networks. Now using Paystack Inline popup that stays inside the PWA.
+- **`src/components/paystack-inline-checkout.tsx`**: New React component — loads `js.paystack.co/v1/inline.js` dynamically, calls `POST /api/payments/initiate` to get `access_code`, opens `PaystackPop` modal in-app, calls `POST /api/payments/verify` on success. Dev-mode flow bypasses popup when `PAYSTACK_SECRET` is unset.
+- **`src/app.tsx`**: `MyBookingsModule` — added "Pay Now" button for pending bookings; shows `PaystackInlineCheckout` inline on click; reloads bookings on success.
+- **`src/api/payments.ts`**: `confirmBookingById()` now emits `payment.successful` event to platform outbox via `publishEvent()` (non-fatal try/catch). `webhooksRouter` extracted (Paystack + Flutterwave webhook handlers) for testability; both handlers use `confirmBookingById` so they also emit `payment.successful`.
+- **`src/worker.ts`**: Replaced 70-line inline webhook handlers with `app.route('/webhooks', webhooksRouter)`.
+- **Event-Driven invariant honored**: `payment.successful` emitted on every successful payment path: `/verify` (dev + prod), Paystack webhook `charge.success`, Flutterwave webhook `charge.completed`.
+- **Tests**: 7 new tests — HMAC signature verification (valid/invalid), webhook confirmation + event emission (Paystack + Flutterwave), idempotency guard, `/verify` dev-mode event emission, already-confirmed guard. **462 total tests passing**.
+
 ## T-TRN-03: Dynamic Fare Matrix Engine (complete)
 - **Migration 018**: `fare_rules` table (id, operator_id, route_id, name, rule_type, starts_at, ends_at, days_of_week, hour_from, hour_to, class_multipliers, base_multiplier, priority, is_active, timestamps); `ALTER TABLE seats ADD COLUMN locked_fare_kobo INTEGER`
 - **Core pricing engine** (`src/core/pricing/engine.ts`): pure `computeEffectiveFare(baseFare, seatClass, fareRules[], refTimeMs)` + `computeEffectiveFareByClass` + `validateFareRule`; 5 rule types: `surge_period / peak_hours / peak_days / weekend / always`; highest-multiplier-wins (no stacking)

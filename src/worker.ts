@@ -33,7 +33,7 @@ import { bookingPortalRouter, publicBookingRouter } from './api/booking-portal.j
 import { operatorManagementRouter } from './api/operator-management.js';
 import { adminRouter } from './api/admin.js';
 import { authRouter } from './api/auth.js';
-import { paymentsRouter, hmacSha512 } from './api/payments.js';
+import { paymentsRouter, webhooksRouter } from './api/payments.js';
 import { jwtAuthMiddleware, requireTenantMiddleware, requireRole } from './middleware/auth.js';
 import { idempotencyMiddleware } from './middleware/idempotency.js';
 import {
@@ -212,121 +212,12 @@ app.route('/api/operator', operatorManagementRouter);
 app.route('/api/notifications', notificationsRouter);
 
 // ============================================================
-// Paystack webhook — PUBLIC (HMAC-SHA512 verified internally)
-// POST /webhooks/paystack — handles charge.success → confirm booking
+// Webhooks — PUBLIC (no JWT). HMAC/secret verified inside handlers.
+// POST /webhooks/paystack    — charge.success  → confirm booking + emit payment.successful
+// POST /webhooks/flutterwave — charge.completed → confirm booking + emit payment.successful
+// Handlers live in src/api/payments.ts (webhooksRouter) for testability.
 // ============================================================
-app.post('/webhooks/paystack', async (c) => {
-  const signature = c.req.header('x-paystack-signature');
-  let rawBody: string;
-  try { rawBody = await c.req.text(); }
-  catch { return c.json({ success: false, error: 'Failed to read body' }, 400); }
-
-  if (!c.env.PAYSTACK_SECRET) {
-    return c.json({ success: false, error: 'Paystack not configured' }, 503);
-  }
-
-  const computed = await hmacSha512(rawBody, c.env.PAYSTACK_SECRET);
-  if (!signature || computed !== signature) {
-    return c.json({ success: false, error: 'Invalid signature' }, 401);
-  }
-
-  let event: { event: string; data: Record<string, unknown> };
-  try { event = JSON.parse(rawBody) as typeof event; }
-  catch { return c.json({ success: false, error: 'Invalid JSON' }, 400); }
-
-  if (event.event === 'charge.success') {
-    const reference = event.data['reference'] as string | undefined;
-    if (reference) {
-      const db = c.env.DB;
-      const now = Date.now();
-
-      const booking = await db.prepare(
-        `SELECT id, status, seat_ids FROM bookings
-         WHERE (payment_reference = ? OR id = ?) AND deleted_at IS NULL LIMIT 1`
-      ).bind(reference, reference).first<{ id: string; status: string; seat_ids: string }>();
-
-      if (booking && booking.status !== 'confirmed' && booking.status !== 'cancelled') {
-        await db.prepare(
-          `UPDATE bookings
-           SET status = 'confirmed', payment_status = 'completed',
-               payment_provider = 'paystack', paid_at = ?, confirmed_at = ?
-           WHERE id = ?`
-        ).bind(now, now, booking.id).run();
-
-        const seatIds = JSON.parse(booking.seat_ids) as string[];
-        for (const seatId of seatIds) {
-          await db.prepare(
-            `UPDATE seats SET status = 'confirmed', confirmed_at = ?, updated_at = ? WHERE id = ?`
-          ).bind(now, now, seatId).run();
-        }
-
-        console.warn(`[webhook/paystack] charge.success — confirmed booking ${booking.id}`);
-      }
-    }
-  }
-
-  return c.json({ success: true });
-});
-
-// ============================================================
-// Flutterwave webhook — PUBLIC (verif-hash string verified)
-// POST /webhooks/flutterwave — handles charge.completed → confirm booking
-// Flutterwave sends the FLUTTERWAVE_SECRET value in the `verif-hash` header.
-// ============================================================
-app.post('/webhooks/flutterwave', async (c) => {
-  const verifHash = c.req.header('verif-hash');
-  let rawBody: string;
-  try { rawBody = await c.req.text(); }
-  catch { return c.json({ success: false, error: 'Failed to read body' }, 400); }
-
-  if (!c.env.FLUTTERWAVE_SECRET) {
-    return c.json({ success: false, error: 'Flutterwave not configured' }, 503);
-  }
-
-  if (!verifHash || verifHash !== c.env.FLUTTERWAVE_SECRET) {
-    return c.json({ success: false, error: 'Invalid signature' }, 401);
-  }
-
-  let event: { event: string; data: Record<string, unknown> };
-  try { event = JSON.parse(rawBody) as typeof event; }
-  catch { return c.json({ success: false, error: 'Invalid JSON' }, 400); }
-
-  if (event.event === 'charge.completed') {
-    const data = event.data;
-    const tx_ref = data['tx_ref'] as string | undefined;
-    const status = data['status'] as string | undefined;
-
-    if (tx_ref && status === 'successful') {
-      const db = c.env.DB;
-      const now = Date.now();
-
-      const booking = await db.prepare(
-        `SELECT id, status, seat_ids FROM bookings
-         WHERE (payment_reference = ? OR id = ?) AND deleted_at IS NULL LIMIT 1`
-      ).bind(tx_ref, tx_ref).first<{ id: string; status: string; seat_ids: string }>();
-
-      if (booking && booking.status !== 'confirmed' && booking.status !== 'cancelled') {
-        await db.prepare(
-          `UPDATE bookings
-           SET status = 'confirmed', payment_status = 'completed',
-               payment_provider = 'flutterwave', paid_at = ?, confirmed_at = ?
-           WHERE id = ?`
-        ).bind(now, now, booking.id).run();
-
-        const seatIds = JSON.parse(booking.seat_ids) as string[];
-        for (const seatId of seatIds) {
-          await db.prepare(
-            `UPDATE seats SET status = 'confirmed', confirmed_at = ?, updated_at = ? WHERE id = ?`
-          ).bind(now, now, seatId).run();
-        }
-
-        console.warn(`[webhook/flutterwave] charge.completed — confirmed booking ${booking.id}`);
-      }
-    }
-  }
-
-  return c.json({ success: true });
-});
+app.route('/webhooks', webhooksRouter);
 
 // ============================================================
 // P10-T5: SUPER_ADMIN Platform Analytics

@@ -1,21 +1,25 @@
 /**
- * TRN-3: Paystack Payment Integration
- * Invariants: Nigeria-First (Paystack), Offline-First (dev-mode auto-confirm), NDPR
+ * TRN-3 / T-TRN-04: Paystack + Flutterwave Payment Integration
+ * Invariants: Nigeria-First (Paystack Inline), Offline-First (dev-mode auto-confirm), NDPR,
+ *             Event-Driven (payment.successful → platform_events outbox)
  *
  * Routes (mounted at /api/payments — before requireTenantMiddleware):
- *   POST /api/payments/initiate — create Paystack transaction, return authorization_url
- *   POST /api/payments/verify  — verify Paystack payment + confirm booking
+ *   POST /api/payments/initiate              — create Paystack transaction; returns access_code for Inline popup
+ *   POST /api/payments/verify               — verify Paystack payment + confirm booking + emit payment.successful
+ *   POST /api/payments/flutterwave/initiate — create Flutterwave checkout link
+ *   POST /api/payments/flutterwave/verify   — verify Flutterwave + confirm booking + emit payment.successful
  *
- * Dev mode (PAYSTACK_SECRET unset):
- *   initiate returns { dev_mode: true } with no authorization_url
- *   verify auto-confirms the booking without calling Paystack
+ * Dev mode (PAYSTACK_SECRET / FLUTTERWAVE_SECRET unset):
+ *   initiate returns { dev_mode: true }; verify auto-confirms without calling gateway
  *
- * Webhook (mounted at /webhooks/paystack in worker.ts):
- *   POST /webhooks/paystack — HMAC-SHA512 verified; handles charge.success
+ * Webhooks (mounted at /webhooks — before jwtAuthMiddleware in worker.ts):
+ *   POST /webhooks/paystack    — HMAC-SHA512 verified; handles charge.success → confirm + emit
+ *   POST /webhooks/flutterwave — verif-hash verified; handles charge.completed → confirm + emit
  */
 import { Hono } from 'hono';
 import type { AppContext } from './types';
 import { requireFields } from './types';
+import { publishEvent } from '@webwaka/core';
 
 export const paymentsRouter = new Hono<AppContext>();
 
@@ -42,7 +46,8 @@ type DbBookingPayment = {
   payment_provider: string | null;
 };
 
-/** Confirm a booking + seats atomically via db.batch(). Called after payment verified. */
+/** Confirm a booking + seats atomically via db.batch(). Called after payment verified.
+ *  Emits payment.successful to the platform event bus (non-fatal on failure). */
 async function confirmBookingById(
   db: D1Database,
   booking: DbBookingPayment,
@@ -68,6 +73,23 @@ async function confirmBookingById(
       ).bind('confirmed', now, now, seatId)
     ),
   ]);
+
+  try {
+    await publishEvent(db, {
+      event_type: 'payment.successful',
+      aggregate_id: booking.id,
+      aggregate_type: 'booking',
+      payload: {
+        booking_id: booking.id,
+        reference,
+        provider,
+        amount_kobo: booking.total_amount,
+      },
+      timestamp: now,
+    });
+  } catch {
+    /* non-fatal — event emission must never interrupt payment confirmation */
+  }
 }
 
 // ============================================================
@@ -511,4 +533,101 @@ paymentsRouter.post('/flutterwave/verify', async (c) => {
     success: true,
     data: { status: 'confirmed', booking_id: booking.id, booking_status: 'confirmed' },
   });
+});
+
+// ============================================================
+// Webhooks Router (T-TRN-04)
+// Mounted at /webhooks in worker.ts — PUBLIC (no JWT).
+// Both handlers are HMAC/secret verified internally.
+//
+// POST /webhooks/paystack    — charge.success → confirm + emit payment.successful
+// POST /webhooks/flutterwave — charge.completed → confirm + emit payment.successful
+// ============================================================
+
+export const webhooksRouter = new Hono<AppContext>();
+
+// ── Paystack webhook ─────────────────────────────────────────
+webhooksRouter.post('/paystack', async (c) => {
+  const signature = c.req.header('x-paystack-signature');
+  let rawBody: string;
+  try { rawBody = await c.req.text(); }
+  catch { return c.json({ success: false, error: 'Failed to read body' }, 400); }
+
+  if (!c.env.PAYSTACK_SECRET) {
+    return c.json({ success: false, error: 'Paystack not configured' }, 503);
+  }
+
+  const computed = await hmacSha512(rawBody, c.env.PAYSTACK_SECRET);
+  if (!signature || computed !== signature) {
+    return c.json({ success: false, error: 'Invalid signature' }, 401);
+  }
+
+  let event: { event: string; data: Record<string, unknown> };
+  try { event = JSON.parse(rawBody) as typeof event; }
+  catch { return c.json({ success: false, error: 'Invalid JSON' }, 400); }
+
+  if (event.event === 'charge.success') {
+    const reference = event.data['reference'] as string | undefined;
+    if (reference) {
+      const db = c.env.DB;
+      const now = Date.now();
+
+      const booking = await db.prepare(
+        `SELECT id, status, total_amount, seat_ids, payment_reference, payment_provider
+         FROM bookings
+         WHERE (payment_reference = ? OR id = ?) AND deleted_at IS NULL LIMIT 1`
+      ).bind(reference, reference).first<DbBookingPayment>();
+
+      if (booking && booking.status !== 'confirmed' && booking.status !== 'cancelled') {
+        await confirmBookingById(db, booking, reference, 'paystack', now);
+        console.warn(`[webhook/paystack] charge.success — confirmed booking ${booking.id}`);
+      }
+    }
+  }
+
+  return c.json({ success: true });
+});
+
+// ── Flutterwave webhook ──────────────────────────────────────
+webhooksRouter.post('/flutterwave', async (c) => {
+  const verifHash = c.req.header('verif-hash');
+  let rawBody: string;
+  try { rawBody = await c.req.text(); }
+  catch { return c.json({ success: false, error: 'Failed to read body' }, 400); }
+
+  if (!c.env.FLUTTERWAVE_SECRET) {
+    return c.json({ success: false, error: 'Flutterwave not configured' }, 503);
+  }
+
+  if (!verifHash || verifHash !== c.env.FLUTTERWAVE_SECRET) {
+    return c.json({ success: false, error: 'Invalid signature' }, 401);
+  }
+
+  let event: { event: string; data: Record<string, unknown> };
+  try { event = JSON.parse(rawBody) as typeof event; }
+  catch { return c.json({ success: false, error: 'Invalid JSON' }, 400); }
+
+  if (event.event === 'charge.completed') {
+    const data = event.data;
+    const tx_ref = data['tx_ref'] as string | undefined;
+    const status = data['status'] as string | undefined;
+
+    if (tx_ref && status === 'successful') {
+      const db = c.env.DB;
+      const now = Date.now();
+
+      const booking = await db.prepare(
+        `SELECT id, status, total_amount, seat_ids, payment_reference, payment_provider
+         FROM bookings
+         WHERE (payment_reference = ? OR id = ?) AND deleted_at IS NULL LIMIT 1`
+      ).bind(tx_ref, tx_ref).first<DbBookingPayment>();
+
+      if (booking && booking.status !== 'confirmed' && booking.status !== 'cancelled') {
+        await confirmBookingById(db, booking, tx_ref, 'flutterwave', now);
+        console.warn(`[webhook/flutterwave] charge.completed — confirmed booking ${booking.id}`);
+      }
+    }
+  }
+
+  return c.json({ success: true });
 });

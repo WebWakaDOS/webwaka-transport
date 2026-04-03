@@ -15,6 +15,7 @@ import { DriverView } from './components/driver-view';
 import ReceiptModal, { type ReceiptData } from './components/receipt';
 import { OnboardingWizard } from './components/onboarding-wizard';
 import FareRulesPanel from './components/fare-rules-panel';
+import { PaystackInlineCheckout } from './components/paystack-inline-checkout';
 import { api, ApiError } from './api/client';
 import type { TripSummary, Route, Vehicle, Trip, OperatorStats, Booking, SeatAvailability, TripManifest, ManifestEntry, Driver, Agent, RevenueReport, RouteRevenue, PlatformOperator, OperatorNotification, DispatchDashboard, DispatchTrip, GroupedRevenueReport, RevenueReportItem, PlatformAnalytics, ApiKey, ApiKeyCreated, RouteStop } from './api/client';
 import { getConflicts } from './core/offline/db';
@@ -2708,6 +2709,7 @@ function MyBookingsModule() {
   const [error, setError] = useState('');
   const [cancelling, setCancelling] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [payingBookingId, setPayingBookingId] = useState<string | null>(null);
 
   const loadBookings = useCallback(() => {
     setLoading(true);
@@ -2783,18 +2785,43 @@ function MyBookingsModule() {
                   {formatAmount(bkg.total_amount)}
                 </div>
                 {bkg.status === 'pending' && (
-                  <button
-                    disabled={cancelling === bkg.id}
-                    onClick={e => { e.stopPropagation(); void handleCancel(bkg.id); }}
-                    style={{
-                      padding: '5px 12px', borderRadius: 8, border: '1.5px solid #dc2626',
-                      background: '#fee2e2', color: '#b91c1c', fontWeight: 600, fontSize: 12, cursor: 'pointer',
-                    }}
-                  >
-                    {cancelling === bkg.id ? '…' : 'Cancel'}
-                  </button>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button
+                      disabled={payingBookingId === bkg.id}
+                      onClick={e => { e.stopPropagation(); setPayingBookingId(bkg.id); setExpandedId(bkg.id); }}
+                      style={{
+                        padding: '5px 12px', borderRadius: 8, border: '1.5px solid #0ea5e9',
+                        background: payingBookingId === bkg.id ? '#e0f2fe' : '#0ea5e9',
+                        color: payingBookingId === bkg.id ? '#0369a1' : '#fff',
+                        fontWeight: 600, fontSize: 12, cursor: payingBookingId === bkg.id ? 'not-allowed' : 'pointer',
+                      }}
+                    >
+                      {payingBookingId === bkg.id ? 'Paying…' : 'Pay Now'}
+                    </button>
+                    <button
+                      disabled={cancelling === bkg.id}
+                      onClick={e => { e.stopPropagation(); void handleCancel(bkg.id); }}
+                      style={{
+                        padding: '5px 12px', borderRadius: 8, border: '1.5px solid #dc2626',
+                        background: '#fee2e2', color: '#b91c1c', fontWeight: 600, fontSize: 12, cursor: 'pointer',
+                      }}
+                    >
+                      {cancelling === bkg.id ? '…' : 'Cancel'}
+                    </button>
+                  </div>
                 )}
               </div>
+
+              {bkg.status === 'pending' && payingBookingId === bkg.id && (
+                <div style={{ marginTop: 10 }} onClick={e => e.stopPropagation()}>
+                  <PaystackInlineCheckout
+                    bookingId={bkg.id}
+                    amountKobo={bkg.total_amount}
+                    onSuccess={() => { setPayingBookingId(null); loadBookings(); }}
+                    onCancel={() => setPayingBookingId(null)}
+                  />
+                </div>
+              )}
 
               {isExpanded && (
                 <div style={{ marginTop: 12, borderTop: '1px solid #e2e8f0', paddingTop: 12 }}

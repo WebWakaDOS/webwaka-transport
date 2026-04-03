@@ -7,7 +7,7 @@ import { seatInventoryRouter } from './seat-inventory';
 import { agentSalesRouter } from './agent-sales';
 import { bookingPortalRouter } from './booking-portal';
 import { operatorManagementRouter } from './operator-management';
-import { paymentsRouter } from './payments';
+import { paymentsRouter, webhooksRouter, hmacSha512 } from './payments';
 import { authRouter } from './auth';
 
 // ============================================================
@@ -2991,5 +2991,220 @@ describe('T-TRN-03: Booking Fare Lock Integration', () => {
     const body = await res.json() as any;
     expect(body.success).toBe(true);
     expect(body.data.expected_kobo).toBe(500_000);
+  });
+});
+
+// ============================================================
+// T-TRN-04: Paystack Inline Payment — Webhook & Event Emission
+// ============================================================
+describe('T-TRN-04: Paystack Inline — webhook verification and payment.successful event', () => {
+  const PAYSTACK_SECRET = 'test_paystack_key_trnx04_waka';
+
+  function makeWebhookEnv(db: any, opts: { paystack?: boolean; flutterwave?: boolean } = {}) {
+    return {
+      DB: db,
+      ...(opts.paystack !== false ? { PAYSTACK_SECRET } : {}),
+      ...(opts.flutterwave ? { FLUTTERWAVE_SECRET: PAYSTACK_SECRET } : {}),
+    };
+  }
+
+  async function signPaystack(body: string): Promise<string> {
+    return hmacSha512(body, PAYSTACK_SECRET);
+  }
+
+  it('POST /webhooks/paystack returns 503 when PAYSTACK_SECRET is not configured', async () => {
+    const db = createMockDB();
+    const body = JSON.stringify({ event: 'charge.success', data: { reference: 'ref_001' } });
+    const sig = await signPaystack(body);
+    const res = await webhooksRouter.request('/paystack', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-paystack-signature': sig },
+      body,
+    }, { DB: db });
+    expect(res.status).toBe(503);
+  });
+
+  it('POST /webhooks/paystack returns 401 for invalid HMAC signature', async () => {
+    const db = createMockDB();
+    const body = JSON.stringify({ event: 'charge.success', data: { reference: 'ref_002' } });
+    const res = await webhooksRouter.request('/paystack', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-paystack-signature': 'deadbeef000000000000000000000000bad_sig',
+      },
+      body,
+    }, makeWebhookEnv(db, { paystack: true }));
+    expect(res.status).toBe(401);
+    const json = await res.json() as any;
+    expect(json.error).toBe('Invalid signature');
+  });
+
+  it('POST /webhooks/paystack confirms booking and emits payment.successful on charge.success', async () => {
+    const db = createMockDB();
+    const bookingId = 'bkg_trnx04_ps';
+    db._tables.bookings.push({
+      id: bookingId, status: 'pending', payment_status: 'pending',
+      total_amount: 500_000, seat_ids: JSON.stringify(['seat_ps1']),
+      payment_reference: null, payment_provider: null,
+      deleted_at: null, created_at: Date.now(),
+    });
+    db._tables.seats.push({
+      id: 'seat_ps1', trip_id: 'trp_ps1', seat_number: '01', status: 'reserved', version: 1,
+    });
+
+    const payload = JSON.stringify({ event: 'charge.success', data: { reference: bookingId } });
+    const sig = await signPaystack(payload);
+
+    const res = await webhooksRouter.request('/paystack', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-paystack-signature': sig },
+      body: payload,
+    }, makeWebhookEnv(db, { paystack: true }));
+
+    expect(res.status).toBe(200);
+    const json = await res.json() as any;
+    expect(json.success).toBe(true);
+
+    const booking = db._tables.bookings.find((b: any) => b.id === bookingId);
+    expect(booking?.status).toBe('confirmed');
+    expect(booking?.payment_status).toBe('completed');
+    expect(booking?.payment_provider).toBe('paystack');
+
+    const seat = db._tables.seats.find((s: any) => s.id === 'seat_ps1');
+    expect(seat?.status).toBe('confirmed');
+
+    const events = db._tables.platform_events.filter(
+      (e: any) => e.event_type === 'payment.successful'
+    );
+    expect(events.length).toBeGreaterThanOrEqual(1);
+    const evtPayload = JSON.parse(events[0].payload);
+    expect(evtPayload.booking_id).toBe(bookingId);
+    expect(evtPayload.provider).toBe('paystack');
+    expect(evtPayload.amount_kobo).toBe(500_000);
+  });
+
+  it('POST /webhooks/paystack is idempotent — skips already-confirmed bookings', async () => {
+    const db = createMockDB();
+    const bookingId = 'bkg_idem_04';
+    db._tables.bookings.push({
+      id: bookingId, status: 'confirmed', payment_status: 'completed',
+      total_amount: 300_000, seat_ids: JSON.stringify([]),
+      payment_reference: `waka_${bookingId}`, payment_provider: 'paystack',
+      deleted_at: null, created_at: Date.now(),
+    });
+
+    const payload = JSON.stringify({ event: 'charge.success', data: { reference: bookingId } });
+    const sig = await signPaystack(payload);
+
+    const res = await webhooksRouter.request('/paystack', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-paystack-signature': sig },
+      body: payload,
+    }, makeWebhookEnv(db, { paystack: true }));
+
+    expect(res.status).toBe(200);
+    const events = db._tables.platform_events.filter(
+      (e: any) => e.event_type === 'payment.successful'
+    );
+    expect(events.length).toBe(0);
+  });
+
+  it('POST /webhooks/flutterwave confirms booking and emits payment.successful on charge.completed', async () => {
+    const db = createMockDB();
+    const bookingId = 'bkg_fw04';
+    const tx_ref = bookingId;
+    db._tables.bookings.push({
+      id: bookingId, status: 'pending', payment_status: 'pending',
+      total_amount: 400_000, seat_ids: JSON.stringify(['seat_fw1']),
+      payment_reference: tx_ref, payment_provider: null,
+      deleted_at: null, created_at: Date.now(),
+    });
+    db._tables.seats.push({
+      id: 'seat_fw1', trip_id: 'trp_fw1', seat_number: 'A1', status: 'reserved', version: 1,
+    });
+
+    const payload = JSON.stringify({
+      event: 'charge.completed',
+      data: { tx_ref, status: 'successful', amount: 4000, currency: 'NGN' },
+    });
+
+    const res = await webhooksRouter.request('/flutterwave', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'verif-hash': PAYSTACK_SECRET },
+      body: payload,
+    }, { DB: db, FLUTTERWAVE_SECRET: PAYSTACK_SECRET });
+
+    expect(res.status).toBe(200);
+    const booking = db._tables.bookings.find((b: any) => b.id === bookingId);
+    expect(booking?.status).toBe('confirmed');
+    expect(booking?.payment_provider).toBe('flutterwave');
+
+    const seat = db._tables.seats.find((s: any) => s.id === 'seat_fw1');
+    expect(seat?.status).toBe('confirmed');
+
+    const events = db._tables.platform_events.filter(
+      (e: any) => e.event_type === 'payment.successful'
+    );
+    expect(events.length).toBeGreaterThanOrEqual(1);
+    expect(JSON.parse(events[0].payload).provider).toBe('flutterwave');
+  });
+
+  it('POST /api/payments/verify (dev mode) emits payment.successful event', async () => {
+    const db = createMockDB();
+    const bookingId = 'bkg_verify04';
+    db._tables.bookings.push({
+      id: bookingId, status: 'pending', payment_status: 'pending',
+      total_amount: 200_000, seat_ids: JSON.stringify(['seat_v1']),
+      payment_reference: null, payment_provider: null,
+      deleted_at: null, created_at: Date.now(),
+    });
+    db._tables.seats.push({
+      id: 'seat_v1', trip_id: 'trp_v1', seat_number: 'B2', status: 'reserved', version: 1,
+    });
+
+    const res = await paymentsRouter.request('/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ booking_id: bookingId }),
+    }, { DB: db });
+
+    expect(res.status).toBe(200);
+    const json = await res.json() as any;
+    expect(json.success).toBe(true);
+    expect(json.data.status).toBe('dev_confirmed');
+
+    const events = db._tables.platform_events.filter(
+      (e: any) => e.event_type === 'payment.successful'
+    );
+    expect(events.length).toBeGreaterThanOrEqual(1);
+    const evtPayload = JSON.parse(events[0].payload);
+    expect(evtPayload.booking_id).toBe(bookingId);
+    expect(evtPayload.provider).toBe('dev');
+  });
+
+  it('POST /api/payments/verify already-confirmed returns 200 without re-emitting event', async () => {
+    const db = createMockDB();
+    const bookingId = 'bkg_already_done';
+    db._tables.bookings.push({
+      id: bookingId, status: 'confirmed', payment_status: 'completed',
+      total_amount: 150_000, seat_ids: JSON.stringify([]),
+      payment_reference: 'waka_bkg_already_done', payment_provider: 'paystack',
+      deleted_at: null, created_at: Date.now(),
+    });
+
+    const res = await paymentsRouter.request('/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ booking_id: bookingId }),
+    }, { DB: db });
+
+    expect(res.status).toBe(200);
+    const json = await res.json() as any;
+    expect(json.data.status).toBe('already_confirmed');
+    const events = db._tables.platform_events.filter(
+      (e: any) => e.event_type === 'payment.successful'
+    );
+    expect(events.length).toBe(0);
   });
 });
