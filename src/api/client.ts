@@ -596,6 +596,53 @@ export class ApiClient {
     return this.request('POST', '/api/payments/flutterwave/verify', opts);
   }
 
+  // ============================================================
+  // T-TRN-05: Logistics — parcel waybill cargo management
+  // ============================================================
+
+  async loadParcel(tripId: string, parcel: {
+    tracking_ref: string;
+    description?: string;
+    weight_kg?: number;
+    sender_name?: string;
+    receiver_name?: string;
+    receiver_phone?: string;
+  }): Promise<{
+    id: string;
+    trip_id: string;
+    tracking_ref: string;
+    description: string | null;
+    weight_kg: number | null;
+    sender_name: string | null;
+    receiver_name: string | null;
+    receiver_phone: string | null;
+    loaded_at: number;
+    status: string;
+  }> {
+    return this.request('POST', `/api/logistics/trips/${tripId}/parcels`, parcel);
+  }
+
+  async getTripParcels(tripId: string): Promise<Array<{
+    id: string;
+    trip_id: string;
+    tracking_ref: string;
+    description: string | null;
+    weight_kg: number | null;
+    sender_name: string | null;
+    receiver_name: string | null;
+    receiver_phone: string | null;
+    loaded_at: number;
+    loaded_by: string | null;
+    unloaded_at: number | null;
+    status: string;
+  }>> {
+    return this.request('GET', `/api/logistics/trips/${tripId}/parcels`);
+  }
+
+  async removeParcel(tripId: string, trackingRef: string): Promise<{ trip_id: string; tracking_ref: string; status: string; unloaded_at: number }> {
+    return this.request('DELETE', `/api/logistics/trips/${tripId}/parcels/${encodeURIComponent(trackingRef)}`);
+  }
+
   async getBookings(params?: { customer_id?: string; status?: string }): Promise<Booking[]> {
     const q = params ? new URLSearchParams(
       Object.fromEntries(Object.entries(params).filter(([, v]) => v))

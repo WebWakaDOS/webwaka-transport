@@ -34,6 +34,7 @@ import { operatorManagementRouter } from './api/operator-management.js';
 import { adminRouter } from './api/admin.js';
 import { authRouter } from './api/auth.js';
 import { paymentsRouter, webhooksRouter } from './api/payments.js';
+import { logisticsRouter } from './api/logistics.js';
 import { jwtAuthMiddleware, requireTenantMiddleware, requireRole } from './middleware/auth.js';
 import { idempotencyMiddleware } from './middleware/idempotency.js';
 import {
@@ -210,6 +211,8 @@ app.route('/api/agent-sales', agentSalesRouter);
 app.route('/api/booking', bookingPortalRouter);
 app.route('/api/operator', operatorManagementRouter);
 app.route('/api/notifications', notificationsRouter);
+// T-TRN-05: Parcel waybill recording — dispatcher cargo management
+app.route('/api/logistics', logisticsRouter);
 
 // ============================================================
 // Webhooks — PUBLIC (no JWT). HMAC/secret verified inside handlers.

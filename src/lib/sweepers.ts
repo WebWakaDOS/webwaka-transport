@@ -269,6 +269,13 @@ async function deliverEvent(evt: Record<string, unknown>, env: Env): Promise<voi
     return;
   }
 
+  // T-TRN-05: trip.cargo_loaded / trip.cargo_unloaded → logistics service
+  // Transport records the physical cargo movement; Logistics owns delivery tracking.
+  if (eventType === 'trip.cargo_loaded' || eventType === 'trip.cargo_unloaded') {
+    await deliverToConsumer('https://logistics.webwaka.app/api/internal/events', evt);
+    return;
+  }
+
   // payment:AMOUNT_MISMATCH → fraud alert log
   if (eventType === 'payment:AMOUNT_MISMATCH') {
     console.error(`[EventBus] FRAUD ALERT: payment:AMOUNT_MISMATCH — booking ${evt['aggregate_id']}`);

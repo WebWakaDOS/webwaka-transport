@@ -1062,6 +1062,16 @@ operatorManagementRouter.post('/trips/:id/transition', requireRole(['SUPER_ADMIN
       });
     } catch { /* non-fatal */ }
 
+    // T-TRN-05: emit trip.cargo_unloaded for all on-board parcels when trip completes
+    if (to_state === 'completed') {
+      void (async () => {
+        try {
+          const { emitCargoUnloadedOnTripComplete } = await import('./logistics.js');
+          await emitCargoUnloadedOnTripComplete(db, id, trip.operator_id, now);
+        } catch { /* non-fatal — cargo event must not block the transition response */ }
+      })();
+    }
+
     return c.json({ success: true, data: { id, from_state: trip.state, to_state, transitioned_at: now } });
   } catch {
     return c.json({ success: false, error: 'Failed to transition trip state' }, 500);

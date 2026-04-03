@@ -10,6 +10,7 @@ import { operatorManagementRouter } from './operator-management';
 import { paymentsRouter, webhooksRouter, hmacSha512 } from './payments';
 import { authRouter } from './auth';
 import { drainEventBus } from '../lib/sweepers';
+import { logisticsRouter } from './logistics';
 
 // ============================================================
 // Mock D1 Database
@@ -19,7 +20,7 @@ function createMockDB() {
     trips: [], seats: [], operators: [], routes: [], vehicles: [],
     agents: [], sales_transactions: [], receipts: [], customers: [],
     bookings: [], trip_state_transitions: [], sync_mutations: [], drivers: [],
-    platform_events: [], fare_rules: [],
+    platform_events: [], fare_rules: [], trip_parcels: [],
   };
 
   function matchesWhere(row: any, whereClause: string, params: any[]): boolean {
@@ -3299,5 +3300,333 @@ describe('T-TRN-04: drainEventBus — payment.successful consumer', () => {
     expect(evt).toBeDefined();
     expect(evt.status).not.toBe('pending');
     expect(evt.retry_count).toBeNull();
+  });
+});
+
+// ============================================================
+// T-TRN-05: Digital Parcel Waybill Recording
+// logisticsRouter: POST/GET/DELETE /api/logistics/trips/:tripId/parcels
+// emitCargoUnloadedOnTripComplete + drainEventBus forwarding
+// ============================================================
+describe('T-TRN-05: Logistics — cargo parcel endpoints', () => {
+  let db: any;
+
+  beforeEach(() => {
+    db = createMockDB();
+    // Pre-populate an active trip
+    db._tables.trips.push({
+      id: 'trp_cargo_01',
+      operator_id: 'opr_1',
+      state: 'boarding',
+      deleted_at: null,
+      created_at: Date.now(),
+    });
+    // Pre-populate a completed trip (no parcels should be loadable)
+    db._tables.trips.push({
+      id: 'trp_done_01',
+      operator_id: 'opr_1',
+      state: 'completed',
+      deleted_at: null,
+      created_at: Date.now(),
+    });
+  });
+
+  // ── T05-01 ──────────────────────────────────────────────────
+  it('POST /trips/:tripId/parcels returns 400 when tracking_ref missing', async () => {
+    const res = await logisticsRouter.request('/trips/trp_cargo_01/parcels', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ description: 'Bag of rice' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(400);
+    const body = await res.json() as any;
+    expect(body.success).toBe(false);
+    expect(body.error).toMatch(/tracking_ref/);
+  });
+
+  // ── T05-02 ──────────────────────────────────────────────────
+  it('POST /trips/:tripId/parcels returns 404 for unknown trip', async () => {
+    const res = await logisticsRouter.request('/trips/trp_ghost_99/parcels', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tracking_ref: 'PKG-999' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(404);
+    const body = await res.json() as any;
+    expect(body.success).toBe(false);
+    expect(body.error).toMatch(/not found/i);
+  });
+
+  // ── T05-03 ──────────────────────────────────────────────────
+  it('POST /trips/:tripId/parcels returns 409 when trip is completed', async () => {
+    const res = await logisticsRouter.request('/trips/trp_done_01/parcels', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tracking_ref: 'PKG-123' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(409);
+    const body = await res.json() as any;
+    expect(body.success).toBe(false);
+    expect(body.error).toMatch(/completed/i);
+  });
+
+  // ── T05-04 ──────────────────────────────────────────────────
+  it('POST /trips/:tripId/parcels loads a parcel successfully and emits event', async () => {
+    const res = await logisticsRouter.request('/trips/trp_cargo_01/parcels', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tracking_ref: 'PKG-001',
+        description: 'Laptop bag',
+        weight_kg: 2.5,
+        sender_name: 'Emeka Obi',
+        receiver_name: 'Fatima Bello',
+        receiver_phone: '08031234567',
+      }),
+    }, makeEnv(db));
+
+    expect(res.status).toBe(201);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.tracking_ref).toBe('PKG-001');
+    expect(body.data.status).toBe('on_board');
+    expect(body.data.description).toBe('Laptop bag');
+    expect(body.data.weight_kg).toBe(2.5);
+    expect(body.data.sender_name).toBe('Emeka Obi');
+
+    // Parcel persisted in DB
+    const savedParcels = db._tables.trip_parcels;
+    expect(savedParcels.length).toBe(1);
+    expect(savedParcels[0].tracking_ref).toBe('PKG-001');
+    expect(savedParcels[0].trip_id).toBe('trp_cargo_01');
+    expect(savedParcels[0].status).toBe('on_board');
+
+    // Event emitted
+    const events = db._tables.platform_events.filter((e: any) => e.event_type === 'trip.cargo_loaded');
+    expect(events.length).toBe(1);
+    const payload = JSON.parse(events[0].payload);
+    expect(payload.trip_id).toBe('trp_cargo_01');
+    expect(payload.parcels[0].tracking_ref).toBe('PKG-001');
+  });
+
+  // ── T05-05 ──────────────────────────────────────────────────
+  it('POST /trips/:tripId/parcels normalises tracking_ref to uppercase', async () => {
+    const res = await logisticsRouter.request('/trips/trp_cargo_01/parcels', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tracking_ref: 'pkg-lower-case' }),
+    }, makeEnv(db));
+    expect(res.status).toBe(201);
+    const body = await res.json() as any;
+    expect(body.data.tracking_ref).toBe('PKG-LOWER-CASE');
+  });
+
+  // ── T05-06 ──────────────────────────────────────────────────
+  it('GET /trips/:tripId/parcels returns 404 for unknown trip', async () => {
+    const res = await logisticsRouter.request('/trips/trp_ghost_list/parcels', {}, makeEnv(db));
+    expect(res.status).toBe(404);
+    const body = await res.json() as any;
+    expect(body.success).toBe(false);
+  });
+
+  // ── T05-07 ──────────────────────────────────────────────────
+  it('GET /trips/:tripId/parcels returns empty list when none loaded', async () => {
+    const res = await logisticsRouter.request('/trips/trp_cargo_01/parcels', {}, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(Array.isArray(body.data)).toBe(true);
+    expect(body.data.length).toBe(0);
+    expect(body.meta.count).toBe(0);
+  });
+
+  // ── T05-08 ──────────────────────────────────────────────────
+  it('GET /trips/:tripId/parcels returns loaded parcels', async () => {
+    // Pre-populate two parcels
+    const now = Date.now();
+    db._tables.trip_parcels.push({
+      id: 'prc_t01', trip_id: 'trp_cargo_01', operator_id: 'opr_1',
+      tracking_ref: 'PKG-A', description: 'Parcel A', weight_kg: 1.0,
+      sender_name: 'Alice', receiver_name: 'Bob', receiver_phone: null,
+      loaded_at: now - 5000, loaded_by: null, unloaded_at: null,
+      status: 'on_board', created_at: now - 5000,
+    });
+    db._tables.trip_parcels.push({
+      id: 'prc_t02', trip_id: 'trp_cargo_01', operator_id: 'opr_1',
+      tracking_ref: 'PKG-B', description: 'Parcel B', weight_kg: 3.5,
+      sender_name: 'Carol', receiver_name: 'Dave', receiver_phone: null,
+      loaded_at: now, loaded_by: null, unloaded_at: null,
+      status: 'on_board', created_at: now,
+    });
+
+    const res = await logisticsRouter.request('/trips/trp_cargo_01/parcels', {}, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.length).toBe(2);
+    expect(body.meta.count).toBe(2);
+    const refs = body.data.map((p: any) => p.tracking_ref);
+    expect(refs).toContain('PKG-A');
+    expect(refs).toContain('PKG-B');
+  });
+
+  // ── T05-09 ──────────────────────────────────────────────────
+  it('DELETE /trips/:tripId/parcels/:trackingRef returns 404 for unknown trip', async () => {
+    const res = await logisticsRouter.request(
+      '/trips/trp_ghost_del/parcels/PKG-001',
+      { method: 'DELETE' },
+      makeEnv(db)
+    );
+    expect(res.status).toBe(404);
+    const body = await res.json() as any;
+    expect(body.success).toBe(false);
+  });
+
+  // ── T05-10 ──────────────────────────────────────────────────
+  it('DELETE /trips/:tripId/parcels/:trackingRef removes an on_board parcel and emits event', async () => {
+    // Mock first() for trip_parcels matches by last param = trackingRef
+    // → set parcel id = 'PKG-DEL' (same as trackingRef)
+    db._tables.trip_parcels.push({
+      id: 'PKG-DEL',
+      trip_id: 'trp_cargo_01',
+      operator_id: 'opr_1',
+      tracking_ref: 'PKG-DEL',
+      description: 'Remove me',
+      weight_kg: null,
+      sender_name: null,
+      receiver_name: null,
+      receiver_phone: null,
+      loaded_at: Date.now() - 10000,
+      loaded_by: null,
+      unloaded_at: null,
+      status: 'on_board',
+      created_at: Date.now() - 10000,
+    });
+
+    const res = await logisticsRouter.request(
+      '/trips/trp_cargo_01/parcels/PKG-DEL',
+      { method: 'DELETE' },
+      makeEnv(db)
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.success).toBe(true);
+    expect(body.data.tracking_ref).toBe('PKG-DEL');
+    expect(body.data.status).toBe('removed');
+    expect(typeof body.data.unloaded_at).toBe('number');
+
+    // DB updated
+    const parcel = db._tables.trip_parcels.find((p: any) => p.id === 'PKG-DEL');
+    expect(parcel.status).toBe('removed');
+
+    // Event emitted
+    const events = db._tables.platform_events.filter((e: any) => e.event_type === 'trip.cargo_unloaded');
+    expect(events.length).toBe(1);
+    const payload = JSON.parse(events[0].payload);
+    expect(payload.reason).toBe('manual_removal');
+    expect(payload.tracking_refs).toContain('PKG-DEL');
+  });
+
+  // ── T05-11 ──────────────────────────────────────────────────
+  it('DELETE returns 409 when parcel is already delivered (not on_board)', async () => {
+    db._tables.trip_parcels.push({
+      id: 'PKG-DONE',
+      trip_id: 'trp_cargo_01',
+      operator_id: 'opr_1',
+      tracking_ref: 'PKG-DONE',
+      description: null, weight_kg: null,
+      sender_name: null, receiver_name: null, receiver_phone: null,
+      loaded_at: Date.now() - 50000, loaded_by: null,
+      unloaded_at: Date.now() - 1000,
+      status: 'delivered',
+      created_at: Date.now() - 50000,
+    });
+
+    const res = await logisticsRouter.request(
+      '/trips/trp_cargo_01/parcels/PKG-DONE',
+      { method: 'DELETE' },
+      makeEnv(db)
+    );
+    expect(res.status).toBe(409);
+    const body = await res.json() as any;
+    expect(body.success).toBe(false);
+    expect(body.error).toMatch(/delivered/i);
+  });
+
+  // ── T05-12 ──────────────────────────────────────────────────
+  it('drainEventBus forwards trip.cargo_loaded to logistics consumer URL', async () => {
+    // Stub global fetch to capture outbound event forwarding
+    const fetchCalls: string[] = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async (url: any, _opts?: any) => {
+      fetchCalls.push(String(url));
+      return new Response('{}', { status: 200 });
+    };
+
+    try {
+      db._tables.platform_events.push({
+        id: 'evt-cargo-loaded-01',
+        event_type: 'trip.cargo_loaded',
+        aggregate_id: 'trp_cargo_01',
+        aggregate_type: 'trip',
+        payload: JSON.stringify({
+          trip_id: 'trp_cargo_01',
+          operator_id: 'opr_1',
+          parcels: [{ tracking_ref: 'PKG-SWEEP-1' }],
+          total_parcels_on_trip: 1,
+        }),
+        status: 'pending',
+        retry_count: null,
+        created_at: Date.now() - 3000,
+      });
+
+      await drainEventBus({ DB: db } as any);
+
+      const logisticsCalls = fetchCalls.filter(u => u.includes('logistics.webwaka.app'));
+      expect(logisticsCalls.length).toBeGreaterThanOrEqual(1);
+
+      const evt = db._tables.platform_events.find((e: any) => e.id === 'evt-cargo-loaded-01');
+      expect(evt.status).not.toBe('pending');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  // ── T05-13 ──────────────────────────────────────────────────
+  it('drainEventBus forwards trip.cargo_unloaded to logistics consumer URL', async () => {
+    const fetchCalls: string[] = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async (url: any, _opts?: any) => {
+      fetchCalls.push(String(url));
+      return new Response('{}', { status: 200 });
+    };
+
+    try {
+      db._tables.platform_events.push({
+        id: 'evt-cargo-unloaded-01',
+        event_type: 'trip.cargo_unloaded',
+        aggregate_id: 'trp_cargo_01',
+        aggregate_type: 'trip',
+        payload: JSON.stringify({
+          trip_id: 'trp_cargo_01',
+          operator_id: 'opr_1',
+          tracking_refs: ['PKG-A', 'PKG-B'],
+          reason: 'trip_completed',
+        }),
+        status: 'pending',
+        retry_count: null,
+        created_at: Date.now() - 3000,
+      });
+
+      await drainEventBus({ DB: db } as any);
+
+      const logisticsCalls = fetchCalls.filter(u => u.includes('logistics.webwaka.app'));
+      expect(logisticsCalls.length).toBeGreaterThanOrEqual(1);
+
+      const evt = db._tables.platform_events.find((e: any) => e.id === 'evt-cargo-unloaded-01');
+      expect(evt.status).not.toBe('pending');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
   });
 });

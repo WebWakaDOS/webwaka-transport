@@ -1241,6 +1241,254 @@ function OperatorOverview({ onNav }: { onNav: (v: OperatorView) => void }) {
 }
 
 // ============================================================
+// T-TRN-05: TripCargoPanel — load/unload parcels on a trip
+// ============================================================
+type TripParcel = {
+  id: string;
+  tracking_ref: string;
+  description: string | null;
+  weight_kg: number | null;
+  sender_name: string | null;
+  receiver_name: string | null;
+  status: string;
+  loaded_at: number;
+};
+
+function TripCargoPanel({ tripId, tripState }: { tripId: string; tripState: string }) {
+  const [open, setOpen] = useState(false);
+  const [parcels, setParcels] = useState<TripParcel[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [trackingRef, setTrackingRef] = useState('');
+  const [description, setDescription] = useState('');
+  const [weightKg, setWeightKg] = useState('');
+  const [senderName, setSenderName] = useState('');
+  const [receiverName, setReceiverName] = useState('');
+  const [receiverPhone, setReceiverPhone] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [removing, setRemoving] = useState<string | null>(null);
+  const [error, setError] = useState('');
+  const [showForm, setShowForm] = useState(false);
+
+  const loadParcels = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const data = await api.getTripParcels(tripId);
+      setParcels(data);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Failed to load parcels');
+    } finally {
+      setLoading(false);
+    }
+  }, [tripId]);
+
+  useEffect(() => {
+    if (open) void loadParcels();
+  }, [open, loadParcels]);
+
+  const handleLoad = useCallback(async () => {
+    const ref = trackingRef.trim().toUpperCase();
+    if (!ref) { setError('Enter a tracking reference'); return; }
+    setAdding(true);
+    setError('');
+    try {
+      const parcel = await api.loadParcel(tripId, {
+        tracking_ref: ref,
+        description: description.trim() || undefined,
+        weight_kg: weightKg ? parseFloat(weightKg) : undefined,
+        sender_name: senderName.trim() || undefined,
+        receiver_name: receiverName.trim() || undefined,
+        receiver_phone: receiverPhone.trim() || undefined,
+      });
+      setParcels(prev => [...prev, parcel as TripParcel]);
+      setTrackingRef('');
+      setDescription('');
+      setWeightKg('');
+      setSenderName('');
+      setReceiverName('');
+      setReceiverPhone('');
+      setShowForm(false);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Failed to load parcel');
+    } finally {
+      setAdding(false);
+    }
+  }, [tripId, trackingRef, description, weightKg, senderName, receiverName, receiverPhone]);
+
+  const handleRemove = useCallback(async (ref: string) => {
+    setRemoving(ref);
+    setError('');
+    try {
+      await api.removeParcel(tripId, ref);
+      setParcels(prev => prev.map(p => p.tracking_ref === ref ? { ...p, status: 'removed' } : p));
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Failed to remove parcel');
+    } finally {
+      setRemoving(null);
+    }
+  }, [tripId]);
+
+  const canLoad = tripState !== 'completed' && tripState !== 'cancelled';
+  const onBoard = parcels.filter(p => p.status === 'on_board');
+  const count = onBoard.length;
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          width: '100%', textAlign: 'left', background: '#f1f5f9',
+          border: 'none', borderRadius: 8, padding: '6px 10px', cursor: 'pointer',
+          fontSize: 12, fontWeight: 600, color: '#475569', display: 'flex',
+          alignItems: 'center', justifyContent: 'space-between',
+        }}
+      >
+        <span>📦 Cargo ({count} on board)</span>
+        <span>{open ? '▲' : '▼'}</span>
+      </button>
+
+      {open && (
+        <div style={{ background: '#f8fafc', borderRadius: 8, padding: 10, marginTop: 4, border: '1px solid #e2e8f0' }}>
+          {error && (
+            <div style={{ padding: '6px 10px', background: '#fee2e2', color: '#b91c1c', borderRadius: 6, fontSize: 12, marginBottom: 8 }}>
+              {error}
+            </div>
+          )}
+
+          {loading ? (
+            <p style={{ fontSize: 12, color: '#94a3b8', textAlign: 'center' }}>Loading…</p>
+          ) : parcels.length === 0 ? (
+            <p style={{ fontSize: 12, color: '#94a3b8', textAlign: 'center' }}>No parcels loaded on this trip</p>
+          ) : (
+            <div style={{ marginBottom: 8 }}>
+              {parcels.map(p => (
+                <div key={p.id} style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  padding: '5px 8px', background: p.status === 'on_board' ? '#fff' : '#f1f5f9',
+                  borderRadius: 6, marginBottom: 4, border: '1px solid #e2e8f0',
+                }}>
+                  <div>
+                    <span style={{ fontWeight: 700, fontSize: 12 }}>{p.tracking_ref}</span>
+                    {p.description && <span style={{ fontSize: 11, color: '#64748b', marginLeft: 6 }}>{p.description}</span>}
+                    {p.weight_kg != null && <span style={{ fontSize: 11, color: '#64748b', marginLeft: 6 }}>{p.weight_kg}kg</span>}
+                    <span style={{
+                      marginLeft: 6, fontSize: 10, fontWeight: 700, padding: '1px 6px',
+                      borderRadius: 8,
+                      background: p.status === 'on_board' ? '#d1fae5' : '#f1f5f9',
+                      color: p.status === 'on_board' ? '#065f46' : '#94a3b8',
+                    }}>
+                      {p.status === 'on_board' ? 'ON BOARD' : p.status.toUpperCase()}
+                    </span>
+                  </div>
+                  {p.status === 'on_board' && canLoad && (
+                    <button
+                      onClick={() => void handleRemove(p.tracking_ref)}
+                      disabled={removing === p.tracking_ref}
+                      style={{
+                        background: 'none', border: '1px solid #fca5a5', borderRadius: 6,
+                        padding: '2px 8px', fontSize: 11, color: '#dc2626', cursor: 'pointer',
+                      }}
+                    >
+                      {removing === p.tracking_ref ? '…' : 'Remove'}
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {canLoad && (
+            <>
+              {!showForm ? (
+                <button
+                  onClick={() => setShowForm(true)}
+                  style={{
+                    width: '100%', padding: '7px 0', borderRadius: 8, border: 'none',
+                    background: '#2563eb', color: '#fff', fontWeight: 700, fontSize: 13,
+                    cursor: 'pointer',
+                  }}
+                >
+                  + Load Parcel
+                </button>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <input
+                    value={trackingRef}
+                    onChange={e => setTrackingRef(e.target.value.toUpperCase())}
+                    placeholder="Tracking ref (e.g. PKG-001) *"
+                    style={{ padding: '7px 10px', borderRadius: 7, border: '1px solid #cbd5e1', fontSize: 13, fontWeight: 700, letterSpacing: 1 }}
+                    onKeyDown={e => { if (e.key === 'Enter') void handleLoad(); }}
+                  />
+                  <input
+                    value={description}
+                    onChange={e => setDescription(e.target.value)}
+                    placeholder="Description (optional)"
+                    style={{ padding: '7px 10px', borderRadius: 7, border: '1px solid #cbd5e1', fontSize: 13 }}
+                  />
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <input
+                      value={weightKg}
+                      onChange={e => setWeightKg(e.target.value)}
+                      placeholder="Weight (kg)"
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      style={{ padding: '7px 10px', borderRadius: 7, border: '1px solid #cbd5e1', fontSize: 13, flex: 1 }}
+                    />
+                    <input
+                      value={senderName}
+                      onChange={e => setSenderName(e.target.value)}
+                      placeholder="Sender name"
+                      style={{ padding: '7px 10px', borderRadius: 7, border: '1px solid #cbd5e1', fontSize: 13, flex: 1 }}
+                    />
+                  </div>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <input
+                      value={receiverName}
+                      onChange={e => setReceiverName(e.target.value)}
+                      placeholder="Receiver name"
+                      style={{ padding: '7px 10px', borderRadius: 7, border: '1px solid #cbd5e1', fontSize: 13, flex: 1 }}
+                    />
+                    <input
+                      value={receiverPhone}
+                      onChange={e => setReceiverPhone(e.target.value)}
+                      placeholder="Receiver phone"
+                      type="tel"
+                      style={{ padding: '7px 10px', borderRadius: 7, border: '1px solid #cbd5e1', fontSize: 13, flex: 1 }}
+                    />
+                  </div>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button
+                      onClick={() => void handleLoad()}
+                      disabled={adding || !trackingRef.trim()}
+                      style={{
+                        flex: 1, padding: '8px 0', borderRadius: 8, border: 'none',
+                        background: adding || !trackingRef.trim() ? '#94a3b8' : '#16a34a',
+                        color: '#fff', fontWeight: 700, fontSize: 13, cursor: 'pointer',
+                      }}
+                    >
+                      {adding ? 'Loading…' : 'Confirm Load'}
+                    </button>
+                    <button
+                      onClick={() => { setShowForm(false); setTrackingRef(''); setError(''); }}
+                      style={{
+                        padding: '8px 14px', borderRadius: 8, border: '1px solid #cbd5e1',
+                        background: '#fff', color: '#64748b', fontSize: 13, cursor: 'pointer',
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // P10-T2: DispatcherDashboard — active trips with GPS + seats
 // ============================================================
 function DispatcherDashboard({ onBack }: { onBack: () => void }) {
@@ -1340,6 +1588,8 @@ function DispatcherDashboard({ onBack }: { onBack: () => void }) {
             <div style={{ marginTop: 4, fontSize: 11, color: '#94a3b8' }}>
               {trip.confirmed_bookings} confirmed booking{trip.confirmed_bookings !== 1 ? 's' : ''} · ID: {trip.id}
             </div>
+
+            <TripCargoPanel tripId={trip.id} tripState={trip.state} />
           </div>
         ))
       )}
