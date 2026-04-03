@@ -1984,6 +1984,84 @@ describe('T-TRN-02: POST /transactions — stores next_of_kin_name and next_of_k
   });
 });
 
+describe('T-TRN-02: GET /trips/:id/manifest CSV — includes both bookings and agent sales (FRSC compliance)', () => {
+  let db: any;
+  const now = Date.now();
+  beforeEach(() => {
+    db = createMockDB();
+    db._tables.operators.push({
+      id: 'opr_1', name: 'Sky Liner', code: 'SKL', phone: null, email: null,
+      status: 'active', created_at: now, updated_at: now, deleted_at: null,
+    });
+    db._tables.trips.push({
+      id: 'trp_csv1', operator_id: 'opr_1', route_id: 'rte_csv1', state: 'boarding',
+      departure_time: now + 3600_000, deleted_at: null, created_at: now, updated_at: now,
+    });
+    db._tables.routes.push({
+      id: 'rte_csv1', operator_id: 'opr_1', origin: 'Enugu', destination: 'Onitsha',
+      base_fare: 250000, status: 'active', deleted_at: null, created_at: now, updated_at: now,
+    });
+    db._tables.seats.push(
+      { id: 'csv_s1', trip_id: 'trp_csv1', seat_number: '01', status: 'confirmed', version: 1 },
+      { id: 'csv_s2', trip_id: 'trp_csv1', seat_number: '02', status: 'confirmed', version: 1 },
+    );
+    db._tables.customers.push({
+      id: 'cust_csv1', name: 'Obiora Nweke', phone: '08011112222',
+      ndpr_consent: 1, status: 'active', deleted_at: null, created_at: now, updated_at: now,
+    });
+    db._tables.bookings.push({
+      id: 'bkg_csv1', customer_id: 'cust_csv1', trip_id: 'trp_csv1',
+      seat_ids: '["csv_s1"]', passenger_names: '["Obiora Nweke"]',
+      total_amount: 250000, status: 'confirmed', payment_status: 'paid',
+      payment_method: 'paystack', payment_reference: 'PAY_CSV1',
+      next_of_kin_name: null, next_of_kin_phone: null,
+      created_at: now, confirmed_at: now, cancelled_at: null, deleted_at: null,
+    });
+    db._tables.agents.push({
+      id: 'agt_csv1', operator_id: 'opr_1', name: 'Zainab Agent', phone: '08099998888',
+      status: 'active', deleted_at: null, created_at: now, updated_at: now,
+    });
+    db._tables.sales_transactions.push({
+      id: 'txn_csv1', agent_id: 'agt_csv1', trip_id: 'trp_csv1',
+      seat_ids: '["csv_s2"]', passenger_names: '["Musa Danladi"]',
+      total_amount: 250000, payment_method: 'cash', payment_status: 'completed',
+      sync_status: 'synced', receipt_id: 'rct_csv1',
+      passenger_id_type: null, passenger_id_hash: null,
+      next_of_kin_name: null, next_of_kin_phone: null,
+      created_at: now, deleted_at: null,
+    });
+  });
+
+  it('CSV includes online booking row with Source=Online', async () => {
+    const res = await operatorManagementRouter.request('/trips/trp_csv1/manifest', {
+      headers: { Accept: 'text/csv' },
+    }, makeEnv(db));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Content-Type')).toContain('text/csv');
+    const text = await res.text();
+    expect(text).toContain('Online');
+    expect(text).toContain('Obiora Nweke');
+  });
+
+  it('CSV includes agent sale row with Source=Agent (FRSC compliance bug-fix)', async () => {
+    const res = await operatorManagementRouter.request('/trips/trp_csv1/manifest', {
+      headers: { Accept: 'text/csv' },
+    }, makeEnv(db));
+    const text = await res.text();
+    expect(text).toContain('Agent');
+    expect(text).toContain('Musa Danladi');
+  });
+
+  it('CSV has Source column header', async () => {
+    const res = await operatorManagementRouter.request('/trips/trp_csv1/manifest', {
+      headers: { Accept: 'text/csv' },
+    }, makeEnv(db));
+    const text = await res.text();
+    const firstLine = text.split('\n')[0];
+    expect(firstLine).toBe('Seat,Passenger Name,Boarded,Payment Method,Ref,Source');
+  });
+});
+
 describe('Phase 8: GET /bookings/:id — Booking Detail (TRN-3)', () => {
   let db: any;
   beforeEach(() => {

@@ -1212,20 +1212,31 @@ operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 
     });
     const agentRevenue = agentSalesResult.results.reduce((sum, t) => sum + t.total_amount, 0);
 
-    // P05-T4: CSV content negotiation
+    // P05-T4 + T-TRN-02: CSV content negotiation — includes BOTH online bookings and agent sales
+    // FRSC compliance requires all passengers on a single sheet; agent sales must not be omitted.
     const acceptHeader = c.req.header('Accept') ?? '';
     if (acceptHeader.includes('text/csv')) {
       const tripDate = new Date(trip.departure_time).toISOString().slice(0, 10);
-      const rows = passengers.map(p => {
-        const escapeCsv = (v: string) => `"${String(v).replace(/"/g, '""')}"`;
+      const escapeCsv = (v: string) => `"${String(v).replace(/"/g, '""')}"`;
+
+      const bookingRows = passengers.map(p => {
         const name = escapeCsv(p.passenger_names.join('; '));
         const seats = escapeCsv(p.seat_numbers);
         const boarded = p.boarded_at ? new Date(p.boarded_at).toISOString() : '';
         const method = escapeCsv(p.payment_method);
         const ref = escapeCsv(p.booking_id.slice(-8).toUpperCase());
-        return `${seats},${name},${escapeCsv(boarded)},${method},${ref}`;
+        return `${seats},${name},${escapeCsv(boarded)},${method},${ref},Online`;
       });
-      const csv = `Seat,Passenger Name,Boarded,Payment Method,Booking Ref\n${rows.join('\n')}`;
+
+      const agentRows = agentSales.map(a => {
+        const name = escapeCsv(a.passenger_names.join('; '));
+        const seats = escapeCsv(a.seat_numbers);
+        const method = escapeCsv(a.payment_method);
+        const ref = escapeCsv(a.transaction_id.slice(-8).toUpperCase());
+        return `${seats},${name},"",${method},${ref},Agent`;
+      });
+
+      const csv = `Seat,Passenger Name,Boarded,Payment Method,Ref,Source\n${[...bookingRows, ...agentRows].join('\n')}`;
       return new Response(csv, {
         headers: {
           'Content-Type': 'text/csv; charset=utf-8',

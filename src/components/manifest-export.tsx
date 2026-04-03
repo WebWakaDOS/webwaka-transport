@@ -6,6 +6,7 @@
  */
 import { useState } from 'react';
 import { api, ApiError } from '../api/client';
+import { getStoredToken } from '../core/auth/store';
 
 interface Props {
   tripId: string;
@@ -51,16 +52,16 @@ export function ManifestExportButtons({ tripId, tripLabel }: Props) {
   const [pdfError, setPdfError] = useState<string | null>(null);
 
   const handleCsvDownload = () => {
-    const token = localStorage.getItem('ww_token') ?? '';
+    const token = getStoredToken();
     const a = document.createElement('a');
     a.href = `/api/operator/trips/${tripId}/manifest`;
     a.download = `manifest_${tripLabel ?? tripId}.csv`;
     // The CSV route checks Accept header — trigger via anchor will get JSON.
     // So we must do a fetch + blob approach for CSV too.
     setPdfError(null);
-    fetch(`/api/operator/trips/${tripId}/manifest`, {
-      headers: { Authorization: `Bearer ${token}`, Accept: 'text/csv' },
-    })
+    const headers: Record<string, string> = { Accept: 'text/csv' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    fetch(`/api/operator/trips/${tripId}/manifest`, { headers })
       .then(async r => {
         if (!r.ok) throw new Error(`CSV download failed (${r.status})`);
         return r.blob();
