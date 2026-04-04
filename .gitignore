@@ -30,3 +30,6 @@ npm-debug.log*
 
 # TypeScript build info
 *.tsbuildinfo
+
+# Local secrets — never commit
+.dev.vars
