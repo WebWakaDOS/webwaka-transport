@@ -1099,6 +1099,237 @@ export class ApiClient {
     );
     return res.data;
   }
+
+  // ============================================================
+  // TRN-5: Ride Hailing
+  // ============================================================
+
+  async requestRide(data: {
+    customer_id: string;
+    pickup_latitude: number; pickup_longitude: number; pickup_address?: string;
+    dropoff_latitude: number; dropoff_longitude: number; dropoff_address?: string;
+    operator_id?: string;
+    waypoints?: Array<{ latitude: number; longitude: number; address?: string }>;
+    is_scheduled?: boolean; scheduled_for?: number;
+    is_carpooled?: boolean; carpool_group_id?: string;
+    promo_code?: string;
+  }): Promise<{ ride_request_id: string; status: string; surge_multiplier: number; matched_drivers: unknown[]; promo_applied: boolean }> {
+    const res = await this.request<{ success: boolean; data: ReturnType<ApiClient['requestRide']> extends Promise<infer T> ? T : never }>(
+      'POST', '/api/ride-hailing/request', data
+    );
+    return res.data;
+  }
+
+  async getSurge(params: { zone_id?: string; operator_id?: string; lat?: number; lon?: number }): Promise<{
+    zone_id: string; active_riders: number; available_drivers: number;
+    demand_ratio: number; surge_multiplier: number; calculated_at: number;
+  }> {
+    const q = new URLSearchParams(
+      Object.fromEntries(Object.entries(params).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)]))
+    );
+    const res = await this.request<{ success: boolean; data: Awaited<ReturnType<ApiClient['getSurge']>> }>(
+      'GET', `/api/ride-hailing/surge?${q}`
+    );
+    return res.data;
+  }
+
+  async getRide(rideId: string): Promise<Record<string, unknown>> {
+    const res = await this.request<{ success: boolean; data: Record<string, unknown> }>('GET', `/api/ride-hailing/${rideId}`);
+    return res.data;
+  }
+
+  async listRides(params?: { customer_id?: string; driver_id?: string; status?: string; limit?: number }): Promise<unknown[]> {
+    const q = new URLSearchParams(
+      Object.fromEntries(Object.entries(params ?? {}).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)]))
+    );
+    const res = await this.request<{ success: boolean; data: unknown[] }>('GET', `/api/ride-hailing?${q}`);
+    return res.data;
+  }
+
+  async tipDriver(rideId: string, data: { amount_kobo: number; customer_id: string; payment_method?: string; message?: string }): Promise<{ tip_id: string; amount_kobo: number; driver_id: string }> {
+    const res = await this.request<{ success: boolean; data: Awaited<ReturnType<ApiClient['tipDriver']>> }>('POST', `/api/ride-hailing/${rideId}/tip`, data);
+    return res.data;
+  }
+
+  async heartbeatDriver(data: { driver_id: string; operator_id: string; latitude: number; longitude: number; status: 'available' | 'on_ride' | 'offline'; vehicle_id?: string }): Promise<void> {
+    await this.request('POST', '/api/ride-hailing/driver/heartbeat', data);
+  }
+
+  async searchCarpool(params: { origin?: string; destination?: string; date?: string }): Promise<unknown[]> {
+    const q = new URLSearchParams(Object.fromEntries(Object.entries(params).filter(([, v]) => v) as [string, string][]));
+    const res = await this.request<{ success: boolean; data: unknown[] }>('GET', `/api/ride-hailing/carpool/search?${q}`);
+    return res.data;
+  }
+
+  async carpoolAction(data: { action: 'create' | 'join'; [key: string]: unknown }): Promise<{ carpool_group_id: string; status: string; current_passengers: number }> {
+    const res = await this.request<{ success: boolean; data: Awaited<ReturnType<ApiClient['carpoolAction']>> }>('POST', '/api/ride-hailing/carpool', data);
+    return res.data;
+  }
+
+  async getTollFees(routeId: string): Promise<{ toll_gates: unknown[]; total_toll_fee_kobo: number }> {
+    const res = await this.request<{ success: boolean; data: Awaited<ReturnType<ApiClient['getTollFees']>> }>('GET', `/api/ride-hailing/toll-fees?route_id=${routeId}`);
+    return res.data;
+  }
+
+  // ============================================================
+  // Driver App
+  // ============================================================
+
+  async getDriverEarnings(driverId: string, period?: string): Promise<{
+    driver_id: string; period: string; totals: Record<string, number>; daily_breakdown: unknown[]; recent_tips: unknown[];
+  }> {
+    const res = await this.request<{ success: boolean; data: Awaited<ReturnType<ApiClient['getDriverEarnings']>> }>(
+      'GET', `/api/driver-app/${driverId}/earnings${period ? `?period=${period}` : ''}`
+    );
+    return res.data;
+  }
+
+  async submitVehicleInspection(driverId: string, data: {
+    vehicle_id: string; operator_id: string;
+    tires_ok: boolean; brakes_ok: boolean; lights_ok: boolean;
+    fuel_level: string; engine_ok: boolean;
+    ac_ok?: boolean; mirrors_ok?: boolean;
+    emergency_equipment_ok: boolean;
+    mileage_km?: number; notes?: string; photos?: string[];
+  }): Promise<{ inspection_id: string; status: string; inspection_date: string }> {
+    const res = await this.request<{ success: boolean; data: Awaited<ReturnType<ApiClient['submitVehicleInspection']>> }>(
+      'POST', `/api/driver-app/${driverId}/inspections`, data
+    );
+    return res.data;
+  }
+
+  async getDriverInspections(driverId: string, date?: string): Promise<unknown[]> {
+    const res = await this.request<{ success: boolean; data: unknown[] }>(
+      'GET', `/api/driver-app/${driverId}/inspections${date ? `?date=${date}` : ''}`
+    );
+    return res.data;
+  }
+
+  async submitDriverVerification(driverId: string, data: { operator_id: string; selfie_url?: string }): Promise<{ verification_id: string; status: string; shift_date: string; message: string }> {
+    const res = await this.request<{ success: boolean; data: Awaited<ReturnType<ApiClient['submitDriverVerification']>> }>(
+      'POST', `/api/driver-app/${driverId}/verify`, data
+    );
+    return res.data;
+  }
+
+  async getTodayVerification(driverId: string): Promise<{ status: string; shift_date: string; verification_id?: string }> {
+    const res = await this.request<{ success: boolean; data: Awaited<ReturnType<ApiClient['getTodayVerification']>> }>(
+      'GET', `/api/driver-app/${driverId}/verify/today`
+    );
+    return res.data;
+  }
+
+  async driverSOS(tripId: string, data?: { message?: string; latitude?: number; longitude?: number }): Promise<void> {
+    await this.request('POST', `/api/driver-app/trips/${tripId}/sos`, data ?? {});
+  }
+
+  async clearSOS(tripId: string, clearedBy: string): Promise<void> {
+    await this.request('DELETE', `/api/driver-app/trips/${tripId}/sos`, { cleared_by: clearedBy });
+  }
+
+  async updateDriverLocation(tripId: string, data: { latitude: number; longitude: number; driver_id: string }): Promise<void> {
+    await this.request('PATCH', `/api/driver-app/trips/${tripId}/location`, data);
+  }
+
+  // ============================================================
+  // Lost & Found
+  // ============================================================
+
+  async reportLostFound(data: {
+    operator_id: string; reporter_type: 'passenger' | 'driver' | 'staff';
+    reporter_id?: string; reporter_name: string; reporter_phone: string;
+    trip_id?: string; vehicle_id?: string;
+    item_description: string; item_category?: string;
+    found_at?: string; storage_location?: string;
+    photos?: string[]; notes?: string;
+  }): Promise<{ item_id: string; status: string; message: string }> {
+    const res = await this.request<{ success: boolean; data: Awaited<ReturnType<ApiClient['reportLostFound']>> }>(
+      'POST', '/api/lost-found', data
+    );
+    return res.data;
+  }
+
+  async listLostFound(params?: { operator_id?: string; status?: string; category?: string; search?: string }): Promise<unknown[]> {
+    const q = new URLSearchParams(Object.fromEntries(Object.entries(params ?? {}).filter(([, v]) => v) as [string, string][]));
+    const res = await this.request<{ success: boolean; data: unknown[] }>('GET', `/api/lost-found?${q}`);
+    return res.data;
+  }
+
+  async claimLostFoundItem(itemId: string, data: { claimant_name: string; claimant_phone: string }): Promise<void> {
+    await this.request('POST', `/api/lost-found/${itemId}/claim`, data);
+  }
+
+  // ============================================================
+  // Promo Codes
+  // ============================================================
+
+  async validatePromo(data: { code: string; fare_kobo: number; customer_id?: string; operator_id?: string }): Promise<{
+    promo_code_id: string; code: string; discount_type: string;
+    discount_value: number; discount_kobo: number; final_fare_kobo: number;
+  }> {
+    const res = await this.request<{ success: boolean; data: Awaited<ReturnType<ApiClient['validatePromo']>> }>(
+      'POST', '/api/promo/validate', data
+    );
+    return res.data;
+  }
+
+  async applyPromo(data: { code: string; fare_kobo: number; customer_id?: string; booking_id?: string; ride_request_id?: string }): Promise<{ use_id: string; discount_kobo: number; final_fare_kobo: number }> {
+    const res = await this.request<{ success: boolean; data: Awaited<ReturnType<ApiClient['applyPromo']>> }>(
+      'POST', '/api/promo/apply', data
+    );
+    return res.data;
+  }
+
+  async createPromoCode(data: {
+    code: string; description?: string; discount_type: 'percentage' | 'flat';
+    discount_value: number; max_uses?: number; min_fare_kobo?: number;
+    max_discount_kobo?: number; valid_from: number; valid_until: number;
+    operator_id?: string; created_by: string;
+  }): Promise<{ promo_code_id: string; code: string }> {
+    const res = await this.request<{ success: boolean; data: Awaited<ReturnType<ApiClient['createPromoCode']>> }>(
+      'POST', '/api/promo/codes', data
+    );
+    return res.data;
+  }
+
+  async listPromoCodes(params?: { operator_id?: string; active?: boolean }): Promise<unknown[]> {
+    const q = new URLSearchParams(Object.fromEntries(Object.entries(params ?? {}).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)])));
+    const res = await this.request<{ success: boolean; data: unknown[] }>('GET', `/api/promo/codes?${q}`);
+    return res.data;
+  }
+
+  // ============================================================
+  // EV Charging Stations
+  // ============================================================
+
+  async getNearbyEVStations(params: { lat: number; lon: number; radius_km?: number; connector_type?: string; available_only?: boolean }): Promise<{
+    stations: Array<{ id: string; name: string; city: string; distance_km: number; available_points: number; connector_types: string[]; [key: string]: unknown }>;
+    total: number;
+  }> {
+    const q = new URLSearchParams(Object.fromEntries(Object.entries(params).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)])));
+    const res = await this.request<{ success: boolean; data: Awaited<ReturnType<ApiClient['getNearbyEVStations']>> }>(
+      'GET', `/api/ev-charging/nearby?${q}`
+    );
+    return res.data;
+  }
+
+  async listEVStations(params?: { city?: string; operator_id?: string }): Promise<unknown[]> {
+    const q = new URLSearchParams(Object.fromEntries(Object.entries(params ?? {}).filter(([, v]) => v) as [string, string][]));
+    const res = await this.request<{ success: boolean; data: unknown[] }>('GET', `/api/ev-charging?${q}`);
+    return res.data;
+  }
+
+  async registerEVStation(data: {
+    name: string; city: string; state?: string; latitude: number; longitude: number;
+    connector_types: string[]; total_points?: number; max_power_kw?: number;
+    price_per_kwh_kobo?: number; amenities?: string[]; operating_hours?: string;
+    operator_id?: string;
+  }): Promise<{ station_id: string; name: string; city: string }> {
+    const res = await this.request<{ success: boolean; data: Awaited<ReturnType<ApiClient['registerEVStation']>> }>(
+      'POST', '/api/ev-charging', data
+    );
+    return res.data;
+  }
 }
 
 export const api = new ApiClient();

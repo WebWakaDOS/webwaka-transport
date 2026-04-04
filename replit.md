@@ -629,3 +629,45 @@ Added to `MIGRATIONS` array in `src/api/admin.ts`: `idx_routes_operator_id`, `id
 - `src/app.tsx` — `useLiveSeatUpdates(tripId, onSeatChange)` hook: WebSocket to `/api/trips/:id/ws`, auto-reconnects every 3s on disconnect, cleans up on unmount.
 - `AgentPOSModule` — wired with `useLiveSeatUpdates`; live seat status merged into `seatAvailability` state; unavailable seats auto-deselected.
 - `AppContent` — white-label branding detection on login: fetches `/api/operator/branding`, applies `--waka-primary`/`--waka-secondary` CSS variables, updates `document.title` and favicon.
+
+## TRN-5: Ride Hailing & Driver App Enhancements (complete)
+
+### DB Schema — `migrations/012_ride_hailing_enhancements.sql` (18 new tables)
+- `active_drivers` — real-time driver GPS heartbeat (upsert every 30s)
+- `ride_requests` — full lifecycle: pending → matched → accepted → in_progress → completed; surge_multiplier, toll_fees_kobo, wait_time_charge_kobo, promo_discount_kobo, tip_kobo
+- `ride_waypoints` — ordered multi-stop waypoints per ride request
+- `surge_snapshots` — time-series audit trail of surge pricing decisions
+- `driver_verifications` — shift-start selfie submissions + supervisor approval status
+- `daily_vehicle_inspections` — 9-point pre-trip inspection form with pass/fail verdict
+- `promo_codes` — percentage and flat discount codes with expiry and usage limits
+- `promo_code_uses` — audit trail of every promo code application
+- `driver_tips` — post-ride tips from customers with optional messages
+- `driver_earnings` — daily aggregated earnings with upsert (gross/net/tips/bonuses/km/hours)
+- `lost_found_items` — multi-tenant registry with category, storage location, claim lifecycle
+- `ev_charging_stations` — geospatial (lat/lon) EV charger registry with availability
+- `toll_gates` — toll fee schedule by route
+- `wait_time_config` — per-operator free wait window + per-minute charge
+- `carpool_groups` — shared ride pools with max passenger limits
+- `corporate_accounts`, `corporate_invoices` — B2B billing with monthly statements
+- `intercity_bookings` — long-haul bookings with luggage weight/volume
+
+### Backend API Routers
+- `src/api/ride-hailing.ts` — POST /request (Haversine matching + surge), GET /surge, PATCH /:id/accept|start|complete, POST /:id/tip, POST /driver/heartbeat, GET /carpool/search, POST /carpool, GET /toll-fees
+- `src/api/driver-app.ts` — GET/POST /:driver_id/earnings, POST /:driver_id/inspections, POST /:driver_id/verify, PATCH /verify/:id/review, POST /trips/:id/sos, DELETE /trips/:id/sos, PATCH /trips/:id/location
+- `src/api/lost-found.ts` — POST / (report), GET / (list with search/filter), GET /:id, PATCH /:id/status, POST /:id/claim
+- `src/api/promo.ts` — POST /validate (read-only check), POST /apply (increments used_count), POST /codes (create), GET /codes, PATCH /codes/:id/deactivate
+- `src/api/ev-charging.ts` — GET /nearby (bounding-box + Haversine, distance-sorted), GET /, GET /:id, POST /, PATCH /:id/availability, DELETE /:id, POST /seed (5 Nigerian stations)
+
+### Backend Engine Modules
+- `src/modules/matching/engine.ts` — Haversine distance, bounding-box pre-filter, scored driver match, ride request event emission, driver location upsert
+- `src/modules/pricing/surge.ts` — demand ratio calculation, AI-enhanced blended multiplier, surge snapshot persistence
+
+### Frontend Components (Nigeria-First, Offline-First)
+- `src/components/ride-hailing-module.tsx` — GPS-based ride request, surge badge, promo code input with validation, driver tipping modal (₦50–₦500 presets), multi-stop waypoints, scheduled rides toggle, carpool create/join/search
+- `src/components/driver-app-module.tsx` — 5-tab PWA: shift selfie verification, 9-point vehicle inspection form (pass/fail), earnings dashboard (daily/weekly/monthly with breakdown + tips), GPS navigation tracker (15s heartbeat), SOS button (3-second countdown)
+- `src/components/lost-found-module.tsx` — 3-tab portal: browse with category/status filters, report with category picker, claim item modal with name+phone
+- `src/components/ev-stations-module.tsx` — GPS detect + manual coords, radius picker, connector type filter (Type2/CCS/CHAdeMO/Tesla), distance-sorted cards with availability indicator, Google Maps directions link, expandable details (power/price/hours/amenities)
+
+### App Integration
+- `src/app.tsx` — Tab type extended to 12 tabs; new tabs: 🚖 Ride, 🔍 Lost, ⚡ EV (all users); 📱 Driver App + ⚡ EV (DRIVER role); all wrapped in ErrorBoundary; 4 new component imports
+- `src/api/client.ts` — 25+ new typed API methods for ride hailing, driver app, lost & found, promo codes, EV stations

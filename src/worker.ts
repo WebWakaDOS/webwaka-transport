@@ -50,6 +50,11 @@ import {
   sweepBookingReminders,
 } from './lib/sweepers.js';
 import { notificationsRouter } from './api/notifications.js';
+import { rideHailingRouter } from './api/ride-hailing.js';
+import { driverAppRouter } from './api/driver-app.js';
+import { lostFoundRouter } from './api/lost-found.js';
+import { promoRouter } from './api/promo.js';
+import { evChargingRouter } from './api/ev-charging.js';
 
 export interface Env {
   DB: D1Database;
@@ -213,6 +218,11 @@ app.route('/api/operator', operatorManagementRouter);
 app.route('/api/notifications', notificationsRouter);
 // T-TRN-05: Parcel waybill recording — dispatcher cargo management
 app.route('/api/logistics', logisticsRouter);
+app.route('/api/ride-hailing', rideHailingRouter);
+app.route('/api/driver-app', driverAppRouter);
+app.route('/api/lost-found', lostFoundRouter);
+app.route('/api/promo', promoRouter);
+app.route('/api/ev-charging', evChargingRouter);
 
 // ============================================================
 // Webhooks — PUBLIC (no JWT). HMAC/secret verified inside handlers.

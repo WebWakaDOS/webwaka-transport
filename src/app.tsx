@@ -12,6 +12,10 @@ import { BookingFlow } from './components/booking-flow';
 import { TicketPage } from './components/ticket';
 import { ConflictLog } from './components/conflict-log';
 import { DriverView } from './components/driver-view';
+import { RideHailingModule } from './components/ride-hailing-module';
+import { DriverAppModule } from './components/driver-app-module';
+import { LostFoundModule } from './components/lost-found-module';
+import { EVStationsModule } from './components/ev-stations-module';
 import ReceiptModal, { type ReceiptData } from './components/receipt';
 import { OnboardingWizard } from './components/onboarding-wizard';
 import FareRulesPanel from './components/fare-rules-panel';
@@ -3355,7 +3359,7 @@ const ANALYTICS_ROLES: WakaRole[] = ['SUPER_ADMIN'];
 // ============================================================
 // Main App — inner shell (requires AuthProvider above it)
 // ============================================================
-type Tab = 'search' | 'bookings' | 'agent' | 'operator' | 'admin' | 'driver' | 'analytics' | 'conflicts';
+type Tab = 'search' | 'bookings' | 'agent' | 'operator' | 'admin' | 'driver' | 'analytics' | 'conflicts' | 'ride' | 'driver-app' | 'lost-found' | 'ev';
 
 function AppContent() {
   const { user, isAuthenticated, isLoading, logout, hasRole } = useAuth();
@@ -3488,10 +3492,17 @@ function AppContent() {
 
   // Build tabs based on role
   const tabs: Array<{ id: Tab; icon: string; label: string }> = isDriverOnly
-    ? [{ id: 'driver' as Tab, icon: '🚐', label: 'My Trips' }]
+    ? [
+        { id: 'driver' as Tab, icon: '🚐', label: 'My Trips' },
+        { id: 'driver-app' as Tab, icon: '📱', label: 'Driver' },
+        { id: 'ev' as Tab, icon: '⚡', label: 'EV' },
+      ]
     : [
         { id: 'search' as Tab, icon: '🔍', label: t('search_trips') },
         { id: 'bookings' as Tab, icon: '🎫', label: t('my_bookings') },
+        { id: 'ride' as Tab, icon: '🚖', label: 'Ride' },
+        { id: 'lost-found' as Tab, icon: '🔍', label: 'Lost' },
+        { id: 'ev' as Tab, icon: '⚡', label: 'EV' },
         ...(hasRole(STAFF_ROLES) ? [{ id: 'agent' as Tab, icon: '💰', label: t('agent_pos') }] : []),
         ...(hasRole(ANALYTICS_ROLES) ? [{ id: 'analytics' as Tab, icon: '📊', label: 'Analytics' }] : []),
         ...(hasRole(ADMIN_ROLES) ? [{ id: 'operator' as Tab, icon: '🚌', label: t('operator') }] : []),
@@ -3604,6 +3615,22 @@ function AppContent() {
         </ErrorBoundary>
         <ErrorBoundary label="Platform Admin">
           {validTab === 'admin' && <SuperAdminModule />}
+        </ErrorBoundary>
+        {/* TRN-5: Ride Hailing (real-time matching, surge, carpool, multi-stop) */}
+        <ErrorBoundary label="Ride Hailing">
+          {validTab === 'ride' && <RideHailingModule />}
+        </ErrorBoundary>
+        {/* TRN-5: Offline-First Driver App (earnings, inspection, SOS, navigation, verification) */}
+        <ErrorBoundary label="Driver App">
+          {validTab === 'driver-app' && <DriverAppModule />}
+        </ErrorBoundary>
+        {/* TRN-5: Lost & Found Portal */}
+        <ErrorBoundary label="Lost and Found">
+          {validTab === 'lost-found' && <LostFoundModule />}
+        </ErrorBoundary>
+        {/* TRN-5: EV Charging Station Locator */}
+        <ErrorBoundary label="EV Charging Stations">
+          {validTab === 'ev' && <EVStationsModule />}
         </ErrorBoundary>
       </div>
 
