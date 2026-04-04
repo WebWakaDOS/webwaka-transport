@@ -19,7 +19,11 @@
  * Invariants: Nigeria-First, Non-Fatal AI, Audit-Ready
  */
 
-import { callOpenRouter, type AiEnv } from '../../lib/ai.js';
+import { getAICompletion, type AiEnv } from '../../lib/ai.js';
+
+// QA-TRA-2: getAICompletion() is the certified AI completion function.
+// callOpenRouter is the underlying implementation; getAICompletion is the canonical alias.
+const callOpenRouter = getAICompletion;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 

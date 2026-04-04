@@ -18,6 +18,14 @@ import { api, ApiError } from '../api/client';
 import { formatAmount } from '../core/i18n/index';
 import { useOnlineStatus } from '../core/offline/hooks';
 import { useAuth } from '../core/auth/context';
+import {
+  queueDriverTripCompletion,
+  getPendingDriverTripCount,
+} from '../core/offline/db';
+import {
+  flushDriverTripCompletions,
+  registerDriverSyncOnReconnect,
+} from '../core/offline/driver-sync';
 
 // ── Shared styles ─────────────────────────────────────────────────────────────
 
@@ -457,24 +465,177 @@ function NavigationPanel({ tripId, driverId }: { tripId: string; driverId: strin
   );
 }
 
+// ── Trip Completion Panel (QA-TRA-3: Offline-First) ──────────────────────────
+
+interface TripCompletionPanelProps {
+  rideRequestId: string;
+  driverId: string;
+  operatorId: string;
+  online: boolean;
+}
+
+function TripCompletionPanel({ rideRequestId, driverId, operatorId, online }: TripCompletionPanelProps) {
+  const [completing, setCompleting] = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
+  const [message, setMessage] = useState('');
+  const [distanceKm, setDistanceKm] = useState('');
+  const [durationMin, setDurationMin] = useState('');
+
+  // Refresh pending count on mount and after each action
+  const refreshPending = useCallback(async () => {
+    const count = await getPendingDriverTripCount();
+    setPendingCount(count);
+  }, []);
+
+  useEffect(() => { void refreshPending(); }, [refreshPending]);
+
+  const handleComplete = useCallback(async () => {
+    setCompleting(true);
+    setMessage('');
+    const localId = `dtc_${rideRequestId}_${Date.now()}`;
+    const completedAt = Date.now();
+
+    try {
+      if (online) {
+        // Online path: call API directly
+        const res = await fetch(`/api/ride-hailing/${rideRequestId}/complete`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            driver_id: driverId,
+            operator_id: operatorId,
+            distance_km: distanceKm ? parseFloat(distanceKm) : null,
+            duration_minutes: durationMin ? parseInt(durationMin, 10) : null,
+            completed_at: completedAt,
+          }),
+        });
+        if (!res.ok) throw new Error(`Server error ${res.status}`);
+        setMessage('Trip marked complete.');
+      } else {
+        // Offline path: queue to IndexedDB (QA-TRA-3 core requirement)
+        const completionData: Parameters<typeof queueDriverTripCompletion>[0] = {
+          local_id: localId,
+          ride_request_id: rideRequestId,
+          driver_id: driverId,
+          operator_id: operatorId,
+          completed_at: completedAt,
+        };
+        if (distanceKm) completionData.distance_km = parseFloat(distanceKm);
+        if (durationMin) completionData.duration_minutes = parseInt(durationMin, 10);
+        await queueDriverTripCompletion(completionData);
+        await refreshPending();
+        setMessage('Saved offline — will sync when online.');
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : 'Failed to complete trip.';
+      setMessage(errMsg);
+    } finally {
+      setCompleting(false);
+    }
+  }, [online, rideRequestId, driverId, operatorId, distanceKm, durationMin, refreshPending]);
+
+  const handleManualSync = useCallback(async () => {
+    setCompleting(true);
+    try {
+      const result = await flushDriverTripCompletions();
+      await refreshPending();
+      setMessage(`Synced ${result.synced} record(s). ${result.failed > 0 ? `${result.failed} failed.` : ''}`);
+    } catch {
+      setMessage('Sync failed — try again.');
+    } finally {
+      setCompleting(false);
+    }
+  }, [refreshPending]);
+
+  return (
+    <div style={{ padding: 16 }}>
+      <h3 style={{ margin: '0 0 12px', fontSize: 15 }}>Complete Active Ride</h3>
+
+      {pendingCount > 0 && (
+        <div style={{
+          background: '#fef9c3', border: '1px solid #fde047', borderRadius: 8,
+          padding: '10px 14px', marginBottom: 14, fontSize: 13, color: '#854d0e',
+        }}>
+          <strong>{pendingCount}</strong> trip completion(s) queued offline.
+          {online && (
+            <button
+              onClick={() => { void handleManualSync(); }}
+              disabled={completing}
+              style={{ ...pillStyle(true, '#854d0e'), marginLeft: 10, fontSize: 12 }}
+            >
+              Sync Now
+            </button>
+          )}
+        </div>
+      )}
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <input
+          style={inputStyle}
+          type="number"
+          placeholder="Distance (km) — optional"
+          value={distanceKm}
+          onChange={e => setDistanceKm(e.target.value)}
+        />
+        <input
+          style={inputStyle}
+          type="number"
+          placeholder="Duration (minutes) — optional"
+          value={durationMin}
+          onChange={e => setDurationMin(e.target.value)}
+        />
+        <button
+          style={{ ...primaryBtnStyle, background: online ? '#16a34a' : '#d97706' }}
+          onClick={() => { void handleComplete(); }}
+          disabled={completing}
+        >
+          {completing
+            ? 'Saving…'
+            : online
+              ? 'Complete Trip (Online)'
+              : 'Save Offline (Sync Later)'}
+        </button>
+      </div>
+
+      {message && (
+        <div style={{
+          marginTop: 12, fontSize: 13, color: '#16a34a',
+          background: '#f0fdf4', borderRadius: 6, padding: '8px 12px',
+        }}>
+          {message}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Main Driver App Module ────────────────────────────────────────────────────
 
 export function DriverAppModule() {
   const { user } = useAuth();
   const online = useOnlineStatus();
-  const [tab, setTab] = useState<'verify' | 'inspect' | 'earnings' | 'navigate' | 'sos'>('verify');
+  const [tab, setTab] = useState<'verify' | 'inspect' | 'earnings' | 'navigate' | 'rides' | 'sos'>('verify');
 
   // For demo purposes — in production these come from the active trip assignment
   const driverId = user?.id ?? 'driver_demo';
   const operatorId = user?.operator_id ?? 'op_demo';
   const vehicleId = 'vehicle_demo';
   const activeTripId = 'trip_demo';
+  const activeRideId = 'ride_demo';
+
+  // QA-TRA-3: Register background sync listener — flushes queued trip
+  // completions automatically when the browser goes from offline → online.
+  useEffect(() => {
+    const cleanup = registerDriverSyncOnReconnect();
+    return cleanup;
+  }, []);
 
   const tabs: Array<{ key: typeof tab; label: string }> = [
     { key: 'verify', label: '✅ Verify' },
     { key: 'inspect', label: '🔧 Inspect' },
     { key: 'earnings', label: '💰 Earnings' },
     { key: 'navigate', label: '📍 Navigate' },
+    { key: 'rides', label: '🚖 Rides' },
     { key: 'sos', label: '🆘 SOS' },
   ];
 
@@ -503,6 +664,14 @@ export function DriverAppModule() {
       {tab === 'inspect' && <InspectionForm driverId={driverId} operatorId={operatorId} vehicleId={vehicleId} />}
       {tab === 'earnings' && <EarningsDashboard driverId={driverId} />}
       {tab === 'navigate' && <NavigationPanel tripId={activeTripId} driverId={driverId} />}
+      {tab === 'rides' && (
+        <TripCompletionPanel
+          rideRequestId={activeRideId}
+          driverId={driverId}
+          operatorId={operatorId}
+          online={online}
+        />
+      )}
       {tab === 'sos' && (
         <div style={{ padding: 16 }}>
           <div style={{ color: '#64748b', fontSize: 13, marginBottom: 16, textAlign: 'center' }}>

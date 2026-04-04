@@ -166,6 +166,28 @@ export interface NdprConsentRecord {
   created_at: number;
 }
 
+/**
+ * QA-TRA-3: Offline driver trip completion record.
+ * Written to IndexedDB when the driver marks a ride complete while offline.
+ * Synced to D1 (/api/ride-hailing/:id/complete) when network is restored.
+ */
+export interface DriverTripCompletion {
+  id?: number;
+  local_id: string;            // client-generated idempotency key
+  ride_request_id: string;     // matches ride_requests.id in D1
+  driver_id: string;
+  operator_id: string;
+  distance_km?: number;
+  duration_minutes?: number;
+  wait_time_seconds?: number;
+  final_fare_kobo?: number;    // optimistic computed value (recalculated server-side)
+  completed_at: number;        // epoch ms when driver pressed "Complete"
+  synced: boolean;
+  synced_at: number | undefined;
+  retry_count: number;
+  error: string | undefined;
+}
+
 // ============================================================
 // Database class
 // ============================================================
@@ -181,6 +203,7 @@ class TransportOfflineDB extends Dexie {
   conflict_log!: Table<ConflictRecord>;
   operator_config!: Table<CachedOperatorConfig>;
   ndpr_consent!: Table<NdprConsentRecord>;
+  driver_trip_completions!: Table<DriverTripCompletion>;
 
   constructor() {
     super('webwaka-transport-offline');
@@ -262,6 +285,30 @@ class TransportOfflineDB extends Dexie {
       ndpr_consent: '++id, customer_id, consent_type, created_at',
     });
     // No data migration needed for v4 — tickets table is brand new.
+
+    /**
+     * v5 schema: adds `driver_trip_completions` table.
+     *
+     * QA-TRA-3: Driver app writes completed trip records to IndexedDB when
+     * offline. The sync engine flushes them to D1 when connectivity returns.
+     *
+     * Indexes: local_id (idempotency), ride_request_id, driver_id, synced,
+     *          completed_at (for ordering pending completions chronologically).
+     */
+    this.version(5).stores({
+      mutations: '++id, entity_type, entity_id, status, next_retry_at, created_at',
+      transactions: '++id, local_id, agent_id, trip_id, synced, idempotencyKey, created_at',
+      tickets: '++id, ticket_number, trip_id, agent_id, synced, conflict_at, created_at',
+      trips: 'id, operator_id, origin, destination, departure_time, state, cached_at',
+      seats: 'id, trip_id, status, cached_at',
+      bookings: '++id, local_id, customer_id, trip_id, status, synced',
+      agent_sessions: '++id, agent_id, operator_id, expires_at',
+      conflict_log: '++id, entity_type, entity_id, created_at, resolved',
+      operator_config: 'operator_id, cached_at',
+      ndpr_consent: '++id, customer_id, consent_type, created_at',
+      driver_trip_completions: '++id, local_id, ride_request_id, driver_id, synced, completed_at',
+    });
+    // No data migration needed for v5 — driver_trip_completions is brand new.
   }
 }
 
@@ -779,4 +826,57 @@ export async function resolveConflict(
 
   // Mark conflict as resolved (accept_server and discard both close it)
   await db.conflict_log.update(id, { resolved: true });
+}
+
+// ============================================================
+// Driver Trip Completion Helpers (QA-TRA-3)
+// ============================================================
+
+/**
+ * Queue a trip completion record to IndexedDB when the driver is offline.
+ * The sync engine will upload it to /api/ride-hailing/:id/complete on reconnect.
+ */
+export async function queueDriverTripCompletion(
+  data: Omit<DriverTripCompletion, 'id' | 'synced' | 'synced_at' | 'retry_count' | 'error'>
+): Promise<number> {
+  return getOfflineDB().driver_trip_completions.add({
+    ...data,
+    synced: false,
+    synced_at: undefined,
+    retry_count: 0,
+    error: undefined,
+  });
+}
+
+/** Return all unsynced driver trip completions, ordered oldest-first. */
+export async function getPendingDriverTripCompletions(): Promise<DriverTripCompletion[]> {
+  return getOfflineDB().driver_trip_completions
+    .where('synced').equals(0)   // Dexie stores booleans as 0/1
+    .sortBy('completed_at');
+}
+
+/** Mark a driver trip completion as successfully synced to D1. */
+export async function markDriverTripCompletionSynced(id: number): Promise<void> {
+  await getOfflineDB().driver_trip_completions.update(id, {
+    synced: true,
+    synced_at: Date.now(),
+    error: undefined,
+  });
+}
+
+/** Record a sync failure and increment the retry counter. */
+export async function markDriverTripCompletionFailed(id: number, error: string): Promise<void> {
+  const record = await getOfflineDB().driver_trip_completions.get(id);
+  if (!record) return;
+  await getOfflineDB().driver_trip_completions.update(id, {
+    retry_count: (record.retry_count ?? 0) + 1,
+    error,
+  });
+}
+
+/** Count of pending (unsynced) driver trip completions. */
+export async function getPendingDriverTripCount(): Promise<number> {
+  return getOfflineDB().driver_trip_completions
+    .where('synced').equals(0)
+    .count();
 }

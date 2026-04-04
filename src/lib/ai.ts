@@ -118,6 +118,14 @@ If no preference is mentioned, use "any".`;
 // Public callOpenRouter utility (general purpose)
 // ============================================================
 
+/**
+ * Primary AI completion function used throughout WebWaka.
+ * Alias: `getAICompletion` (used by surge pricing, route extraction).
+ *
+ * @param prompt  Full prompt text to send to the model
+ * @param env     Worker env with OPENROUTER_API_KEY
+ * @returns       Raw string response from the model
+ */
 export async function callOpenRouter(prompt: string, env: AiEnv): Promise<string> {
   if (!env.OPENROUTER_API_KEY) {
     throw new Error('OPENROUTER_API_KEY not configured');
@@ -149,3 +157,9 @@ export async function callOpenRouter(prompt: string, env: AiEnv): Promise<string
   };
   return data.choices?.[0]?.message?.content ?? '';
 }
+
+/**
+ * Named alias for callOpenRouter — used by surge pricing engine (QA-TRA-2).
+ * `getAICompletion` is the canonical name referenced in QA certifications.
+ */
+export const getAICompletion = callOpenRouter;
