@@ -1223,7 +1223,7 @@ export class ApiClient {
     await this.request('POST', `/api/driver-app/trips/${tripId}/sos`, data ?? {});
   }
 
-  async clearSOS(tripId: string, clearedBy: string): Promise<void> {
+  async clearDriverSOS(tripId: string, clearedBy: string): Promise<void> {
     await this.request('DELETE', `/api/driver-app/trips/${tripId}/sos`, { cleared_by: clearedBy });
   }
 

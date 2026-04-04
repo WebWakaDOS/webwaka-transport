@@ -1524,7 +1524,7 @@ operatorManagementRouter.get('/trips/:id/manifest', requireRole(['SUPER_ADMIN', 
       };
 
       const pdfBytes = await generateManifestPdf(pdfInput);
-      return new Response(pdfBytes, {
+      return new Response(pdfBytes as BodyInit, {
         headers: {
           'Content-Type': 'application/pdf',
           'Content-Disposition': `attachment; filename="manifest_${id}_${tripDate}.pdf"`,

@@ -174,7 +174,7 @@ export function LostFoundModule() {
 
           {!loading && items.length === 0 && (
             <div style={{ textAlign: 'center', color: '#94a3b8', padding: 32, fontSize: 14 }}>
-              No items found. {tab === 'report' ? '' : 'Try adjusting filters or report your lost item.'}
+              No items found. Try adjusting filters or report your lost item.
             </div>
           )}
 

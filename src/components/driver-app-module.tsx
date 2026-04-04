@@ -98,7 +98,7 @@ function SOSButton({ tripId, online }: { tripId: string; online: boolean }) {
 
   const clear = async () => {
     try {
-      await api.clearSOS(tripId, 'driver');
+      await api.clearDriverSOS(tripId, 'driver');
       setActive(false);
     } catch { /* non-fatal */ }
   };
@@ -258,7 +258,7 @@ function EarningsDashboard({ driverId }: { driverId: string }) {
     setLoading(true);
     try {
       const res = await api.getDriverEarnings(driverId, period);
-      setData(res as typeof data);
+      setData(res as unknown as typeof data);
     } catch { /* non-fatal */ }
     finally { setLoading(false); }
   }, [driverId, period]);
