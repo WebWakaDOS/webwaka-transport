@@ -30,3 +30,9 @@ id = "ZwmEUTANFoWeuaBaiITQ4"
 uri = "file://docs/webwaka-transport-enhancement-research.md"
 type = "text"
 title = "WebWaka Transport — Deep Research & Enhancement Roadmap (v2.0, April 2026)"
+
+[[outputs]]
+id = "vMSwW2ePbdmXRCkTF9Zi2"
+uri = "file://WEBWAKA-TRANSPORT-DEEP-RESEARCH-TASKBOOK.md"
+type = "text"
+title = "WEBWAKA-TRANSPORT Deep Research + Enhancement Taskbook"
