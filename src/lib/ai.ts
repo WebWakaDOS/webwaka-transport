@@ -1,52 +1,44 @@
 /**
- * WebWaka AI — OpenRouter abstraction for natural language trip search
+ * WebWaka AI — Trip Search via webwaka-ai-platform
  *
- * Uses openai/gpt-4o-mini via OpenRouter for cost-effective inference.
  * Extracts structured trip search params from freeform Nigerian-English queries.
+ * All AI calls route through webwaka-ai-platform (vendor-neutral gateway).
+ * Env vars:
+ *   AI_PLATFORM_URL   — https://webwaka-ai-platform.workers.dev
+ *   AI_PLATFORM_TOKEN — service-to-service bearer token
  *
- * Failure policy:
- *   All AI calls are non-fatal. If OpenRouter is down or returns garbage,
- *   the caller falls back to standard search. Never block the user's journey.
+ * Failure policy: non-fatal — caller falls back to standard search on null.
  *
- * Rate limiting: 5 AI calls / minute / IP enforced at the API handler level
- * via SESSIONS_KV (reuses the OTP rate-limiter pattern).
- *
- * OPENROUTER_API_KEY must be set as a Worker secret:
- *   wrangler secret put OPENROUTER_API_KEY --env production
+ * DO NOT call OpenRouter or any LLM provider directly from verticals.
  */
 
 export interface AiTripSearchParams {
   origin?: string;
   destination?: string;
-  date?: string;       // YYYY-MM-DD
-  preference?: 'cheapest' | 'earliest' | 'latest' | 'any';
+  date?: string;
+  preference?: "cheapest" | "earliest" | "latest" | "any";
 }
 
 export interface AiEnv {
-  OPENROUTER_API_KEY?: string;
+  AI_PLATFORM_URL?: string;
+  AI_PLATFORM_TOKEN?: string;
 }
-
-const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const MODEL = 'openai/gpt-4o-mini';
-
-// ============================================================
-// Core: extract structured trip search params from freeform query
-// ============================================================
 
 export async function extractTripSearchParams(
   query: string,
   env: AiEnv
 ): Promise<AiTripSearchParams | null> {
-  if (!env.OPENROUTER_API_KEY) {
-    console.warn('[ai] OPENROUTER_API_KEY not configured — AI search unavailable');
+  if (!env.AI_PLATFORM_URL || !env.AI_PLATFORM_TOKEN) {
+    console.warn("[ai] AI_PLATFORM_URL/TOKEN not configured — AI search unavailable");
     return null;
   }
 
-  const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+  const today = new Date().toISOString().split("T")[0];
+  const tomorrow = new Date(Date.now() + 86400000).toISOString().split("T")[0];
 
   const systemPrompt = `You are a trip search assistant for WebWaka, a Nigerian bus transport platform.
 Extract trip search parameters from user queries. Always respond with valid JSON only — no explanation.
-Today's date is ${today}.
+Today is ${today}.
 
 Nigerian cities include: Lagos, Abuja, Port Harcourt, Kano, Ibadan, Enugu, Owerri, Benin City, Kaduna, Jos, Ilorin, Warri, Onitsha, Aba, Calabar.
 
@@ -58,108 +50,80 @@ Respond with JSON in this exact format:
   "preference": "cheapest | earliest | latest | any"
 }
 
-If the user mentions "tomorrow", use ${new Date(Date.now() + 86400000).toISOString().split('T')[0]}.
-If no date is mentioned, use null.
-If no preference is mentioned, use "any".`;
+If "tomorrow" is mentioned use ${tomorrow}. If no date, use null. If no preference, use "any".`;
 
   try {
-    const response = await fetch(OPENROUTER_URL, {
-      method: 'POST',
+    const response = await fetch(`${env.AI_PLATFORM_URL}/completions`, {
+      method: "POST",
       headers: {
-        'Authorization': `Bearer ${env.OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://webwaka.ng',
-        'X-Title': 'WebWaka Transport',
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${env.AI_PLATFORM_TOKEN}`,
       },
       body: JSON.stringify({
-        model: MODEL,
         messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: query },
+          { role: "system", content: systemPrompt },
+          { role: "user", content: query },
         ],
-        temperature: 0,
         max_tokens: 200,
+        temperature: 0,
       }),
+      signal: AbortSignal.timeout(10_000),
     });
 
-    if (!response.ok) {
-      const err = await response.text().catch(() => `HTTP ${response.status}`);
-      throw new Error(`OpenRouter error: ${err}`);
-    }
+    if (!response.ok) throw new Error(`AI platform HTTP ${response.status}`);
 
-    const data = await response.json() as {
-      choices?: Array<{ message?: { content?: string } }>
+    const data = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
     };
-    const content = data.choices?.[0]?.message?.content?.trim() ?? '';
-
-    // Parse and validate the JSON response
+    const content = data.choices?.[0]?.message?.content?.trim() ?? "";
     const parsed = JSON.parse(content) as Record<string, unknown>;
     const params: AiTripSearchParams = {};
 
-    if (typeof parsed['origin'] === 'string') params.origin = parsed['origin'];
-    if (typeof parsed['destination'] === 'string') params.destination = parsed['destination'];
-    if (typeof parsed['date'] === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(parsed['date'])) {
-      params.date = parsed['date'];
+    if (typeof parsed["origin"] === "string") params.origin = parsed["origin"];
+    if (typeof parsed["destination"] === "string") params.destination = parsed["destination"];
+    if (typeof parsed["date"] === "string" && /^\d{4}-\d{2}-\d{2}$/.test(parsed["date"])) {
+      params.date = parsed["date"];
     }
-    const pref = parsed['preference'];
-    if (pref === 'cheapest' || pref === 'earliest' || pref === 'latest' || pref === 'any') {
+    const pref = parsed["preference"];
+    if (pref === "cheapest" || pref === "earliest" || pref === "latest" || pref === "any") {
       params.preference = pref;
     }
-
     return params;
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[ai] extractTripSearchParams failed: ${msg}`);
+  } catch (err) {
+    console.error(`[ai] extractTripSearchParams failed: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
 }
 
-// ============================================================
-// Public callOpenRouter utility (general purpose)
-// ============================================================
+/** General-purpose AI completion via webwaka-ai-platform. */
+export async function callAIPlatform(
+  env: AiEnv,
+  prompt: string,
+  systemPrompt?: string,
+  maxTokens = 512
+): Promise<string | null> {
+  if (!env.AI_PLATFORM_URL || !env.AI_PLATFORM_TOKEN) return null;
 
-/**
- * Primary AI completion function used throughout WebWaka.
- * Alias: `getAICompletion` (used by surge pricing, route extraction).
- *
- * @param prompt  Full prompt text to send to the model
- * @param env     Worker env with OPENROUTER_API_KEY
- * @returns       Raw string response from the model
- */
-export async function callOpenRouter(prompt: string, env: AiEnv): Promise<string> {
-  if (!env.OPENROUTER_API_KEY) {
-    throw new Error('OPENROUTER_API_KEY not configured');
+  try {
+    const messages: Array<{ role: string; content: string }> = [];
+    if (systemPrompt) messages.push({ role: "system", content: systemPrompt });
+    messages.push({ role: "user", content: prompt });
+
+    const res = await fetch(`${env.AI_PLATFORM_URL}/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${env.AI_PLATFORM_TOKEN}`,
+      },
+      body: JSON.stringify({ messages, max_tokens: maxTokens, temperature: 0.3 }),
+      signal: AbortSignal.timeout(15_000),
+    });
+
+    if (!res.ok) return null;
+    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    return data.choices?.[0]?.message?.content?.trim() ?? null;
+  } catch {
+    return null;
   }
-
-  const response = await fetch(OPENROUTER_URL, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${env.OPENROUTER_API_KEY}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': 'https://webwaka.ng',
-      'X-Title': 'WebWaka Transport',
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.2,
-      max_tokens: 1000,
-    }),
-  });
-
-  if (!response.ok) {
-    const err = await response.text().catch(() => `HTTP ${response.status}`);
-    throw new Error(`OpenRouter error: ${err}`);
-  }
-
-  const data = await response.json() as {
-    choices?: Array<{ message?: { content?: string } }>
-  };
-  return data.choices?.[0]?.message?.content ?? '';
 }
 
-/**
- * Named alias for callOpenRouter — used by surge pricing engine (QA-TRA-2).
- * `getAICompletion` is the canonical name referenced in QA certifications.
- */
-export const getAICompletion = callOpenRouter;
