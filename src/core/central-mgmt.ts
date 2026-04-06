@@ -110,6 +110,38 @@ export async function notifyBookingConfirmed(
 }
 
 /**
+ * Notify central-mgmt of a completed ride-hailing trip fare.
+ * Called after ride status is set to 'completed' with a calculated final_fare_kobo.
+ *
+ * @param env           Worker environment
+ * @param rideId        Ride request ID
+ * @param operatorId    Operator scoping (may be empty string for platform rides)
+ * @param finalFareKobo Final fare in kobo (integer)
+ */
+export async function notifyRideCompleted(
+  env: CentralMgmtEnv,
+  rideId: string,
+  operatorId: string,
+  finalFareKobo: number,
+): Promise<void> {
+  if (!Number.isInteger(finalFareKobo) || finalFareKobo < 0) {
+    console.warn('[transport→central-mgmt] Invalid finalFareKobo for ride.completed', { rideId, finalFareKobo });
+    return;
+  }
+  await publishToLedger(env, {
+    event_type: 'transport.ride.completed',
+    aggregate_id: rideId,
+    tenant_id: operatorId || undefined,
+    payload: {
+      ride_id: rideId,
+      operator_id: operatorId,
+      final_fare_kobo: finalFareKobo,
+    },
+    timestamp: Date.now(),
+  });
+}
+
+/**
  * Notify central-mgmt of a booking refund.
  * Called after successful Paystack refund processing.
  *

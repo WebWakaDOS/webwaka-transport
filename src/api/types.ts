@@ -25,6 +25,8 @@ export interface Env {
   VAPID_PRIVATE_KEY?: string;
   VAPID_PUBLIC_KEY?: string;
   OPENROUTER_API_KEY?: string;
+  AI_PLATFORM_URL?: string;
+  AI_PLATFORM_TOKEN?: string;
   SENDGRID_API_KEY?: string;
   TRIP_SEAT_DO?: DurableObjectNamespace;
   ASSETS_R2?: R2Bucket;

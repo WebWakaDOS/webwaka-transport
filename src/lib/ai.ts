@@ -95,6 +95,16 @@ If "tomorrow" is mentioned use ${tomorrow}. If no date, use null. If no preferen
   }
 }
 
+/**
+ * getAICompletion — Canonical alias for surge pricing and other modules.
+ * Signature: (prompt, env) — matches surge.ts import contract.
+ * Routes exclusively through webwaka-ai-platform; never calls providers directly.
+ * Returns empty string on failure (non-fatal).
+ */
+export async function getAICompletion(prompt: string, env: AiEnv, systemPrompt?: string): Promise<string> {
+  return (await callAIPlatform(env, prompt, systemPrompt)) ?? "";
+}
+
 /** General-purpose AI completion via webwaka-ai-platform. */
 export async function callAIPlatform(
   env: AiEnv,

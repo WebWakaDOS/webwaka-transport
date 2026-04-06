@@ -2557,6 +2557,107 @@ operatorManagementRouter.get('/drivers/:id/documents', requireRole(['SUPER_ADMIN
 });
 
 // ============================================================
+// WWT-004: GET /compliance/summary — SUPER_ADMIN cross-operator compliance dashboard
+// Returns all operators with their expired and expiring-soon vehicle/driver documents.
+// ============================================================
+operatorManagementRouter.get('/compliance/summary', requireRole(['SUPER_ADMIN']), async (c) => {
+  const db = c.env.DB;
+  const now = Date.now();
+  const soonCutoff = now + 30 * 86_400_000; // 30 days
+
+  try {
+    // Expired/expiring vehicle documents, joined to operator name
+    const vehicleDocs = await db.prepare(`
+      SELECT
+        vd.id, vd.vehicle_id, vd.operator_id, vd.doc_type, vd.doc_number,
+        vd.expires_at, vd.created_at,
+        o.name AS operator_name,
+        v.plate_number AS vehicle_ref,
+        CASE
+          WHEN vd.expires_at < ? THEN 'expired'
+          WHEN vd.expires_at < ? THEN 'expiring_soon'
+          ELSE 'valid'
+        END AS expiry_status
+      FROM vehicle_documents vd
+      JOIN operators o ON o.id = vd.operator_id AND o.deleted_at IS NULL
+      JOIN vehicles v ON v.id = vd.vehicle_id AND v.deleted_at IS NULL
+      WHERE vd.expires_at < ?
+      ORDER BY vd.expires_at ASC
+    `).bind(now, soonCutoff, soonCutoff).all<{
+      id: string; vehicle_id: string; operator_id: string; doc_type: string;
+      doc_number: string | null; expires_at: number; created_at: number;
+      operator_name: string; vehicle_ref: string | null; expiry_status: string;
+    }>();
+
+    // Expired/expiring driver documents, joined to operator name
+    const driverDocs = await db.prepare(`
+      SELECT
+        dd.id, dd.driver_id, dd.operator_id, dd.doc_type, dd.doc_number,
+        dd.expires_at, dd.created_at,
+        o.name AS operator_name,
+        dr.name AS driver_name,
+        CASE
+          WHEN dd.expires_at < ? THEN 'expired'
+          WHEN dd.expires_at < ? THEN 'expiring_soon'
+          ELSE 'valid'
+        END AS expiry_status
+      FROM driver_documents dd
+      JOIN operators o ON o.id = dd.operator_id AND o.deleted_at IS NULL
+      JOIN drivers dr ON dr.id = dd.driver_id AND dr.deleted_at IS NULL
+      WHERE dd.expires_at < ?
+      ORDER BY dd.expires_at ASC
+    `).bind(now, soonCutoff, soonCutoff).all<{
+      id: string; driver_id: string; operator_id: string; doc_type: string;
+      doc_number: string | null; expires_at: number; created_at: number;
+      operator_name: string; driver_name: string | null; expiry_status: string;
+    }>();
+
+    // Aggregate summary counts per operator
+    const summaryMap = new Map<string, {
+      operator_id: string; operator_name: string;
+      expired_vehicle_docs: number; expiring_vehicle_docs: number;
+      expired_driver_docs: number; expiring_driver_docs: number;
+    }>();
+
+    for (const doc of vehicleDocs.results) {
+      const entry = summaryMap.get(doc.operator_id) ?? {
+        operator_id: doc.operator_id, operator_name: doc.operator_name,
+        expired_vehicle_docs: 0, expiring_vehicle_docs: 0,
+        expired_driver_docs: 0, expiring_driver_docs: 0,
+      };
+      if (doc.expiry_status === 'expired') entry.expired_vehicle_docs++;
+      else entry.expiring_vehicle_docs++;
+      summaryMap.set(doc.operator_id, entry);
+    }
+
+    for (const doc of driverDocs.results) {
+      const entry = summaryMap.get(doc.operator_id) ?? {
+        operator_id: doc.operator_id, operator_name: doc.operator_name,
+        expired_vehicle_docs: 0, expiring_vehicle_docs: 0,
+        expired_driver_docs: 0, expiring_driver_docs: 0,
+      };
+      if (doc.expiry_status === 'expired') entry.expired_driver_docs++;
+      else entry.expiring_driver_docs++;
+      summaryMap.set(doc.operator_id, entry);
+    }
+
+    return c.json({
+      success: true,
+      data: {
+        generated_at: now,
+        soon_cutoff_ms: soonCutoff,
+        operator_summaries: [...summaryMap.values()],
+        vehicle_documents: vehicleDocs.results,
+        driver_documents: driverDocs.results,
+      },
+    });
+  } catch (err: unknown) {
+    console.error('[compliance/summary] error:', err instanceof Error ? err.message : err);
+    return c.json({ success: false, error: 'Failed to generate compliance summary' }, 500);
+  }
+});
+
+// ============================================================
 // P09-T3: GET /notifications — operator notification center (last 7 days, actionable types)
 // ============================================================
 const NOTIFICATION_EVENT_TYPES = [

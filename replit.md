@@ -59,6 +59,30 @@ WebWaka Transport is the Transportation & Mobility vertical suite (Part 10.3) of
 - **8 new API integration tests**: reserve-batch validation (400/404), DO stub success (200), DO stub 409 forwarding, idempotency replay, fallback path — all in `api.test.ts`
 - **Total Vitest gate**: 400 tests passing
 
+## WWT Taskbook (complete — all 520 tests passing)
+
+### WWT-001: Payment Processing → webwaka-central-mgmt
+- **booking-portal.ts** and sweepers already wire `notifyBookingConfirmed` to central-mgmt on `payment.successful`.
+- **ride-hailing.ts** `PATCH /:id/complete` now calls `notifyRideCompleted(env, rideId, operatorId, finalFareKobo)` (non-fatal) after ride completion so every financial transaction reaches the central ledger.
+- **central-mgmt.ts**: added `notifyRideCompleted` export that emits `transport.ride.completed` to the ledger via `publishToLedger`.
+
+### WWT-002: AI via webwaka-ai-platform (anti-drift)
+- **ai.ts**: `getAICompletion(prompt, env)` exported as canonical alias; routes exclusively through `AI_PLATFORM_URL/completions` using `AI_PLATFORM_TOKEN`. Never calls OpenRouter/OpenAI directly.
+- **types.ts** + **worker.ts**: `AI_PLATFORM_URL` and `AI_PLATFORM_TOKEN` added to `Env` interface.
+- **booking-portal.ts**: AI feature flag changed from `c.env.OPENROUTER_API_KEY` → `c.env.AI_PLATFORM_URL`.
+- **surge.test.ts**: `mockEnvWithAI` updated from legacy `OPENROUTER_API_KEY` to `{ AI_PLATFORM_URL, AI_PLATFORM_TOKEN }`.
+
+### WWT-003: PWA-First Booking Flow (complete from prior sessions)
+- `manifest.json`, `sw.js` (cache-first / network-first strategies), background sync, push notifications, Dexie.js offline storage — all fully implemented.
+
+### WWT-004: Operator Compliance Module
+- Vehicle/driver document upload endpoints and expiry sweepers (already implemented).
+- **operator-management.ts**: new `GET /compliance/summary` endpoint (SUPER_ADMIN only) — batch-queries expired/expiring-soon vehicle + driver documents across all operators with per-operator aggregate counts and full document detail rows.
+
+### WWT-005: Dynamic Pricing in Seat Inventory / Trip Search
+- **booking-portal.ts** `GET /trips/search`: both SQL queries now select `t.route_id, t.operator_id`; result enrichment batch-fetches active `fare_rules` for all returned trips and applies `computeEffectiveFareByClass` from the pricing engine (highest-priority, structured rules). Falls back non-fatally to `fare_matrix` JSON pricing if rules table is unreachable.
+- Import of `computeEffectiveFareByClass` added alongside existing `computeEffectiveFare`.
+
 ## Tech Stack
 - **Frontend**: React 19 + TypeScript + Vite (PWA, mobile-first, port 5000)
 - **Backend**: Cloudflare Workers + Hono framework

@@ -21,6 +21,7 @@ import type { Env } from '../worker.js';
 import { findNearestDrivers, emitRideRequestedEvent, upsertDriverLocation } from '../modules/matching/engine.js';
 import { calculateSurge, applySurge } from '../modules/pricing/surge.js';
 import { nanoid } from '@webwaka/core';
+import { notifyRideCompleted } from '../core/central-mgmt.js';
 
 export const rideHailingRouter = new Hono<{ Bindings: Env }>();
 
@@ -270,6 +271,16 @@ rideHailingRouter.patch('/:id/complete', async (c) => {
   if (ride.driver_id) {
     await c.env.DB.prepare(`UPDATE active_drivers SET status = 'available', last_seen_at = ? WHERE driver_id = ?`).bind(now, ride.driver_id).run();
   }
+
+  // Notify central-mgmt ledger of completed ride fare (WWT-001: all financial transactions)
+  notifyRideCompleted(
+    c.env,
+    rideId,
+    ride.operator_id ?? '',
+    finalFare,
+  ).catch((err: unknown) => {
+    console.error('[ride-hailing/complete] central-mgmt notify failed (non-fatal):', err instanceof Error ? err.message : err);
+  });
 
   return c.json({
     success: true,

@@ -7,7 +7,7 @@
 import { Hono } from 'hono';
 import { requireRole, requireTierFeature, nanoid, generateJWT } from '@webwaka/core';
 import type { AppContext, DbBooking, DbCustomer } from './types';
-import { computeEffectiveFare } from '../core/pricing/engine';
+import { computeEffectiveFare, computeEffectiveFareByClass } from '../core/pricing/engine';
 import type { FareRule } from '../core/pricing/engine';
 import { genId, parsePagination, metaResponse, requireFields } from './types';
 import { publishEvent } from '../core/events/index';
@@ -92,7 +92,7 @@ bookingPortalRouter.get('/trips/search', async (c) => {
   const params: unknown[] = [];
 
   if (useStops) {
-    query = `SELECT t.id, t.departure_time, t.state, r.origin, r.destination, r.base_fare, r.fare_matrix,
+    query = `SELECT t.id, t.route_id, t.operator_id, t.departure_time, t.state, r.origin, r.destination, r.base_fare, r.fare_matrix,
       o.name as operator_name,
       COUNT(CASE WHEN s.status = 'available' THEN 1 END) as available_seats,
       ROUND(COALESCE(rev.avg_rating, 0), 1) as avg_rating, COALESCE(rev.review_count, 0) as review_count,
@@ -126,7 +126,7 @@ bookingPortalRouter.get('/trips/search', async (c) => {
     }
     query += ` GROUP BY t.id, rs_orig.id, rs_dest.id HAVING available_seats > 0 ORDER BY t.departure_time ASC`;
   } else {
-    query = `SELECT t.id, t.departure_time, t.state, r.origin, r.destination, r.base_fare, r.fare_matrix,
+    query = `SELECT t.id, t.route_id, t.operator_id, t.departure_time, t.state, r.origin, r.destination, r.base_fare, r.fare_matrix,
       o.name as operator_name,
       COUNT(CASE WHEN s.status = 'available' THEN 1 END) as available_seats,
       ROUND(COALESCE(rev.avg_rating, 0), 1) as avg_rating, COALESCE(rev.review_count, 0) as review_count
@@ -154,20 +154,67 @@ bookingPortalRouter.get('/trips/search', async (c) => {
   try {
     const result = await db.prepare(query).bind(...params).all<{
       id: string; departure_time: number; state: string; origin: string; destination: string;
+      route_id?: string; operator_id?: string;
       base_fare: number; fare_matrix: string | null; operator_name: string; available_seats: number;
+      avg_rating?: number; review_count?: number;
       // stop columns (only present when useStops)
       origin_stop_id?: string; origin_stop_name?: string; origin_stop_seq?: number; origin_fare_kobo?: number | null;
       destination_stop_id?: string; destination_stop_name?: string; destination_stop_seq?: number; dest_fare_kobo?: number | null;
     }>();
 
-    const enriched = result.results.map(trip => {
+    // WWT-005: Batch-fetch active fare_rules for all returned trips so we can apply
+    // the structured pricing engine (higher priority than fare_matrix JSON).
+    const trips = result.results;
+    type FareRuleRow = FareRule & { route_id: string; operator_id: string };
+    let fareRulesByKey: Map<string, FareRule[]> = new Map();
+    if (trips.length > 0) {
+      // Collect unique (route_id, operator_id) pairs from trips that include them.
+      // The SELECT queries above don't select route_id/operator_id explicitly — add placeholders
+      // by extracting from the trip object (they may be present depending on DB aliasing).
+      const keys = new Set<string>();
+      for (const t of trips) {
+        if (t.route_id && t.operator_id) keys.add(`${t.route_id}:${t.operator_id}`);
+      }
+      if (keys.size > 0) {
+        const pairs = [...keys].map(k => k.split(':') as [string, string]);
+        const placeholders = pairs.map(() => '(route_id = ? AND operator_id = ?)').join(' OR ');
+        const binds: string[] = pairs.flatMap(([r, o]) => [r, o]);
+        try {
+          const rulesResult = await db
+            .prepare(
+              `SELECT * FROM fare_rules WHERE is_active = 1 AND deleted_at IS NULL AND (${placeholders}) ORDER BY priority DESC`,
+            )
+            .bind(...binds)
+            .all<FareRuleRow>();
+          for (const rule of rulesResult.results) {
+            const key = `${rule.route_id}:${rule.operator_id}`;
+            if (!fareRulesByKey.has(key)) fareRulesByKey.set(key, []);
+            fareRulesByKey.get(key)!.push(rule);
+          }
+        } catch {
+          // Non-fatal: fall through to fare_matrix-only pricing if rules table unreachable
+          fareRulesByKey = new Map();
+        }
+      }
+    }
+
+    const enriched = trips.map(trip => {
       const fareMatrix: FareMatrix | null = trip.fare_matrix ? JSON.parse(trip.fare_matrix) as FareMatrix : null;
+      // Base fare_matrix pricing (local, always available)
       let effective_fare_by_class = computeFareByClass(trip.base_fare, fareMatrix, trip.departure_time);
       let effective_fare = Math.min(...Object.values(effective_fare_by_class));
       const avg_rating = (trip as Record<string, unknown>)['avg_rating'] as number ?? 0;
       const review_count = (trip as Record<string, unknown>)['review_count'] as number ?? 0;
 
-      // P11-T3: Compute segment fare for stop-based search
+      // WWT-005: Layer in structured fare_rules from DB (higher priority)
+      const rulesKey = trip.route_id && trip.operator_id ? `${trip.route_id}:${trip.operator_id}` : '';
+      const fareRules = rulesKey ? (fareRulesByKey.get(rulesKey) ?? []) : [];
+      if (fareRules.length > 0) {
+        effective_fare_by_class = computeEffectiveFareByClass(trip.base_fare, fareRules, trip.departure_time);
+        effective_fare = Math.min(...Object.values(effective_fare_by_class));
+      }
+
+      // P11-T3: Compute segment fare for stop-based search (overrides class-based fares for display)
       let segment_fare: number | undefined;
       if (useStops && trip.dest_fare_kobo != null && trip.origin_fare_kobo != null) {
         segment_fare = trip.dest_fare_kobo - trip.origin_fare_kobo;
@@ -180,6 +227,8 @@ bookingPortalRouter.get('/trips/search', async (c) => {
       return {
         ...trip,
         fare_matrix: undefined,
+        route_id: undefined,
+        operator_id: undefined,
         effective_fare_by_class,
         effective_fare,
         avg_rating,
@@ -930,7 +979,7 @@ bookingPortalRouter.post('/trips/ai-search', requireTierFeature('ai_search'), as
   let destination: string | undefined;
   let date: string | undefined;
 
-  if (c.env.OPENROUTER_API_KEY) {
+  if (c.env.AI_PLATFORM_URL) {
     try {
       const { extractTripSearchParams } = await import('../lib/ai.js');
       const params = await extractTripSearchParams(query, c.env);

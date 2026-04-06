@@ -104,7 +104,10 @@ function makeSurgeDb(riderCount: number, driverCount: number): SurgeDb {
 }
 
 const mockEnvNoAI = {} as AiEnv;
-const mockEnvWithAI = { OPENROUTER_API_KEY: 'sk-test-key' } as AiEnv;
+const mockEnvWithAI: AiEnv = {
+  AI_PLATFORM_URL: 'https://ai.webwaka.test',
+  AI_PLATFORM_TOKEN: 'test-bearer-token',
+};
 
 describe('calculateSurge', () => {
   beforeEach(() => {
