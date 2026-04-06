@@ -55,6 +55,7 @@ import { driverAppRouter } from './api/driver-app.js';
 import { lostFoundRouter } from './api/lost-found.js';
 import { promoRouter } from './api/promo.js';
 import { evChargingRouter } from './api/ev-charging.js';
+import { dispatchEvent, type WebWakaEvent } from './core/event-bus/index.js';
 
 export interface Env {
   DB: D1Database;
@@ -77,6 +78,7 @@ export interface Env {
   ASSETS_R2?: R2Bucket;
   CENTRAL_MGMT_URL?: string;
   INTER_SERVICE_SECRET?: string;
+  TRANSPORT_EVENTS?: Queue;
 }
 
 export { TripSeatDO } from './durables/trip-seat-do.js';
@@ -382,6 +384,28 @@ export async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionC
     ctx.waitUntil(sweepVehicleMaintenanceDue(env));
     ctx.waitUntil(sweepVehicleDocumentExpiry(env));
     ctx.waitUntil(sweepDriverDocumentExpiry(env));
+  }
+}
+
+// ============================================================
+// CF Queues consumer — processes TRANSPORT_EVENTS messages
+// Every message is a WebWakaEvent dispatched to registered handlers.
+// Non-fatal: errors are logged but the message is acknowledged to
+// avoid poison-pill loops (CF Queues retries on unacknowledged messages).
+// ============================================================
+export async function queue(
+  batch: MessageBatch<WebWakaEvent>,
+  _env: Env,
+  _ctx: ExecutionContext,
+): Promise<void> {
+  for (const message of batch.messages) {
+    try {
+      await dispatchEvent(message.body);
+      message.ack();
+    } catch (err) {
+      console.error('[transport] queue handler error:', err instanceof Error ? err.message : err, message.body?.type);
+      message.ack(); // ack even on error — sweepers handle recovery via platform_events outbox
+    }
   }
 }
 
