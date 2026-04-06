@@ -115,6 +115,16 @@ jobs:
           wranglerVersion: '4'
           command: d1 execute webwaka-transport-db-prod --env production --file migrations/004_event_bus_and_seats_hardening.sql --remote
 
+      - name: Ensure CF Queue exists (production)
+        # Idempotent — no-op if queue already exists. Non-fatal if token lacks Queues:Edit.
+        continue-on-error: true
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: '4'
+          command: queues create webwaka-transport-events-prod
+
       - name: Deploy Workers to Production
         uses: cloudflare/wrangler-action@v3
         with:
