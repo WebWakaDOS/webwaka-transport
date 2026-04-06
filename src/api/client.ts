@@ -38,7 +38,10 @@ export interface SeatAvailability {
   reserved: number;
   confirmed: number;
   blocked: number;
+  /** Canonical field name returned by seat-inventory API */
   trns_seats: SeatInfo[];
+  /** Alias for trns_seats — populated client-side for convenience */
+  seats: SeatInfo[];
 }
 
 export interface Customer {
@@ -212,6 +215,8 @@ export interface BoardResult {
 
 export interface OperatorStats {
   trns_trips: Record<string, number>;
+  /** Alias for trns_trips */
+  trips: Record<string, number>;
   today_revenue_kobo: number;
 }
 
@@ -223,6 +228,8 @@ export interface Agent {
   email: string | null;
   role: string;
   trns_bus_parks: string;
+  /** Alias for trns_bus_parks */
+  bus_parks: string;
   status: string;
   created_at: number;
   updated_at: number;
@@ -296,11 +303,15 @@ export interface DispatchTrip {
   driver: DispatchDriver | null;
   location: DispatchLocation | null;
   trns_seats: { total: number; available: number; confirmed: number; reserved: number };
+  /** Alias for trns_seats */
+  seats: { total: number; available: number; confirmed: number; reserved: number };
   confirmed_bookings: number;
 }
 
 export interface DispatchDashboard {
   trns_trips: DispatchTrip[];
+  /** Alias for trns_trips */
+  trips: DispatchTrip[];
   count: number;
   as_of: number;
 }
@@ -331,8 +342,14 @@ export interface GroupedRevenueReport {
 export interface PlatformAnalytics {
   generated_at: number;
   trns_operators: { total: number; active: number };
+  /** Alias for trns_operators */
+  operators: { total: number; active: number };
   trns_trips: { total: number; scheduled: number; boarding: number; in_transit: number; completed: number; cancelled: number };
+  /** Alias for trns_trips */
+  trips: { total: number; scheduled: number; boarding: number; in_transit: number; completed: number; cancelled: number };
   trns_bookings: { total: number; confirmed: number; cancelled: number; pending: number };
+  /** Alias for trns_bookings */
+  bookings: { total: number; confirmed: number; cancelled: number; pending: number };
   revenue: { total_revenue_kobo: number; this_month_revenue_kobo: number };
   top_routes: Array<{ origin: string; destination: string; booking_count: number; revenue_kobo: number }>;
   top_operators: Array<{ id: string; name: string; trip_count: number; revenue_kobo: number }>;
@@ -499,9 +516,16 @@ export class ApiClient {
   // ============================================================
 
   async getSeatAvailability(tripId: string, signal?: AbortSignal): Promise<SeatAvailability> {
-    return this.request<SeatAvailability>(
+    const data = await this.request<SeatAvailability>(
       'GET', `/api/seat-inventory/trns_trips/${tripId}/availability`, undefined, signal
     );
+    // Normalize: ensure both trns_seats and seats alias are populated
+    if (data.trns_seats && !data.seats) {
+      data.seats = data.trns_seats;
+    } else if (data.seats && !data.trns_seats) {
+      data.trns_seats = data.seats;
+    }
+    return data;
   }
 
   async reserveSeat(tripId: string, seatId: string, userId: string): Promise<ReservationResult> {
@@ -723,7 +747,10 @@ export class ApiClient {
   // ============================================================
 
   async getOperatorDashboard(): Promise<OperatorStats> {
-    return this.request<OperatorStats>('GET', '/api/operator/dashboard');
+    const data = await this.request<OperatorStats>('GET', '/api/operator/dashboard');
+    // Normalize alias
+    if (data.trns_trips && !data.trips) data.trips = data.trns_trips;
+    return data;
   }
 
   async getOperatorRoutes(): Promise<Route[]> {
@@ -834,11 +861,36 @@ export class ApiClient {
     if (params?.operator_id) q.set('operator_id', params.operator_id);
     if (params?.status) q.set('status', params.status);
     const qs = q.toString() ? `?${q.toString()}` : '';
-    return this.request<Agent[]>('GET', `/api/agent/trns_agents${qs}`);
+    const agents = await this.request<Agent[]>('GET', `/api/agent/trns_agents${qs}`);
+    // Normalize bus_parks alias
+    return agents.map(a => {
+      if (a.trns_bus_parks !== undefined && a.bus_parks === undefined) a.bus_parks = a.trns_bus_parks;
+      return a;
+    });
   }
 
-  async createAgent(data: { operator_id: string; name: string; phone: string; email?: string; role?: string; trns_bus_parks?: string[] }): Promise<Agent> {
-    return this.request<Agent>('POST', '/api/agent/trns_agents', data);
+  async createAgent(data: {
+    operator_id: string;
+    name: string;
+    phone: string;
+    email?: string;
+    role?: string;
+    /** Canonical field name */
+    trns_bus_parks?: string[];
+    /** Alias for trns_bus_parks */
+    bus_parks?: string[];
+  }): Promise<Agent> {
+    // Normalize: if caller used bus_parks alias, map to trns_bus_parks for the API
+    const payload = { ...data };
+    if (payload.bus_parks !== undefined && payload.trns_bus_parks === undefined) {
+      payload.trns_bus_parks = payload.bus_parks;
+    }
+    delete (payload as Record<string, unknown>).bus_parks;
+    const agent = await this.request<Agent>('POST', '/api/agent/trns_agents', payload);
+    if (agent.trns_bus_parks !== undefined && agent.bus_parks === undefined) {
+      agent.bus_parks = agent.trns_bus_parks;
+    }
+    return agent;
   }
 
   async updateAgent(agentId: string, data: { name?: string; phone?: string; email?: string; role?: string; status?: string; trns_bus_parks?: string[] }): Promise<void> {
@@ -1024,7 +1076,15 @@ export class ApiClient {
     const res = await this.request<{ success: boolean; data: DispatchDashboard }>(
       'GET', '/api/operator/dispatch'
     );
-    return res.data;
+    const data = res.data;
+    // Normalize aliases
+    if (data.trns_trips && !data.trips) {
+      data.trips = data.trns_trips.map(t => {
+        if (t.trns_seats && !t.seats) t.seats = t.trns_seats;
+        return t;
+      });
+    }
+    return data;
   }
 
   // ---- P10-T4: Grouped Revenue Analytics ----
@@ -1051,7 +1111,12 @@ export class ApiClient {
     const res = await this.request<{ success: boolean; data: PlatformAnalytics }>(
       'GET', '/api/internal/admin/analytics'
     );
-    return res.data;
+    const data = res.data;
+    // Normalize aliases
+    if (data.trns_operators && !data.operators) data.operators = data.trns_operators;
+    if (data.trns_trips && !data.trips) data.trips = data.trns_trips;
+    if (data.trns_bookings && !data.bookings) data.bookings = data.trns_bookings;
+    return data;
   }
 
   // ---- P11-T1: API Key Management ----

@@ -402,14 +402,19 @@ export function getTenantId(c: any): string | null {
 
 export type TierFeature =
   | 'ai_search'
-  | 'waiting_list'
-  | 'operator_reviews'
   | 'analytics'
   | 'auto_schedule'
-  | 'api_keys'
+  | 'bulk_import'
   | 'seat_class_pricing'
   | 'white_label'
-  | 'bulk_import';
+  // Transport-specific (trns_ prefixed)
+  | 'trns_waiting_list'
+  | 'trns_operator_reviews'
+  | 'trns_api_keys'
+  // Legacy aliases (without trns_ prefix)
+  | 'waiting_list'
+  | 'operator_reviews'
+  | 'api_keys';
 
 type Tier = 'basic' | 'pro' | 'enterprise';
 
@@ -417,14 +422,19 @@ const TIER_RANK: Record<Tier, number> = { basic: 0, pro: 1, enterprise: 2 };
 
 const FEATURE_MIN_TIER: Record<TierFeature, Tier> = {
   ai_search: 'pro',
-  waiting_list: 'pro',
-  operator_reviews: 'basic',
   analytics: 'pro',
   auto_schedule: 'enterprise',
-  api_keys: 'pro',
+  bulk_import: 'enterprise',
   seat_class_pricing: 'pro',
   white_label: 'enterprise',
-  bulk_import: 'enterprise',
+  // Transport-specific (trns_ prefix)
+  trns_waiting_list: 'pro',
+  trns_operator_reviews: 'basic',
+  trns_api_keys: 'pro',
+  // Legacy aliases
+  waiting_list: 'pro',
+  operator_reviews: 'basic',
+  api_keys: 'pro',
 };
 
 /**

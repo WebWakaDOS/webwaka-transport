@@ -92,3 +92,55 @@ queue = "webwaka-transport-events-prod"
 queue = "webwaka-transport-events-prod"
 max_batch_size = 10
 max_batch_timeout = 5
+
+# ============================================================
+# Staging environment
+# ============================================================
+[env.staging]
+name = "webwaka-transport-api-staging"
+
+[env.staging.triggers]
+crons = ["* * * * *", "0 0 * * *"]
+
+[[env.staging.durable_objects.bindings]]
+name = "TRIP_SEAT_DO"
+class_name = "TripSeatDO"
+
+[[env.staging.migrations]]
+tag = "v1"
+new_sqlite_classes = ["TripSeatDO"]
+
+[[env.staging.r2_buckets]]
+binding = "ASSETS_R2"
+bucket_name = "webwaka-operator-assets-staging"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "webwaka-staging-db"
+database_id = "d7278ca0-2408-40d5-a08b-d8456601f667"
+migrations_dir = "migrations"
+
+[[env.staging.kv_namespaces]]
+binding = "SESSIONS_KV"
+id = "f176cebbdf8445838c72d9fde0173628"
+
+[[env.staging.kv_namespaces]]
+binding = "TENANT_CONFIG_KV"
+id = "2100508349014672a24a7606b4c03de7"
+
+[[env.staging.kv_namespaces]]
+binding = "SEAT_CACHE_KV"
+id = "f02e65e56b534402a1f4d85a35e2be97"
+
+[[env.staging.kv_namespaces]]
+binding = "IDEMPOTENCY_KV"
+id = "cc380305413147f8ac35058bd0bcb9c0"
+
+[[env.staging.queues.producers]]
+binding = "TRANSPORT_EVENTS"
+queue = "webwaka-transport-events-staging"
+
+[[env.staging.queues.consumers]]
+queue = "webwaka-transport-events-staging"
+max_batch_size = 10
+max_batch_timeout = 5

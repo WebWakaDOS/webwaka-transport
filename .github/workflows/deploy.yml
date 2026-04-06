@@ -83,37 +83,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Apply D1 Migrations — Production (all migrations in order)
+      - name: Apply D1 Migrations — Production
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           wranglerVersion: '4'
-          command: d1 execute webwaka-transport-db-prod --env production --file migrations/001_transport_schema.sql --remote
-
-      - name: Apply Migration 002 — Platform Events
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          wranglerVersion: '4'
-          command: d1 execute webwaka-transport-db-prod --env production --file migrations/002_platform_events.sql --remote
-
-      - name: Apply Migration 003 — Vehicles Model Column
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          wranglerVersion: '4'
-          command: d1 execute webwaka-transport-db-prod --env production --file migrations/003_vehicles_model_column.sql --remote
-
-      - name: Apply Migration 004 — Event Bus and Seats Hardening
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          wranglerVersion: '4'
-          command: d1 execute webwaka-transport-db-prod --env production --file migrations/004_event_bus_and_seats_hardening.sql --remote
+          command: d1 migrations apply webwaka-production-db --env production --remote
 
       - name: Ensure CF Queue exists (production)
         # Idempotent — no-op if queue already exists. Non-fatal if token lacks Queues:Edit.
@@ -250,37 +226,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Apply D1 Migrations — Staging (all migrations in order)
+      - name: Apply D1 Migrations — Staging
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           wranglerVersion: '4'
-          command: d1 execute webwaka-transport-db-staging --env staging --file migrations/001_transport_schema.sql --remote
-
-      - name: Apply Migration 002 — Staging
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          wranglerVersion: '4'
-          command: d1 execute webwaka-transport-db-staging --env staging --file migrations/002_platform_events.sql --remote
-
-      - name: Apply Migration 003 — Staging
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          wranglerVersion: '4'
-          command: d1 execute webwaka-transport-db-staging --env staging --file migrations/003_vehicles_model_column.sql --remote
-
-      - name: Apply Migration 004 — Staging
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          wranglerVersion: '4'
-          command: d1 execute webwaka-transport-db-staging --env staging --file migrations/004_event_bus_and_seats_hardening.sql --remote
+          command: d1 migrations apply webwaka-staging-db --env staging --remote
 
       - name: Deploy Workers to Staging
         uses: cloudflare/wrangler-action@v3
