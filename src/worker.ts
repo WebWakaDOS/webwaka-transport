@@ -365,51 +365,52 @@ app.onError((err, c) => {
 //
 // Sweepers are extracted to src/lib/sweepers.ts for testability.
 // ============================================================
-export async function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-  // Run per-minute sweepers on every cron trigger
-  ctx.waitUntil(Promise.all([
-    drainEventBus(env),
-    sweepExpiredReservations(env),
-    sweepAbandonedBookings(env),
-    sweepExpiredWaitlistNotifications(env),
-    sweepBookingReminders(env),
-  ]));
-
-  // Run daily sweepers only at midnight UTC (C-002)
-  const scheduledHour = new Date(event.scheduledTime).getUTCHours();
-  if (scheduledHour === 0) {
-    ctx.waitUntil(sweepExpiredPII(env));
-    ctx.waitUntil(purgeExpiredFinancialData(env));
-    // P09: Fleet & driver compliance sweepers
-    ctx.waitUntil(sweepVehicleMaintenanceDue(env));
-    ctx.waitUntil(sweepVehicleDocumentExpiry(env));
-    ctx.waitUntil(sweepDriverDocumentExpiry(env));
-  }
-}
 
 // ============================================================
-// CF Queues consumer — processes TRANSPORT_EVENTS messages
-// Every message is a WebWakaEvent dispatched to registered handlers.
-// Non-fatal: errors are logged but the message is acknowledged to
-// avoid poison-pill loops (CF Queues retries on unacknowledged messages).
+// Default export — CF Workers module format.
+// All three handlers (fetch, scheduled, queue) must be on the
+// default export for wrangler to register them with Cloudflare.
+// Named-export handlers are NOT picked up for queue consumers.
+// See: https://hono.dev/examples/cloudflare-queue
 // ============================================================
-export async function queue(
-  batch: MessageBatch<WebWakaEvent>,
-  _env: Env,
-  _ctx: ExecutionContext,
-): Promise<void> {
-  for (const message of batch.messages) {
-    try {
-      await dispatchEvent(message.body);
-      message.ack();
-    } catch (err) {
-      console.error('[transport] queue handler error:', err instanceof Error ? err.message : err, message.body?.type);
-      message.ack(); // ack even on error — sweepers handle recovery via platform_events outbox
+export default {
+  // HTTP requests → Hono app
+  fetch: app.fetch.bind(app),
+
+  // Cron triggers
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(Promise.all([
+      drainEventBus(env),
+      sweepExpiredReservations(env),
+      sweepAbandonedBookings(env),
+      sweepExpiredWaitlistNotifications(env),
+      sweepBookingReminders(env),
+    ]));
+    const scheduledHour = new Date(event.scheduledTime).getUTCHours();
+    if (scheduledHour === 0) {
+      ctx.waitUntil(sweepExpiredPII(env));
+      ctx.waitUntil(purgeExpiredFinancialData(env));
+      ctx.waitUntil(sweepVehicleMaintenanceDue(env));
+      ctx.waitUntil(sweepVehicleDocumentExpiry(env));
+      ctx.waitUntil(sweepDriverDocumentExpiry(env));
     }
-  }
-}
+  },
 
-export default app;
+  // CF Queues consumer — processes TRANSPORT_EVENTS messages.
+  // Every message is a WebWakaEvent dispatched to registered handlers.
+  // Non-fatal: errors are logged then acked to avoid poison-pill retry loops.
+  async queue(batch: MessageBatch<WebWakaEvent>, _env: Env, _ctx: ExecutionContext): Promise<void> {
+    for (const message of batch.messages) {
+      try {
+        await dispatchEvent(message.body);
+        message.ack();
+      } catch (err) {
+        console.error('[transport] queue handler error:', err instanceof Error ? err.message : err, message.body?.type);
+        message.ack(); // ack even on error — sweepers handle recovery via platform_events outbox
+      }
+    }
+  },
+};
 
 // NOTE: drainEventBus, sweepExpiredReservations, sweepAbandonedBookings
 // are imported from src/lib/sweepers.ts above.
