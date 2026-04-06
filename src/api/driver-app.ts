@@ -9,7 +9,7 @@
  *   - SOS emergency button
  *   - Driver document management
  *
- * Auth: All routes require DRIVER or SUPERVISOR role JWT.
+ * Auth: All trns_routes require DRIVER or SUPERVISOR role JWT.
  * Offline-tolerance: Endpoints accept and queue mutations made offline.
  */
 
@@ -51,7 +51,7 @@ driverAppRouter.get('/:driver_id/earnings', async (c) => {
   const { results: earningsRows } = await db
     .prepare(`
       SELECT de.*
-      FROM driver_earnings de
+      FROM trns_driver_earnings de
       WHERE de.driver_id = ?
         ${dateCondition}
       ORDER BY de.date DESC
@@ -84,8 +84,8 @@ driverAppRouter.get('/:driver_id/earnings', async (c) => {
   const { results: recentTips } = await db
     .prepare(`
       SELECT dt.amount_kobo, dt.message, dt.created_at, c.name as customer_name
-      FROM driver_tips dt
-      LEFT JOIN customers c ON dt.customer_id = c.id
+      FROM trns_driver_tips dt
+      LEFT JOIN trns_customers c ON dt.customer_id = c.id
       WHERE dt.driver_id = ?
       ORDER BY dt.created_at DESC LIMIT 10
     `)
@@ -129,7 +129,7 @@ driverAppRouter.post('/:driver_id/earnings/record', async (c) => {
 
   // Upsert daily earnings row
   await db.prepare(`
-    INSERT INTO driver_earnings (id, driver_id, operator_id, date, trips_completed, gross_earnings_kobo, platform_commission_kobo, net_earnings_kobo, tips_kobo, bonuses_kobo, km_driven, hours_online, created_at, updated_at)
+    INSERT INTO trns_driver_earnings (id, driver_id, operator_id, date, trips_completed, gross_earnings_kobo, platform_commission_kobo, net_earnings_kobo, tips_kobo, bonuses_kobo, km_driven, hours_online, created_at, updated_at)
     VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(driver_id, date) DO UPDATE SET
       trips_completed = trips_completed + 1,
@@ -184,7 +184,7 @@ driverAppRouter.post('/:driver_id/inspections', async (c) => {
   const status = allCritical ? 'passed' : 'failed';
 
   await c.env.DB.prepare(`
-    INSERT INTO daily_vehicle_inspections
+    INSERT INTO trns_daily_vehicle_inspections
       (id, vehicle_id, driver_id, operator_id, inspection_date, tires_ok, brakes_ok,
        lights_ok, fuel_level, engine_ok, ac_ok, mirrors_ok, emergency_equipment_ok,
        fire_extinguisher_ok, first_aid_ok, mileage_km, notes, photos, status, created_at)
@@ -223,7 +223,7 @@ driverAppRouter.post('/:driver_id/inspections', async (c) => {
 driverAppRouter.get('/:driver_id/inspections', async (c) => {
   const driverId = c.req.param('driver_id');
   const date = c.req.query('date');
-  let query = `SELECT * FROM daily_vehicle_inspections WHERE driver_id = ?`;
+  let query = `SELECT * FROM trns_daily_vehicle_inspections WHERE driver_id = ?`;
   const bindings: unknown[] = [driverId];
   if (date) { query += ' AND inspection_date = ?'; bindings.push(date); }
   query += ' ORDER BY inspection_date DESC LIMIT 30';
@@ -250,7 +250,7 @@ driverAppRouter.post('/:driver_id/verify', async (c) => {
   const verificationId = `verif_${nanoid()}`;
 
   await c.env.DB.prepare(`
-    INSERT INTO driver_verifications (id, driver_id, operator_id, verification_type, selfie_url, status, expires_at, shift_date, created_at)
+    INSERT INTO trns_driver_verifications (id, driver_id, operator_id, verification_type, selfie_url, status, expires_at, shift_date, created_at)
     VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)
     ON CONFLICT(driver_id, shift_date) DO UPDATE SET
       selfie_url = excluded.selfie_url,
@@ -285,7 +285,7 @@ driverAppRouter.patch('/verify/:verification_id/review', async (c) => {
     return c.json({ success: false, error: 'status must be approved or rejected' }, 400);
   }
   const now = Date.now();
-  await c.env.DB.prepare(`UPDATE driver_verifications SET status = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ?`).bind(status, reviewed_by, now, verifId).run();
+  await c.env.DB.prepare(`UPDATE trns_driver_verifications SET status = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ?`).bind(status, reviewed_by, now, verifId).run();
   return c.json({ success: true, data: { verification_id: verifId, status } });
 });
 
@@ -297,17 +297,17 @@ driverAppRouter.get('/:driver_id/verify/today', async (c) => {
   const driverId = c.req.param('driver_id');
   const today = new Date().toISOString().split('T')[0]!;
   const record = await c.env.DB
-    .prepare(`SELECT id, status, shift_date, expires_at FROM driver_verifications WHERE driver_id = ? AND shift_date = ?`)
+    .prepare(`SELECT id, status, shift_date, expires_at FROM trns_driver_verifications WHERE driver_id = ? AND shift_date = ?`)
     .bind(driverId, today)
     .first();
   return c.json({ success: true, data: record ?? { status: 'not_submitted', shift_date: today } });
 });
 
 // ============================================================
-// POST /api/driver-app/trips/:trip_id/sos
+// POST /api/driver-app/trns_trips/:trip_id/sos
 // Driver SOS emergency button
 // ============================================================
-driverAppRouter.post('/trips/:trip_id/sos', async (c) => {
+driverAppRouter.post('/trns_trips/:trip_id/sos', async (c) => {
   const tripId = c.req.param('trip_id');
   const body = await c.req.json<{
     message?: string;
@@ -317,7 +317,7 @@ driverAppRouter.post('/trips/:trip_id/sos', async (c) => {
   const now = Date.now();
 
   await c.env.DB.prepare(`
-    UPDATE trips SET
+    UPDATE trns_trips SET
       sos_active = 1, sos_triggered_at = ?,
       sos_message = ?, sos_location_lat = ?, sos_location_lng = ?,
       current_latitude = COALESCE(?, current_latitude),
@@ -337,7 +337,7 @@ driverAppRouter.post('/trips/:trip_id/sos', async (c) => {
   // Emit SOS event
   const eventId = `evt_${now}_${Math.random().toString(36).slice(2, 7)}`;
   await c.env.DB.prepare(`
-    INSERT OR IGNORE INTO platform_events (id, event_type, aggregate_id, aggregate_type, payload, status, created_at)
+    INSERT OR IGNORE INTO trns_platform_events (id, event_type, aggregate_id, aggregate_type, payload, status, created_at)
     VALUES (?, 'transport.trip.sos_triggered', ?, 'trip', ?, 'pending', ?)
   `).bind(
     eventId, tripId,
@@ -357,22 +357,22 @@ driverAppRouter.post('/trips/:trip_id/sos', async (c) => {
 });
 
 // ============================================================
-// DELETE /api/driver-app/trips/:trip_id/sos
+// DELETE /api/driver-app/trns_trips/:trip_id/sos
 // Clear SOS
 // ============================================================
-driverAppRouter.delete('/trips/:trip_id/sos', async (c) => {
+driverAppRouter.delete('/trns_trips/:trip_id/sos', async (c) => {
   const tripId = c.req.param('trip_id');
   const { cleared_by } = await c.req.json<{ cleared_by: string }>();
   const now = Date.now();
-  await c.env.DB.prepare(`UPDATE trips SET sos_active = 0, sos_cleared_at = ?, sos_cleared_by = ?, updated_at = ? WHERE id = ?`).bind(now, cleared_by, now, tripId).run();
+  await c.env.DB.prepare(`UPDATE trns_trips SET sos_active = 0, sos_cleared_at = ?, sos_cleared_by = ?, updated_at = ? WHERE id = ?`).bind(now, cleared_by, now, tripId).run();
   return c.json({ success: true, data: { trip_id: tripId, sos_active: false } });
 });
 
 // ============================================================
-// PATCH /api/driver-app/trips/:trip_id/location
+// PATCH /api/driver-app/trns_trips/:trip_id/location
 // Driver updates GPS location (navigation tracking)
 // ============================================================
-driverAppRouter.patch('/trips/:trip_id/location', async (c) => {
+driverAppRouter.patch('/trns_trips/:trip_id/location', async (c) => {
   const tripId = c.req.param('trip_id');
   const { latitude, longitude, driver_id } = await c.req.json<{
     latitude: number;
@@ -381,10 +381,10 @@ driverAppRouter.patch('/trips/:trip_id/location', async (c) => {
   }>();
   const now = Date.now();
 
-  await c.env.DB.prepare(`UPDATE trips SET current_latitude = ?, current_longitude = ?, updated_at = ? WHERE id = ?`).bind(latitude, longitude, now, tripId).run();
+  await c.env.DB.prepare(`UPDATE trns_trips SET current_latitude = ?, current_longitude = ?, updated_at = ? WHERE id = ?`).bind(latitude, longitude, now, tripId).run();
 
-  // Also update active_drivers heartbeat
-  await c.env.DB.prepare(`UPDATE active_drivers SET latitude = ?, longitude = ?, last_seen_at = ? WHERE driver_id = ?`).bind(latitude, longitude, now, driver_id).run();
+  // Also update trns_active_drivers heartbeat
+  await c.env.DB.prepare(`UPDATE trns_active_drivers SET latitude = ?, longitude = ?, last_seen_at = ? WHERE driver_id = ?`).bind(latitude, longitude, now, driver_id).run();
 
   return c.json({ success: true, data: { trip_id: tripId, latitude, longitude } });
 });

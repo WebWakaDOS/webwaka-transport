@@ -31,7 +31,7 @@ const MIGRATIONS: Migration[] = [
   {
     name: '001_transport_schema',
     statements: [
-      `CREATE TABLE IF NOT EXISTS operators (
+      `CREATE TABLE IF NOT EXISTS trns_operators (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         code TEXT NOT NULL UNIQUE,
@@ -42,9 +42,9 @@ const MIGRATIONS: Migration[] = [
         updated_at INTEGER NOT NULL,
         deleted_at INTEGER
       )`,
-      `CREATE TABLE IF NOT EXISTS routes (
+      `CREATE TABLE IF NOT EXISTS trns_routes (
         id TEXT PRIMARY KEY,
-        operator_id TEXT NOT NULL REFERENCES operators(id),
+        operator_id TEXT NOT NULL REFERENCES trns_operators(id),
         origin TEXT NOT NULL,
         destination TEXT NOT NULL,
         distance_km INTEGER,
@@ -55,9 +55,9 @@ const MIGRATIONS: Migration[] = [
         updated_at INTEGER NOT NULL,
         deleted_at INTEGER
       )`,
-      `CREATE TABLE IF NOT EXISTS vehicles (
+      `CREATE TABLE IF NOT EXISTS trns_vehicles (
         id TEXT PRIMARY KEY,
-        operator_id TEXT NOT NULL REFERENCES operators(id),
+        operator_id TEXT NOT NULL REFERENCES trns_operators(id),
         plate_number TEXT NOT NULL UNIQUE,
         vehicle_type TEXT NOT NULL,
         model TEXT,
@@ -67,11 +67,11 @@ const MIGRATIONS: Migration[] = [
         updated_at INTEGER NOT NULL,
         deleted_at INTEGER
       )`,
-      `CREATE TABLE IF NOT EXISTS trips (
+      `CREATE TABLE IF NOT EXISTS trns_trips (
         id TEXT PRIMARY KEY,
-        operator_id TEXT NOT NULL REFERENCES operators(id),
-        route_id TEXT NOT NULL REFERENCES routes(id),
-        vehicle_id TEXT NOT NULL REFERENCES vehicles(id),
+        operator_id TEXT NOT NULL REFERENCES trns_operators(id),
+        route_id TEXT NOT NULL REFERENCES trns_routes(id),
+        vehicle_id TEXT NOT NULL REFERENCES trns_vehicles(id),
         driver_id TEXT,
         departure_time INTEGER NOT NULL,
         estimated_arrival_time INTEGER,
@@ -89,9 +89,9 @@ const MIGRATIONS: Migration[] = [
         updated_at INTEGER NOT NULL,
         deleted_at INTEGER
       )`,
-      `CREATE TABLE IF NOT EXISTS seats (
+      `CREATE TABLE IF NOT EXISTS trns_seats (
         id TEXT PRIMARY KEY,
-        trip_id TEXT NOT NULL REFERENCES trips(id),
+        trip_id TEXT NOT NULL REFERENCES trns_trips(id),
         operator_id TEXT,
         seat_number TEXT NOT NULL,
         seat_class TEXT NOT NULL DEFAULT 'standard',
@@ -105,31 +105,31 @@ const MIGRATIONS: Migration[] = [
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       )`,
-      `CREATE TABLE IF NOT EXISTS trip_state_transitions (
+      `CREATE TABLE IF NOT EXISTS trns_trip_state_transitions (
         id TEXT PRIMARY KEY,
-        trip_id TEXT NOT NULL REFERENCES trips(id),
+        trip_id TEXT NOT NULL REFERENCES trns_trips(id),
         from_state TEXT NOT NULL,
         to_state TEXT NOT NULL,
         reason TEXT,
         transitioned_at INTEGER NOT NULL
       )`,
-      `CREATE TABLE IF NOT EXISTS agents (
+      `CREATE TABLE IF NOT EXISTS trns_agents (
         id TEXT PRIMARY KEY,
-        operator_id TEXT NOT NULL REFERENCES operators(id),
+        operator_id TEXT NOT NULL REFERENCES trns_operators(id),
         name TEXT NOT NULL,
         phone TEXT NOT NULL,
         email TEXT,
         role TEXT NOT NULL DEFAULT 'agent',
-        bus_parks TEXT,
+        trns_bus_parks TEXT,
         status TEXT NOT NULL DEFAULT 'active',
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         deleted_at INTEGER
       )`,
-      `CREATE TABLE IF NOT EXISTS sales_transactions (
+      `CREATE TABLE IF NOT EXISTS trns_sales_transactions (
         id TEXT PRIMARY KEY,
-        agent_id TEXT NOT NULL REFERENCES agents(id),
-        trip_id TEXT NOT NULL REFERENCES trips(id),
+        agent_id TEXT NOT NULL REFERENCES trns_agents(id),
+        trip_id TEXT NOT NULL REFERENCES trns_trips(id),
         seat_ids TEXT NOT NULL,
         passenger_names TEXT NOT NULL,
         total_amount INTEGER NOT NULL,
@@ -141,7 +141,7 @@ const MIGRATIONS: Migration[] = [
         synced_at INTEGER,
         deleted_at INTEGER
       )`,
-      `CREATE TABLE IF NOT EXISTS customers (
+      `CREATE TABLE IF NOT EXISTS trns_customers (
         id TEXT PRIMARY KEY,
         name TEXT,
         phone TEXT NOT NULL,
@@ -153,10 +153,10 @@ const MIGRATIONS: Migration[] = [
         updated_at INTEGER NOT NULL,
         deleted_at INTEGER
       )`,
-      `CREATE TABLE IF NOT EXISTS bookings (
+      `CREATE TABLE IF NOT EXISTS trns_bookings (
         id TEXT PRIMARY KEY,
-        customer_id TEXT NOT NULL REFERENCES customers(id),
-        trip_id TEXT NOT NULL REFERENCES trips(id),
+        customer_id TEXT NOT NULL REFERENCES trns_customers(id),
+        trip_id TEXT NOT NULL REFERENCES trns_trips(id),
         seat_ids TEXT NOT NULL,
         passenger_names TEXT NOT NULL,
         total_amount INTEGER NOT NULL,
@@ -173,7 +173,7 @@ const MIGRATIONS: Migration[] = [
         cancelled_at INTEGER,
         deleted_at INTEGER
       )`,
-      `CREATE TABLE IF NOT EXISTS sync_mutations (
+      `CREATE TABLE IF NOT EXISTS trns_sync_mutations (
         id TEXT PRIMARY KEY,
         entity_type TEXT NOT NULL,
         entity_id TEXT NOT NULL,
@@ -186,9 +186,9 @@ const MIGRATIONS: Migration[] = [
         created_at INTEGER NOT NULL,
         synced_at INTEGER
       )`,
-      `CREATE TABLE IF NOT EXISTS drivers (
+      `CREATE TABLE IF NOT EXISTS trns_drivers (
         id TEXT PRIMARY KEY,
-        operator_id TEXT NOT NULL REFERENCES operators(id),
+        operator_id TEXT NOT NULL REFERENCES trns_operators(id),
         name TEXT NOT NULL,
         phone TEXT NOT NULL,
         license_number TEXT,
@@ -197,27 +197,27 @@ const MIGRATIONS: Migration[] = [
         updated_at INTEGER NOT NULL,
         deleted_at INTEGER
       )`,
-      `CREATE INDEX IF NOT EXISTS idx_drivers_operator ON drivers(operator_id)`,
-      `CREATE INDEX IF NOT EXISTS idx_drivers_status ON drivers(status)`,
-      `CREATE INDEX IF NOT EXISTS idx_trips_operator ON trips(operator_id)`,
-      `CREATE INDEX IF NOT EXISTS idx_trips_state ON trips(state)`,
-      `CREATE INDEX IF NOT EXISTS idx_trips_departure ON trips(departure_time)`,
-      `CREATE INDEX IF NOT EXISTS idx_seats_trip ON seats(trip_id)`,
-      `CREATE INDEX IF NOT EXISTS idx_seats_status ON seats(status)`,
-      `CREATE INDEX IF NOT EXISTS idx_seats_reserved_expires ON seats(status, reservation_expires_at)`,
-      `CREATE INDEX IF NOT EXISTS idx_bookings_customer ON bookings(customer_id)`,
-      `CREATE INDEX IF NOT EXISTS idx_bookings_trip ON bookings(trip_id)`,
-      `CREATE INDEX IF NOT EXISTS idx_bookings_status ON bookings(status)`,
-      `CREATE INDEX IF NOT EXISTS idx_sales_agent ON sales_transactions(agent_id)`,
-      `CREATE INDEX IF NOT EXISTS idx_sales_trip ON sales_transactions(trip_id)`,
-      `CREATE INDEX IF NOT EXISTS idx_sales_sync ON sales_transactions(sync_status)`,
-      `CREATE INDEX IF NOT EXISTS idx_sync_status ON sync_mutations(status)`,
+      `CREATE INDEX IF NOT EXISTS idx_drivers_operator ON trns_drivers(operator_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_drivers_status ON trns_drivers(status)`,
+      `CREATE INDEX IF NOT EXISTS idx_trips_operator ON trns_trips(operator_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_trips_state ON trns_trips(state)`,
+      `CREATE INDEX IF NOT EXISTS idx_trips_departure ON trns_trips(departure_time)`,
+      `CREATE INDEX IF NOT EXISTS idx_seats_trip ON trns_seats(trip_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_seats_status ON trns_seats(status)`,
+      `CREATE INDEX IF NOT EXISTS idx_seats_reserved_expires ON trns_seats(status, reservation_expires_at)`,
+      `CREATE INDEX IF NOT EXISTS idx_bookings_customer ON trns_bookings(customer_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_bookings_trip ON trns_bookings(trip_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_bookings_status ON trns_bookings(status)`,
+      `CREATE INDEX IF NOT EXISTS idx_sales_agent ON trns_sales_transactions(agent_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_sales_trip ON trns_sales_transactions(trip_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_sales_sync ON trns_sales_transactions(sync_status)`,
+      `CREATE INDEX IF NOT EXISTS idx_sync_status ON trns_sync_mutations(status)`,
     ],
   },
   {
     name: '002_platform_events',
     statements: [
-      `CREATE TABLE IF NOT EXISTS platform_events (
+      `CREATE TABLE IF NOT EXISTS trns_platform_events (
         id            TEXT PRIMARY KEY,
         event_type    TEXT NOT NULL,
         aggregate_id  TEXT NOT NULL,
@@ -232,10 +232,10 @@ const MIGRATIONS: Migration[] = [
         created_at    INTEGER NOT NULL,
         dispatched_at INTEGER
       )`,
-      `CREATE INDEX IF NOT EXISTS idx_platform_events_status ON platform_events(status)`,
-      `CREATE INDEX IF NOT EXISTS idx_platform_events_event_type ON platform_events(event_type)`,
-      `CREATE INDEX IF NOT EXISTS idx_platform_events_aggregate ON platform_events(aggregate_type, aggregate_id)`,
-      `CREATE INDEX IF NOT EXISTS idx_platform_events_pending ON platform_events(status, retry_count, created_at)`,
+      `CREATE INDEX IF NOT EXISTS idx_platform_events_status ON trns_platform_events(status)`,
+      `CREATE INDEX IF NOT EXISTS idx_platform_events_event_type ON trns_platform_events(event_type)`,
+      `CREATE INDEX IF NOT EXISTS idx_platform_events_aggregate ON trns_platform_events(aggregate_type, aggregate_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_platform_events_pending ON trns_platform_events(status, retry_count, created_at)`,
     ],
   },
   {
@@ -243,7 +243,7 @@ const MIGRATIONS: Migration[] = [
     // These no-op entries ensure schema_migrations records are consistent
     name: '003_vehicles_model_column',
     statements: [
-      // model TEXT is already included in vehicles CREATE TABLE in 001 above
+      // model TEXT is already included in trns_vehicles CREATE TABLE in 001 above
       // This entry is a no-op marker for migration tracking consistency
       `SELECT 1`,
     ],
@@ -259,9 +259,9 @@ const MIGRATIONS: Migration[] = [
   {
     name: '005_drivers_and_schema_hardening',
     statements: [
-      `CREATE TABLE IF NOT EXISTS drivers (
+      `CREATE TABLE IF NOT EXISTS trns_drivers (
         id TEXT PRIMARY KEY,
-        operator_id TEXT NOT NULL REFERENCES operators(id),
+        operator_id TEXT NOT NULL REFERENCES trns_operators(id),
         name TEXT NOT NULL,
         phone TEXT NOT NULL,
         license_number TEXT,
@@ -270,26 +270,26 @@ const MIGRATIONS: Migration[] = [
         updated_at INTEGER NOT NULL,
         deleted_at INTEGER
       )`,
-      `CREATE INDEX IF NOT EXISTS idx_drivers_operator ON drivers(operator_id)`,
-      `CREATE INDEX IF NOT EXISTS idx_drivers_status ON drivers(status)`,
-      `ALTER TABLE sales_transactions ADD COLUMN deleted_at INTEGER`,
-      `ALTER TABLE bookings ADD COLUMN payment_provider TEXT`,
-      `ALTER TABLE bookings ADD COLUMN paid_at INTEGER`,
+      `CREATE INDEX IF NOT EXISTS idx_drivers_operator ON trns_drivers(operator_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_drivers_status ON trns_drivers(status)`,
+      `ALTER TABLE trns_sales_transactions ADD COLUMN deleted_at INTEGER`,
+      `ALTER TABLE trns_bookings ADD COLUMN payment_provider TEXT`,
+      `ALTER TABLE trns_bookings ADD COLUMN paid_at INTEGER`,
     ],
   },
   {
     name: '006_performance_indexes',
     statements: [
-      `CREATE INDEX IF NOT EXISTS idx_routes_operator_id ON routes(operator_id)`,
-      `CREATE INDEX IF NOT EXISTS idx_vehicles_operator_id ON vehicles(operator_id)`,
-      `CREATE INDEX IF NOT EXISTS idx_seats_operator_trip ON seats(operator_id, trip_id)`,
-      `CREATE INDEX IF NOT EXISTS idx_bookings_payment_ref ON bookings(payment_reference)`,
-      `CREATE INDEX IF NOT EXISTS idx_bookings_customer_id ON bookings(customer_id)`,
-      `CREATE INDEX IF NOT EXISTS idx_bookings_trip_id ON bookings(trip_id)`,
-      `CREATE INDEX IF NOT EXISTS idx_transactions_agent_id ON sales_transactions(agent_id)`,
-      `CREATE INDEX IF NOT EXISTS idx_transactions_trip_id ON sales_transactions(trip_id)`,
-      `CREATE INDEX IF NOT EXISTS idx_platform_events_status ON platform_events(status, created_at)`,
-      `CREATE INDEX IF NOT EXISTS idx_trips_operator_departure ON trips(operator_id, departure_time)`,
+      `CREATE INDEX IF NOT EXISTS idx_routes_operator_id ON trns_routes(operator_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_vehicles_operator_id ON trns_vehicles(operator_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_seats_operator_trip ON trns_seats(operator_id, trip_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_bookings_payment_ref ON trns_bookings(payment_reference)`,
+      `CREATE INDEX IF NOT EXISTS idx_bookings_customer_id ON trns_bookings(customer_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_bookings_trip_id ON trns_bookings(trip_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_transactions_agent_id ON trns_sales_transactions(agent_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_transactions_trip_id ON trns_sales_transactions(trip_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_platform_events_status ON trns_platform_events(status, created_at)`,
+      `CREATE INDEX IF NOT EXISTS idx_trips_operator_departure ON trns_trips(operator_id, departure_time)`,
     ],
   },
   {
@@ -312,22 +312,22 @@ const MIGRATIONS: Migration[] = [
   {
     name: '008_customer_last_active',
     statements: [
-      `ALTER TABLE customers ADD COLUMN last_active_at INTEGER`,
+      `ALTER TABLE trns_customers ADD COLUMN last_active_at INTEGER`,
     ],
   },
   {
     name: '009_booking_boarding_cols',
     statements: [
-      `ALTER TABLE bookings ADD COLUMN boarded_at INTEGER`,
-      `ALTER TABLE bookings ADD COLUMN boarded_by TEXT`,
+      `ALTER TABLE trns_bookings ADD COLUMN boarded_at INTEGER`,
+      `ALTER TABLE trns_bookings ADD COLUMN boarded_by TEXT`,
     ],
   },
   {
     name: '010_phase2_tables',
     statements: [
-      `CREATE TABLE IF NOT EXISTS api_keys (
+      `CREATE TABLE IF NOT EXISTS trns_api_keys (
         id TEXT PRIMARY KEY,
-        operator_id TEXT NOT NULL REFERENCES operators(id),
+        operator_id TEXT NOT NULL REFERENCES trns_operators(id),
         name TEXT NOT NULL,
         key_hash TEXT NOT NULL UNIQUE,
         scope TEXT NOT NULL DEFAULT 'read',
@@ -337,9 +337,9 @@ const MIGRATIONS: Migration[] = [
         revoked_at INTEGER,
         deleted_at INTEGER
       )`,
-      `CREATE INDEX IF NOT EXISTS idx_api_keys_operator ON api_keys(operator_id)`,
-      `CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash)`,
-      `CREATE TABLE IF NOT EXISTS ndpr_consent_log (
+      `CREATE INDEX IF NOT EXISTS idx_api_keys_operator ON trns_api_keys(operator_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON trns_api_keys(key_hash)`,
+      `CREATE TABLE IF NOT EXISTS trns_ndpr_consent_log (
         id TEXT PRIMARY KEY,
         entity_id TEXT NOT NULL,
         entity_type TEXT NOT NULL,
@@ -348,10 +348,10 @@ const MIGRATIONS: Migration[] = [
         user_agent TEXT,
         created_at INTEGER NOT NULL
       )`,
-      `CREATE INDEX IF NOT EXISTS idx_ndpr_entity ON ndpr_consent_log(entity_id, entity_type)`,
-      `CREATE TABLE IF NOT EXISTS bus_parks (
+      `CREATE INDEX IF NOT EXISTS idx_ndpr_entity ON trns_ndpr_consent_log(entity_id, entity_type)`,
+      `CREATE TABLE IF NOT EXISTS trns_bus_parks (
         id TEXT PRIMARY KEY,
-        operator_id TEXT NOT NULL REFERENCES operators(id),
+        operator_id TEXT NOT NULL REFERENCES trns_operators(id),
         name TEXT NOT NULL,
         city TEXT NOT NULL,
         state TEXT NOT NULL,
@@ -360,14 +360,14 @@ const MIGRATIONS: Migration[] = [
         created_at INTEGER NOT NULL,
         deleted_at INTEGER
       )`,
-      `CREATE TABLE IF NOT EXISTS agent_bus_parks (
-        agent_id TEXT NOT NULL REFERENCES agents(id),
-        park_id TEXT NOT NULL REFERENCES bus_parks(id),
+      `CREATE TABLE IF NOT EXISTS trns_agent_bus_parks (
+        agent_id TEXT NOT NULL REFERENCES trns_agents(id),
+        park_id TEXT NOT NULL REFERENCES trns_bus_parks(id),
         PRIMARY KEY (agent_id, park_id)
       )`,
-      `CREATE TABLE IF NOT EXISTS float_reconciliation (
+      `CREATE TABLE IF NOT EXISTS trns_float_reconciliation (
         id TEXT PRIMARY KEY,
-        agent_id TEXT NOT NULL REFERENCES agents(id),
+        agent_id TEXT NOT NULL REFERENCES trns_agents(id),
         operator_id TEXT NOT NULL,
         period_date TEXT NOT NULL,
         expected_kobo INTEGER NOT NULL,
@@ -379,10 +379,10 @@ const MIGRATIONS: Migration[] = [
         notes TEXT,
         created_at INTEGER NOT NULL
       )`,
-      `CREATE INDEX IF NOT EXISTS idx_reconciliation_agent_date ON float_reconciliation(agent_id, period_date)`,
-      `CREATE TABLE IF NOT EXISTS trip_inspections (
+      `CREATE INDEX IF NOT EXISTS idx_reconciliation_agent_date ON trns_float_reconciliation(agent_id, period_date)`,
+      `CREATE TABLE IF NOT EXISTS trns_trip_inspections (
         id TEXT PRIMARY KEY,
-        trip_id TEXT NOT NULL REFERENCES trips(id),
+        trip_id TEXT NOT NULL REFERENCES trns_trips(id),
         inspected_by TEXT NOT NULL,
         tires_ok INTEGER NOT NULL DEFAULT 0,
         brakes_ok INTEGER NOT NULL DEFAULT 0,
@@ -393,8 +393,8 @@ const MIGRATIONS: Migration[] = [
         notes TEXT,
         created_at INTEGER NOT NULL
       )`,
-      `CREATE UNIQUE INDEX IF NOT EXISTS idx_inspection_trip ON trip_inspections(trip_id)`,
-      `CREATE TABLE IF NOT EXISTS seat_history (
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_inspection_trip ON trns_trip_inspections(trip_id)`,
+      `CREATE TABLE IF NOT EXISTS trns_seat_history (
         id TEXT PRIMARY KEY,
         seat_id TEXT NOT NULL,
         trip_id TEXT NOT NULL,
@@ -404,10 +404,10 @@ const MIGRATIONS: Migration[] = [
         reason TEXT,
         created_at INTEGER NOT NULL
       )`,
-      `CREATE INDEX IF NOT EXISTS idx_seat_history_seat ON seat_history(seat_id)`,
-      `CREATE TABLE IF NOT EXISTS vehicle_maintenance_records (
+      `CREATE INDEX IF NOT EXISTS idx_seat_history_seat ON trns_seat_history(seat_id)`,
+      `CREATE TABLE IF NOT EXISTS trns_vehicle_maintenance_records (
         id TEXT PRIMARY KEY,
-        vehicle_id TEXT NOT NULL REFERENCES vehicles(id),
+        vehicle_id TEXT NOT NULL REFERENCES trns_vehicles(id),
         operator_id TEXT NOT NULL,
         service_type TEXT NOT NULL,
         service_date INTEGER NOT NULL,
@@ -416,10 +416,10 @@ const MIGRATIONS: Migration[] = [
         created_by TEXT NOT NULL,
         created_at INTEGER NOT NULL
       )`,
-      `CREATE INDEX IF NOT EXISTS idx_maintenance_vehicle ON vehicle_maintenance_records(vehicle_id)`,
-      `CREATE TABLE IF NOT EXISTS vehicle_documents (
+      `CREATE INDEX IF NOT EXISTS idx_maintenance_vehicle ON trns_vehicle_maintenance_records(vehicle_id)`,
+      `CREATE TABLE IF NOT EXISTS trns_vehicle_documents (
         id TEXT PRIMARY KEY,
-        vehicle_id TEXT NOT NULL REFERENCES vehicles(id),
+        vehicle_id TEXT NOT NULL REFERENCES trns_vehicles(id),
         operator_id TEXT NOT NULL,
         doc_type TEXT NOT NULL,
         doc_number TEXT,
@@ -427,10 +427,10 @@ const MIGRATIONS: Migration[] = [
         expires_at INTEGER NOT NULL,
         created_at INTEGER NOT NULL
       )`,
-      `CREATE INDEX IF NOT EXISTS idx_vehicle_docs ON vehicle_documents(vehicle_id, doc_type)`,
-      `CREATE TABLE IF NOT EXISTS driver_documents (
+      `CREATE INDEX IF NOT EXISTS idx_vehicle_docs ON trns_vehicle_documents(vehicle_id, doc_type)`,
+      `CREATE TABLE IF NOT EXISTS trns_driver_documents (
         id TEXT PRIMARY KEY,
-        driver_id TEXT NOT NULL REFERENCES drivers(id),
+        driver_id TEXT NOT NULL REFERENCES trns_drivers(id),
         operator_id TEXT NOT NULL,
         doc_type TEXT NOT NULL,
         doc_number TEXT,
@@ -439,11 +439,11 @@ const MIGRATIONS: Migration[] = [
         expires_at INTEGER NOT NULL,
         created_at INTEGER NOT NULL
       )`,
-      `CREATE INDEX IF NOT EXISTS idx_driver_docs ON driver_documents(driver_id, doc_type)`,
-      `CREATE TABLE IF NOT EXISTS waiting_list (
+      `CREATE INDEX IF NOT EXISTS idx_driver_docs ON trns_driver_documents(driver_id, doc_type)`,
+      `CREATE TABLE IF NOT EXISTS trns_waiting_list (
         id TEXT PRIMARY KEY,
-        trip_id TEXT NOT NULL REFERENCES trips(id),
-        customer_id TEXT NOT NULL REFERENCES customers(id),
+        trip_id TEXT NOT NULL REFERENCES trns_trips(id),
+        customer_id TEXT NOT NULL REFERENCES trns_customers(id),
         seat_class TEXT NOT NULL DEFAULT 'standard',
         position INTEGER NOT NULL,
         notified_at INTEGER,
@@ -451,22 +451,22 @@ const MIGRATIONS: Migration[] = [
         created_at INTEGER NOT NULL,
         deleted_at INTEGER
       )`,
-      `CREATE INDEX IF NOT EXISTS idx_waiting_list_trip ON waiting_list(trip_id, position)`,
-      `CREATE TABLE IF NOT EXISTS operator_reviews (
+      `CREATE INDEX IF NOT EXISTS idx_waiting_list_trip ON trns_waiting_list(trip_id, position)`,
+      `CREATE TABLE IF NOT EXISTS trns_operator_reviews (
         id TEXT PRIMARY KEY,
-        operator_id TEXT NOT NULL REFERENCES operators(id),
-        booking_id TEXT NOT NULL REFERENCES bookings(id),
-        customer_id TEXT NOT NULL REFERENCES customers(id),
+        operator_id TEXT NOT NULL REFERENCES trns_operators(id),
+        booking_id TEXT NOT NULL REFERENCES trns_bookings(id),
+        customer_id TEXT NOT NULL REFERENCES trns_customers(id),
         rating INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 5),
         review_text TEXT,
         created_at INTEGER NOT NULL,
         deleted_at INTEGER
       )`,
-      `CREATE UNIQUE INDEX IF NOT EXISTS idx_reviews_booking ON operator_reviews(booking_id)`,
-      `CREATE TABLE IF NOT EXISTS schedules (
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_reviews_booking ON trns_operator_reviews(booking_id)`,
+      `CREATE TABLE IF NOT EXISTS trns_schedules (
         id TEXT PRIMARY KEY,
-        operator_id TEXT NOT NULL REFERENCES operators(id),
-        route_id TEXT NOT NULL REFERENCES routes(id),
+        operator_id TEXT NOT NULL REFERENCES trns_operators(id),
+        route_id TEXT NOT NULL REFERENCES trns_routes(id),
         vehicle_id TEXT,
         driver_id TEXT,
         departure_time TEXT NOT NULL,
@@ -477,19 +477,19 @@ const MIGRATIONS: Migration[] = [
         created_at INTEGER NOT NULL,
         deleted_at INTEGER
       )`,
-      `CREATE TABLE IF NOT EXISTS agent_broadcasts (
+      `CREATE TABLE IF NOT EXISTS trns_agent_broadcasts (
         id TEXT PRIMARY KEY,
-        operator_id TEXT NOT NULL REFERENCES operators(id),
+        operator_id TEXT NOT NULL REFERENCES trns_operators(id),
         sent_by TEXT NOT NULL,
         message TEXT NOT NULL,
         priority TEXT NOT NULL DEFAULT 'normal',
         created_at INTEGER NOT NULL,
         expires_at INTEGER
       )`,
-      `CREATE TABLE IF NOT EXISTS dispute_tickets (
+      `CREATE TABLE IF NOT EXISTS trns_dispute_tickets (
         id TEXT PRIMARY KEY,
         operator_id TEXT NOT NULL,
-        agent_id TEXT NOT NULL REFERENCES agents(id),
+        agent_id TEXT NOT NULL REFERENCES trns_agents(id),
         category TEXT NOT NULL,
         description TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'open',
@@ -497,79 +497,79 @@ const MIGRATIONS: Migration[] = [
         resolved_at INTEGER,
         created_at INTEGER NOT NULL
       )`,
-      `CREATE INDEX IF NOT EXISTS idx_tickets_agent ON dispute_tickets(agent_id)`,
-      `CREATE TABLE IF NOT EXISTS route_stops (
+      `CREATE INDEX IF NOT EXISTS idx_tickets_agent ON trns_dispute_tickets(agent_id)`,
+      `CREATE TABLE IF NOT EXISTS trns_route_stops (
         id TEXT PRIMARY KEY,
-        route_id TEXT NOT NULL REFERENCES routes(id),
+        route_id TEXT NOT NULL REFERENCES trns_routes(id),
         stop_name TEXT NOT NULL,
         sequence INTEGER NOT NULL,
         distance_from_origin_km REAL,
         fare_from_origin_kobo INTEGER,
         created_at INTEGER NOT NULL
       )`,
-      `CREATE INDEX IF NOT EXISTS idx_route_stops ON route_stops(route_id, sequence)`,
-      `ALTER TABLE trips ADD COLUMN inspection_completed_at INTEGER`,
-      `ALTER TABLE trips ADD COLUMN park_id TEXT`,
-      `ALTER TABLE bookings ADD COLUMN origin_stop_id TEXT`,
-      `ALTER TABLE bookings ADD COLUMN destination_stop_id TEXT`,
-      `ALTER TABLE bookings ADD COLUMN insurance_selected INTEGER DEFAULT 0`,
-      `ALTER TABLE bookings ADD COLUMN insurance_premium_kobo INTEGER DEFAULT 0`,
-      `ALTER TABLE agents ADD COLUMN commission_rate REAL DEFAULT 0.05`,
-      `ALTER TABLE vehicles ADD COLUMN seat_template TEXT`,
-      `ALTER TABLE routes ADD COLUMN route_stops_enabled INTEGER DEFAULT 0`,
-      `ALTER TABLE routes ADD COLUMN cancellation_policy TEXT`,
-      `ALTER TABLE routes ADD COLUMN fare_matrix TEXT`,
+      `CREATE INDEX IF NOT EXISTS idx_route_stops ON trns_route_stops(route_id, sequence)`,
+      `ALTER TABLE trns_trips ADD COLUMN inspection_completed_at INTEGER`,
+      `ALTER TABLE trns_trips ADD COLUMN park_id TEXT`,
+      `ALTER TABLE trns_bookings ADD COLUMN origin_stop_id TEXT`,
+      `ALTER TABLE trns_bookings ADD COLUMN destination_stop_id TEXT`,
+      `ALTER TABLE trns_bookings ADD COLUMN insurance_selected INTEGER DEFAULT 0`,
+      `ALTER TABLE trns_bookings ADD COLUMN insurance_premium_kobo INTEGER DEFAULT 0`,
+      `ALTER TABLE trns_agents ADD COLUMN commission_rate REAL DEFAULT 0.05`,
+      `ALTER TABLE trns_vehicles ADD COLUMN seat_template TEXT`,
+      `ALTER TABLE trns_routes ADD COLUMN route_stops_enabled INTEGER DEFAULT 0`,
+      `ALTER TABLE trns_routes ADD COLUMN cancellation_policy TEXT`,
+      `ALTER TABLE trns_routes ADD COLUMN fare_matrix TEXT`,
     ],
   },
   {
     name: '011_guest_bookings',
     statements: [
-      `ALTER TABLE bookings ADD COLUMN is_guest INTEGER DEFAULT 0`,
+      `ALTER TABLE trns_bookings ADD COLUMN is_guest INTEGER DEFAULT 0`,
     ],
   },
   {
     name: '012_p05_trip_ops',
     statements: [
       // P05-T1: GPS location timestamp
-      `ALTER TABLE trips ADD COLUMN location_updated_at INTEGER`,
+      `ALTER TABLE trns_trips ADD COLUMN location_updated_at INTEGER`,
       // P05-T2: SOS triggered_by (cleared_by already exists)
-      `ALTER TABLE trips ADD COLUMN sos_triggered_by TEXT`,
+      `ALTER TABLE trns_trips ADD COLUMN sos_triggered_by TEXT`,
       // P05-T6: Delay reporting columns
-      `ALTER TABLE trips ADD COLUMN delay_reason_code TEXT`,
-      `ALTER TABLE trips ADD COLUMN delay_reported_at INTEGER`,
-      `ALTER TABLE trips ADD COLUMN estimated_departure_ms INTEGER`,
+      `ALTER TABLE trns_trips ADD COLUMN delay_reason_code TEXT`,
+      `ALTER TABLE trns_trips ADD COLUMN delay_reported_at INTEGER`,
+      `ALTER TABLE trns_trips ADD COLUMN estimated_departure_ms INTEGER`,
     ],
   },
   {
     name: '013_p07_agent_ops',
     statements: [
       // P07-T5: Passenger ID capture (hashed, never raw)
-      `ALTER TABLE sales_transactions ADD COLUMN passenger_id_type TEXT`,
-      `ALTER TABLE sales_transactions ADD COLUMN passenger_id_hash TEXT`,
+      `ALTER TABLE trns_sales_transactions ADD COLUMN passenger_id_type TEXT`,
+      `ALTER TABLE trns_sales_transactions ADD COLUMN passenger_id_hash TEXT`,
       // P07-T2: QR code string embedded in receipt for thermal printing
-      `ALTER TABLE receipts ADD COLUMN qr_code TEXT`,
+      `ALTER TABLE trns_receipts ADD COLUMN qr_code TEXT`,
       // P07-T4: Bus park the transaction was recorded at (optional)
-      `ALTER TABLE sales_transactions ADD COLUMN park_id TEXT`,
-      // P07-T4: Departure park for a trip (optional — lets trips be filtered by park)
-      `ALTER TABLE trips ADD COLUMN departure_park_id TEXT`,
+      `ALTER TABLE trns_sales_transactions ADD COLUMN park_id TEXT`,
+      // P07-T4: Departure park for a trip (optional — lets trns_trips be filtered by park)
+      `ALTER TABLE trns_trips ADD COLUMN departure_park_id TEXT`,
     ],
   },
   {
     name: '014_p08_revenue',
     statements: [
-      // P08-T3: Cancellation refund tracking on bookings
-      `ALTER TABLE bookings ADD COLUMN refund_reference TEXT`,
-      `ALTER TABLE bookings ADD COLUMN refund_amount_kobo INTEGER`,
-      `ALTER TABLE bookings ADD COLUMN manual_refund_required INTEGER DEFAULT 0`,
-      // P08-T5: Link bookings to group booking records
-      `ALTER TABLE bookings ADD COLUMN group_booking_id TEXT`,
-      // P08-T5: Group bookings table
+      // P08-T3: Cancellation refund tracking on trns_bookings
+      `ALTER TABLE trns_bookings ADD COLUMN refund_reference TEXT`,
+      `ALTER TABLE trns_bookings ADD COLUMN refund_amount_kobo INTEGER`,
+      `ALTER TABLE trns_bookings ADD COLUMN manual_refund_required INTEGER DEFAULT 0`,
+      // P08-T5: Link trns_bookings to group booking records
+      `ALTER TABLE trns_bookings ADD COLUMN group_booking_id TEXT`,
+      // P08-T5: Group trns_bookings table
       `CREATE TABLE IF NOT EXISTS group_bookings (
         id TEXT PRIMARY KEY,
         operator_id TEXT NOT NULL,
         agent_id TEXT NOT NULL,
-        trip_id TEXT NOT NULL REFERENCES trips(id),
-        booking_id TEXT NOT NULL REFERENCES bookings(id),
+        trip_id TEXT NOT NULL REFERENCES trns_trips(id),
+        booking_id TEXT NOT NULL REFERENCES trns_bookings(id),
         group_name TEXT NOT NULL,
         leader_name TEXT NOT NULL,
         leader_phone TEXT NOT NULL,
@@ -587,7 +587,7 @@ const MIGRATIONS: Migration[] = [
   {
     name: '015_p09_compliance',
     statements: [
-      // P09-T3: Notification read-receipts (composite PK prevents duplicate reads)
+      // P09-T3: Notification read-trns_receipts (composite PK prevents duplicate reads)
       `CREATE TABLE IF NOT EXISTS notification_reads (
         event_id TEXT NOT NULL,
         user_id  TEXT NOT NULL,
@@ -599,18 +599,18 @@ const MIGRATIONS: Migration[] = [
   {
     name: '016_p10_booking_reminders',
     statements: [
-      `ALTER TABLE bookings ADD COLUMN reminder_24h_sent_at INTEGER`,
-      `ALTER TABLE bookings ADD COLUMN reminder_2h_sent_at INTEGER`,
+      `ALTER TABLE trns_bookings ADD COLUMN reminder_24h_sent_at INTEGER`,
+      `ALTER TABLE trns_bookings ADD COLUMN reminder_2h_sent_at INTEGER`,
     ],
   },
   {
     name: '017_trn02_manifest_next_of_kin',
     statements: [
       // T-TRN-02: Next-of-kin capture for FRSC digital manifest compliance
-      `ALTER TABLE bookings ADD COLUMN next_of_kin_name TEXT`,
-      `ALTER TABLE bookings ADD COLUMN next_of_kin_phone TEXT`,
-      `ALTER TABLE sales_transactions ADD COLUMN next_of_kin_name TEXT`,
-      `ALTER TABLE sales_transactions ADD COLUMN next_of_kin_phone TEXT`,
+      `ALTER TABLE trns_bookings ADD COLUMN next_of_kin_name TEXT`,
+      `ALTER TABLE trns_bookings ADD COLUMN next_of_kin_phone TEXT`,
+      `ALTER TABLE trns_sales_transactions ADD COLUMN next_of_kin_name TEXT`,
+      `ALTER TABLE trns_sales_transactions ADD COLUMN next_of_kin_phone TEXT`,
     ],
   },
   {
@@ -619,10 +619,10 @@ const MIGRATIONS: Migration[] = [
       // T-TRN-03: Dynamic Fare Matrix Engine
       // Structured fare rules — replaces ad-hoc JSON blob for queryability + auditability.
       // Multi-tenant: operator_id scoped. Route-scoped: route_id FK.
-      `CREATE TABLE IF NOT EXISTS fare_rules (
+      `CREATE TABLE IF NOT EXISTS trns_fare_rules (
         id TEXT PRIMARY KEY,
-        operator_id TEXT NOT NULL REFERENCES operators(id),
-        route_id TEXT NOT NULL REFERENCES routes(id),
+        operator_id TEXT NOT NULL REFERENCES trns_operators(id),
+        route_id TEXT NOT NULL REFERENCES trns_routes(id),
         name TEXT NOT NULL,
         rule_type TEXT NOT NULL DEFAULT 'always',
         starts_at INTEGER,
@@ -638,12 +638,12 @@ const MIGRATIONS: Migration[] = [
         updated_at INTEGER NOT NULL,
         deleted_at INTEGER
       )`,
-      `CREATE INDEX IF NOT EXISTS idx_fare_rules_route ON fare_rules(route_id)`,
-      `CREATE INDEX IF NOT EXISTS idx_fare_rules_operator ON fare_rules(operator_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_fare_rules_route ON trns_fare_rules(route_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_fare_rules_operator ON trns_fare_rules(operator_id)`,
       // Price lock: the fare computed at reservation time is stored on the seat.
       // This prevents bait-and-switch — if a surge ends between reservation and payment,
       // the passenger pays the reserved price, not the new price.
-      `ALTER TABLE seats ADD COLUMN locked_fare_kobo INTEGER`,
+      `ALTER TABLE trns_seats ADD COLUMN locked_fare_kobo INTEGER`,
     ],
   },
 ];

@@ -174,7 +174,7 @@ describe('Conflict Log', () => {
 describe('Trip Cache', () => {
   const now = Date.now();
 
-  it('cacheTrips + getCachedTrips returns matching non-expired trips', async () => {
+  it('cacheTrips + getCachedTrips returns matching non-expired trns_trips', async () => {
     await cacheTrips([
       { id: 'tr_1', operator_id: 'opr_1', origin: 'Lagos', destination: 'Abuja', departure_time: now + 3600_000, base_fare: 5000_00, available_seats: 10, state: 'SCHEDULED', cached_at: now, ttl_ms: 300_000 },
       { id: 'tr_2', operator_id: 'opr_1', origin: 'Lagos', destination: 'Kano', departure_time: now + 7200_000, base_fare: 8000_00, available_seats: 5, state: 'SCHEDULED', cached_at: now, ttl_ms: 300_000 },
@@ -214,29 +214,29 @@ describe('Trip Cache', () => {
 // Seat Cache
 // ============================================================
 describe('Seat Cache', () => {
-  it('cacheSeats + getCachedSeats returns fresh seats', async () => {
+  it('cacheSeats + getCachedSeats returns fresh trns_seats', async () => {
     await cacheSeats('tr_seat_test', [
       { id: 's_1', trip_id: 'tr_seat_test', seat_number: '1A', status: 'available', reserved_by: undefined },
       { id: 's_2', trip_id: 'tr_seat_test', seat_number: '1B', status: 'reserved', reserved_by: 'user_1' },
     ]);
-    const seats = await getCachedSeats('tr_seat_test');
-    expect(seats.length).toBe(2);
+    const trns_seats = await getCachedSeats('tr_seat_test');
+    expect(trns_seats.length).toBe(2);
   });
 
-  it('getCachedSeats returns empty for expired seats', async () => {
+  it('getCachedSeats returns empty for expired trns_seats', async () => {
     // Simulate already-expired seat by manually inserting with past cached_at
     // We use the db directly to put an expired entry
     const { getOfflineDB } = await import('./db');
     const db = getOfflineDB();
-    await db.seats.put({ id: 's_expired', trip_id: 'tr_expired_seats', seat_number: '2A', status: 'available', reserved_by: undefined, cached_at: Date.now() - 60_000, ttl_ms: 30_000 });
-    const seats = await getCachedSeats('tr_expired_seats');
-    expect(seats.length).toBe(0);
+    await db.trns_seats.put({ id: 's_expired', trip_id: 'tr_expired_seats', seat_number: '2A', status: 'available', reserved_by: undefined, cached_at: Date.now() - 60_000, ttl_ms: 30_000 });
+    const trns_seats = await getCachedSeats('tr_expired_seats');
+    expect(trns_seats.length).toBe(0);
   });
 
   it('evictExpiredSeats removes expired entries', async () => {
     const { getOfflineDB } = await import('./db');
     const db = getOfflineDB();
-    await db.seats.put({ id: 's_old', trip_id: 'tr_evict', seat_number: '3C', status: 'available', reserved_by: undefined, cached_at: Date.now() - 60_000, ttl_ms: 30_000 });
+    await db.trns_seats.put({ id: 's_old', trip_id: 'tr_evict', seat_number: '3C', status: 'available', reserved_by: undefined, cached_at: Date.now() - 60_000, ttl_ms: 30_000 });
     const count = await evictExpiredSeats();
     expect(count).toBeGreaterThanOrEqual(1);
   });

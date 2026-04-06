@@ -2,7 +2,7 @@
 -- Event-Driven invariant: all cross-module events stored durably in D1
 -- A Cloudflare Worker Cron / Queues consumer drains and forwards these events
 -- ============================================================
-CREATE TABLE IF NOT EXISTS platform_events (
+CREATE TABLE IF NOT EXISTS trns_platform_events (
   id            TEXT PRIMARY KEY,
   event_type    TEXT NOT NULL,          -- e.g. 'booking.created'
   aggregate_id  TEXT NOT NULL,          -- e.g. booking id
@@ -15,6 +15,6 @@ CREATE TABLE IF NOT EXISTS platform_events (
   dispatched_at INTEGER
 );
 
-CREATE INDEX IF NOT EXISTS idx_platform_events_status ON platform_events(status);
-CREATE INDEX IF NOT EXISTS idx_platform_events_event_type ON platform_events(event_type);
-CREATE INDEX IF NOT EXISTS idx_platform_events_aggregate ON platform_events(aggregate_type, aggregate_id);
+CREATE INDEX IF NOT EXISTS idx_platform_events_status ON trns_platform_events(status);
+CREATE INDEX IF NOT EXISTS idx_platform_events_event_type ON trns_platform_events(event_type);
+CREATE INDEX IF NOT EXISTS idx_platform_events_aggregate ON trns_platform_events(aggregate_type, aggregate_id);

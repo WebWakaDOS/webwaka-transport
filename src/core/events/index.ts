@@ -1,6 +1,6 @@
 /**
  * WebWaka Platform Event Bus — Outbox Pattern
- * Events are durably stored in D1 (platform_events) and processed asynchronously.
+ * Events are durably stored in D1 (trns_platform_events) and processed asynchronously.
  * Invariants: Event-Driven, Build Once Use Infinitely, Nigeria-First
  */
 
@@ -16,7 +16,7 @@ export interface PlatformEvent {
 
 /**
  * Publish an event to the platform Event Bus via the D1 outbox pattern.
- * The event is written atomically to the platform_events table.
+ * The event is written atomically to the trns_platform_events table.
  * A background Cloudflare Worker Cron (or Queues consumer) drains this outbox.
  */
 export async function publishEvent(
@@ -26,7 +26,7 @@ export async function publishEvent(
   const id = `evt_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
   await db
     .prepare(
-      `INSERT OR IGNORE INTO platform_events
+      `INSERT OR IGNORE INTO trns_platform_events
        (id, event_type, aggregate_id, aggregate_type, payload, tenant_id, correlation_id, status, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
     )

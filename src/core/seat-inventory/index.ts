@@ -24,7 +24,7 @@ export interface Trip {
   routeId: string;
   departureTime: Date;
   totalSeats: number;
-  seats: Seat[];
+  trns_seats: Seat[];
   state: 'scheduled' | 'boarding' | 'in_transit' | 'completed';
   createdAt: Date;
 }
@@ -53,18 +53,18 @@ export interface AvailabilityResult {
   reservedSeats: number;
   confirmedSeats: number;
   blockedSeats: number;
-  seats: Seat[];
+  trns_seats: Seat[];
 }
 
 const RESERVATION_TOKEN_TTL_SECONDS = 30;
 
 export class SeatInventoryManager {
-  private trips: Map<string, Trip> = new Map();
+  private trns_trips: Map<string, Trip> = new Map();
   private reservationTokens: Map<string, ReservationToken> = new Map();
   private eventCallbacks: Map<string, Function[]> = new Map();
 
   /**
-   * Creates a new trip with specified number of seats.
+   * Creates a new trip with specified number of trns_seats.
    */
   createTrip(
     tripId: string,
@@ -73,9 +73,9 @@ export class SeatInventoryManager {
     departureTime: Date,
     totalSeats: number
   ): Trip {
-    const seats: Seat[] = [];
+    const trns_seats: Seat[] = [];
     for (let i = 1; i <= totalSeats; i++) {
-      seats.push({
+      trns_seats.push({
         id: `seat_${tripId}_${i}`,
         tripId,
         seatNumber: `${i}`,
@@ -94,12 +94,12 @@ export class SeatInventoryManager {
       routeId,
       departureTime,
       totalSeats,
-      seats,
+      trns_seats,
       state: 'scheduled',
       createdAt: new Date()
     };
 
-    this.trips.set(tripId, trip);
+    this.trns_trips.set(tripId, trip);
     this.emit('trip.created', trip);
 
     return trip;
@@ -110,12 +110,12 @@ export class SeatInventoryManager {
    * Uses optimistic concurrency control.
    */
   reserveSeat(tripId: string, seatNumber: string, userId: string): ReservationResult {
-    const trip = this.trips.get(tripId);
+    const trip = this.trns_trips.get(tripId);
     if (!trip) {
       return { success: false, error: 'Trip not found' };
     }
 
-    const seat = trip.seats.find(s => s.seatNumber === seatNumber);
+    const seat = trip.trns_seats.find(s => s.seatNumber === seatNumber);
     if (!seat) {
       return { success: false, error: 'Seat not found' };
     }
@@ -174,12 +174,12 @@ export class SeatInventoryManager {
    * Atomic operation - either succeeds or fails completely.
    */
   confirmSeat(tripId: string, seatId: string, token: string, userId: string): ReservationResult {
-    const trip = this.trips.get(tripId);
+    const trip = this.trns_trips.get(tripId);
     if (!trip) {
       return { success: false, error: 'Trip not found' };
     }
 
-    const seat = trip.seats.find(s => s.id === seatId);
+    const seat = trip.trns_seats.find(s => s.id === seatId);
     if (!seat) {
       return { success: false, error: 'Seat not found' };
     }
@@ -231,12 +231,12 @@ export class SeatInventoryManager {
    * Releases a reserved or confirmed seat.
    */
   releaseSeat(tripId: string, seatId: string): ReservationResult {
-    const trip = this.trips.get(tripId);
+    const trip = this.trns_trips.get(tripId);
     if (!trip) {
       return { success: false, error: 'Trip not found' };
     }
 
-    const seat = trip.seats.find(s => s.id === seatId);
+    const seat = trip.trns_seats.find(s => s.id === seatId);
     if (!seat) {
       return { success: false, error: 'Seat not found' };
     }
@@ -268,13 +268,13 @@ export class SeatInventoryManager {
    * Gets availability for a trip.
    */
   getAvailability(tripId: string): AvailabilityResult | null {
-    const trip = this.trips.get(tripId);
+    const trip = this.trns_trips.get(tripId);
     if (!trip) return null;
 
-    const availableSeats = trip.seats.filter(s => s.status === 'available').length;
-    const reservedSeats = trip.seats.filter(s => s.status === 'reserved').length;
-    const confirmedSeats = trip.seats.filter(s => s.status === 'confirmed').length;
-    const blockedSeats = trip.seats.filter(s => s.status === 'blocked').length;
+    const availableSeats = trip.trns_seats.filter(s => s.status === 'available').length;
+    const reservedSeats = trip.trns_seats.filter(s => s.status === 'reserved').length;
+    const confirmedSeats = trip.trns_seats.filter(s => s.status === 'confirmed').length;
+    const blockedSeats = trip.trns_seats.filter(s => s.status === 'blocked').length;
 
     return {
       tripId,
@@ -283,7 +283,7 @@ export class SeatInventoryManager {
       reservedSeats,
       confirmedSeats,
       blockedSeats,
-      seats: trip.seats
+      trns_seats: trip.trns_seats
     };
   }
 
@@ -291,7 +291,7 @@ export class SeatInventoryManager {
    * Gets trip details.
    */
   getTrip(tripId: string): Trip | null {
-    return this.trips.get(tripId) || null;
+    return this.trns_trips.get(tripId) || null;
   }
 
   /**
@@ -303,9 +303,9 @@ export class SeatInventoryManager {
 
     for (const [token, reservation] of this.reservationTokens.entries()) {
       if (now > reservation.expiresAt) {
-        const trip = this.trips.get(reservation.tripId);
+        const trip = this.trns_trips.get(reservation.tripId);
         if (trip) {
-          const seat = trip.seats.find(s => s.id === reservation.seatId);
+          const seat = trip.trns_seats.find(s => s.id === reservation.seatId);
           if (seat && seat.reservationToken === token) {
             seat.status = 'available';
             seat.reservedBy = undefined;

@@ -45,9 +45,9 @@ function buildApiRequest(mutation: OfflineMutation): ApiRequest | null {
 
   switch (entity_type) {
     case 'booking': {
-      if (action === 'CREATE') return { url: '/api/booking/bookings', method: 'POST', body: payload };
-      if (action === 'UPDATE' && payload['id']) return { url: `/api/booking/bookings/${payload['id']}`, method: 'PATCH', body: payload };
-      if (action === 'DELETE' && payload['id']) return { url: `/api/booking/bookings/${payload['id']}`, method: 'DELETE', body: null };
+      if (action === 'CREATE') return { url: '/api/booking/trns_bookings', method: 'POST', body: payload };
+      if (action === 'UPDATE' && payload['id']) return { url: `/api/booking/trns_bookings/${payload['id']}`, method: 'PATCH', body: payload };
+      if (action === 'DELETE' && payload['id']) return { url: `/api/booking/trns_bookings/${payload['id']}`, method: 'DELETE', body: null };
       break;
     }
     case 'transaction': {
@@ -57,7 +57,7 @@ function buildApiRequest(mutation: OfflineMutation): ApiRequest | null {
     case 'ticket': {
       // Tickets created offline are synced to the agent-sales endpoint.
       // The backend treats them as transactions; the ticket_number is
-      // returned in the response and stored in the receipts table.
+      // returned in the response and stored in the trns_receipts table.
       if (action === 'CREATE') return { url: '/api/agent-sales/transactions', method: 'POST', body: payload };
       if (action === 'UPDATE' && payload['ticket_number']) {
         return { url: `/api/agent-sales/tickets/${payload['ticket_number']}`, method: 'PATCH', body: payload };
@@ -71,14 +71,14 @@ function buildApiRequest(mutation: OfflineMutation): ApiRequest | null {
       const tripId = payload['trip_id'];
       const seatId = payload['id'];
       if (action === 'UPDATE' && tripId && seatId) {
-        return { url: `/api/seat-inventory/trips/${tripId}/seats/${seatId}`, method: 'PATCH', body: payload };
+        return { url: `/api/seat-inventory/trns_trips/${tripId}/trns_seats/${seatId}`, method: 'PATCH', body: payload };
       }
       break;
     }
     case 'trip': {
-      if (action === 'CREATE') return { url: '/api/operator/trips', method: 'POST', body: payload };
-      if (action === 'UPDATE' && payload['id']) return { url: `/api/operator/trips/${payload['id']}`, method: 'PATCH', body: payload };
-      if (action === 'DELETE' && payload['id']) return { url: `/api/operator/trips/${payload['id']}`, method: 'DELETE', body: null };
+      if (action === 'CREATE') return { url: '/api/operator/trns_trips', method: 'POST', body: payload };
+      if (action === 'UPDATE' && payload['id']) return { url: `/api/operator/trns_trips/${payload['id']}`, method: 'PATCH', body: payload };
+      if (action === 'DELETE' && payload['id']) return { url: `/api/operator/trns_trips/${payload['id']}`, method: 'DELETE', body: null };
       break;
     }
   }
@@ -375,7 +375,7 @@ export class SyncEngine {
     result: SyncResult
   ): Promise<void> {
     // Route to /api/agent-sales/transactions — the endpoint that atomically
-    // validates seat availability and confirms seats in D1.  The /sync
+    // validates seat availability and confirms trns_seats in D1.  The /sync
     // endpoint only handles the `{ agent_id, transactions }` batch shape
     // and has no ticket handler; sending tickets there always returns 400.
     //

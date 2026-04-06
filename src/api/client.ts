@@ -38,7 +38,7 @@ export interface SeatAvailability {
   reserved: number;
   confirmed: number;
   blocked: number;
-  seats: SeatInfo[];
+  trns_seats: SeatInfo[];
 }
 
 export interface Customer {
@@ -158,7 +158,7 @@ export interface Trip {
 }
 
 export interface TripDetail extends Trip {
-  // P05 fields returned by GET /api/operator/trips/:id
+  // P05 fields returned by GET /api/operator/trns_trips/:id
   current_latitude: number | null;
   current_longitude: number | null;
   location_updated_at: number | null;
@@ -169,7 +169,7 @@ export interface TripDetail extends Trip {
   delay_reason_code: string | null;
   delay_reported_at: number | null;
   estimated_departure_ms: number | null;
-  // Joined fields from vehicles + drivers
+  // Joined fields from trns_vehicles + trns_drivers
   total_seats?: number | null;
   plate_number?: string | null;
   driver_name?: string | null;
@@ -211,7 +211,7 @@ export interface BoardResult {
 }
 
 export interface OperatorStats {
-  trips: Record<string, number>;
+  trns_trips: Record<string, number>;
   today_revenue_kobo: number;
 }
 
@@ -222,7 +222,7 @@ export interface Agent {
   phone: string;
   email: string | null;
   role: string;
-  bus_parks: string;
+  trns_bus_parks: string;
   status: string;
   created_at: number;
   updated_at: number;
@@ -295,12 +295,12 @@ export interface DispatchTrip {
   vehicle: DispatchVehicle | null;
   driver: DispatchDriver | null;
   location: DispatchLocation | null;
-  seats: { total: number; available: number; confirmed: number; reserved: number };
+  trns_seats: { total: number; available: number; confirmed: number; reserved: number };
   confirmed_bookings: number;
 }
 
 export interface DispatchDashboard {
-  trips: DispatchTrip[];
+  trns_trips: DispatchTrip[];
   count: number;
   as_of: number;
 }
@@ -330,9 +330,9 @@ export interface GroupedRevenueReport {
 // P10-T5: SUPER_ADMIN Platform Analytics
 export interface PlatformAnalytics {
   generated_at: number;
-  operators: { total: number; active: number };
-  trips: { total: number; scheduled: number; boarding: number; in_transit: number; completed: number; cancelled: number };
-  bookings: { total: number; confirmed: number; cancelled: number; pending: number };
+  trns_operators: { total: number; active: number };
+  trns_trips: { total: number; scheduled: number; boarding: number; in_transit: number; completed: number; cancelled: number };
+  trns_bookings: { total: number; confirmed: number; cancelled: number; pending: number };
   revenue: { total_revenue_kobo: number; this_month_revenue_kobo: number };
   top_routes: Array<{ origin: string; destination: string; booking_count: number; revenue_kobo: number }>;
   top_operators: Array<{ id: string; name: string; trip_count: number; revenue_kobo: number }>;
@@ -487,11 +487,11 @@ export class ApiClient {
     const q = new URLSearchParams(
       Object.fromEntries(Object.entries(params).filter(([, v]) => v))
     );
-    return this.request<TripSummary[]>('GET', `/api/booking/trips/search?${q}`, undefined, signal);
+    return this.request<TripSummary[]>('GET', `/api/booking/trns_trips/search?${q}`, undefined, signal);
   }
 
   async getRoutes(signal?: AbortSignal): Promise<Route[]> {
-    return this.request<Route[]>('GET', '/api/booking/routes', undefined, signal);
+    return this.request<Route[]>('GET', '/api/booking/trns_routes', undefined, signal);
   }
 
   // ============================================================
@@ -500,19 +500,19 @@ export class ApiClient {
 
   async getSeatAvailability(tripId: string, signal?: AbortSignal): Promise<SeatAvailability> {
     return this.request<SeatAvailability>(
-      'GET', `/api/seat-inventory/trips/${tripId}/availability`, undefined, signal
+      'GET', `/api/seat-inventory/trns_trips/${tripId}/availability`, undefined, signal
     );
   }
 
   async reserveSeat(tripId: string, seatId: string, userId: string): Promise<ReservationResult> {
     return this.request<ReservationResult>(
-      'POST', `/api/seat-inventory/trips/${tripId}/reserve`,
+      'POST', `/api/seat-inventory/trns_trips/${tripId}/reserve`,
       { seat_id: seatId, user_id: userId }
     );
   }
 
   async releaseSeat(tripId: string, seatId: string, token?: string): Promise<void> {
-    await this.request('POST', `/api/seat-inventory/trips/${tripId}/release`, {
+    await this.request('POST', `/api/seat-inventory/trns_trips/${tripId}/release`, {
       seat_id: seatId, token,
     });
   }
@@ -527,7 +527,7 @@ export class ApiClient {
     email?: string;
     ndpr_consent: boolean;
   }): Promise<Customer> {
-    return this.request<Customer>('POST', '/api/booking/customers', data);
+    return this.request<Customer>('POST', '/api/booking/trns_customers', data);
   }
 
   async createBooking(data: {
@@ -538,19 +538,19 @@ export class ApiClient {
     payment_method: string;
     ndpr_consent: boolean;
   }): Promise<Booking> {
-    return this.request<Booking>('POST', '/api/booking/bookings', data);
+    return this.request<Booking>('POST', '/api/booking/trns_bookings', data);
   }
 
   async confirmBooking(bookingId: string, paymentReference?: string): Promise<{
     id: string; status: string; payment_status: string; confirmed_at: number;
   }> {
-    return this.request('PATCH', `/api/booking/bookings/${bookingId}/confirm`, {
+    return this.request('PATCH', `/api/booking/trns_bookings/${bookingId}/confirm`, {
       payment_reference: paymentReference,
     });
   }
 
   async cancelBooking(bookingId: string): Promise<void> {
-    await this.request('PATCH', `/api/booking/bookings/${bookingId}/cancel`, {});
+    await this.request('PATCH', `/api/booking/trns_bookings/${bookingId}/cancel`, {});
   }
 
   // ============================================================
@@ -619,7 +619,7 @@ export class ApiClient {
     loaded_at: number;
     status: string;
   }> {
-    return this.request('POST', `/api/logistics/trips/${tripId}/parcels`, parcel);
+    return this.request('POST', `/api/logistics/trns_trips/${tripId}/parcels`, parcel);
   }
 
   async getTripParcels(tripId: string): Promise<Array<{
@@ -636,22 +636,22 @@ export class ApiClient {
     unloaded_at: number | null;
     status: string;
   }>> {
-    return this.request('GET', `/api/logistics/trips/${tripId}/parcels`);
+    return this.request('GET', `/api/logistics/trns_trips/${tripId}/parcels`);
   }
 
   async removeParcel(tripId: string, trackingRef: string): Promise<{ trip_id: string; tracking_ref: string; status: string; unloaded_at: number }> {
-    return this.request('DELETE', `/api/logistics/trips/${tripId}/parcels/${encodeURIComponent(trackingRef)}`);
+    return this.request('DELETE', `/api/logistics/trns_trips/${tripId}/parcels/${encodeURIComponent(trackingRef)}`);
   }
 
   async getBookings(params?: { customer_id?: string; status?: string }): Promise<Booking[]> {
     const q = params ? new URLSearchParams(
       Object.fromEntries(Object.entries(params).filter(([, v]) => v))
     ) : new URLSearchParams();
-    return this.request<Booking[]>('GET', `/api/booking/bookings?${q}`);
+    return this.request<Booking[]>('GET', `/api/booking/trns_bookings?${q}`);
   }
 
   async getBooking(id: string): Promise<Booking> {
-    return this.request<Booking>('GET', `/api/booking/bookings/${id}`);
+    return this.request<Booking>('GET', `/api/booking/trns_bookings/${id}`);
   }
 
   // ============================================================
@@ -727,45 +727,45 @@ export class ApiClient {
   }
 
   async getOperatorRoutes(): Promise<Route[]> {
-    return this.request<Route[]>('GET', '/api/operator/routes');
+    return this.request<Route[]>('GET', '/api/operator/trns_routes');
   }
 
   async createRoute(data: {
     operator_id: string; origin: string; destination: string;
     base_fare: number; distance_km?: number; duration_minutes?: number;
   }): Promise<Route> {
-    return this.request<Route>('POST', '/api/operator/routes', data);
+    return this.request<Route>('POST', '/api/operator/trns_routes', data);
   }
 
   async updateRoute(id: string, data: Partial<{
     origin: string; destination: string; base_fare: number; status: string;
   }>): Promise<void> {
-    await this.request('PATCH', `/api/operator/routes/${id}`, data);
+    await this.request('PATCH', `/api/operator/trns_routes/${id}`, data);
   }
 
   async getVehicles(): Promise<Vehicle[]> {
-    return this.request<Vehicle[]>('GET', '/api/operator/vehicles');
+    return this.request<Vehicle[]>('GET', '/api/operator/trns_vehicles');
   }
 
   async createVehicle(data: {
     operator_id: string; plate_number: string; vehicle_type: string; total_seats: number; model?: string;
   }): Promise<Vehicle> {
-    return this.request<Vehicle>('POST', '/api/operator/vehicles', data);
+    return this.request<Vehicle>('POST', '/api/operator/trns_vehicles', data);
   }
 
   async updateVehicle(id: string, data: Partial<{
     plate_number: string; vehicle_type: string; model: string; total_seats: number; status: string;
   }>): Promise<void> {
-    await this.request('PATCH', `/api/operator/vehicles/${id}`, data);
+    await this.request('PATCH', `/api/operator/trns_vehicles/${id}`, data);
   }
 
   async getOperatorTrips(params?: { state?: string }): Promise<Trip[]> {
     const q = params?.state ? `?state=${params.state}` : '';
-    return this.request<Trip[]>('GET', `/api/operator/trips${q}`);
+    return this.request<Trip[]>('GET', `/api/operator/trns_trips${q}`);
   }
 
   async getTripManifest(tripId: string): Promise<TripManifest> {
-    return this.request<TripManifest>('GET', `/api/operator/trips/${tripId}/manifest`);
+    return this.request<TripManifest>('GET', `/api/operator/trns_trips/${tripId}/manifest`);
   }
 
   // T-TRN-02: Download the passenger manifest as a PDF blob.
@@ -774,7 +774,7 @@ export class ApiClient {
     const token = getStoredToken();
     const headers: Record<string, string> = { Accept: 'application/pdf' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
-    const response = await fetch(`${this.base}/api/operator/trips/${tripId}/manifest?format=pdf`, {
+    const response = await fetch(`${this.base}/api/operator/trns_trips/${tripId}/manifest?format=pdf`, {
       headers,
     });
     if (!response.ok) {
@@ -785,36 +785,36 @@ export class ApiClient {
   }
 
   async getBookingById(id: string): Promise<Booking> {
-    return this.request<Booking>('GET', `/api/booking/bookings/${id}`);
+    return this.request<Booking>('GET', `/api/booking/trns_bookings/${id}`);
   }
 
   async createTrip(data: {
     route_id: string; vehicle_id: string; departure_time: number;
     driver_id?: string; base_fare?: number; total_seats?: number;
   }): Promise<Trip> {
-    return this.request<Trip>('POST', '/api/operator/trips', data);
+    return this.request<Trip>('POST', '/api/operator/trns_trips', data);
   }
 
   async transitionTrip(tripId: string, toState: string, reason?: string): Promise<void> {
-    await this.request('POST', `/api/operator/trips/${tripId}/transition`, {
+    await this.request('POST', `/api/operator/trns_trips/${tripId}/transition`, {
       to_state: toState, reason,
     });
   }
 
   async deleteTrip(tripId: string): Promise<void> {
-    await this.request('DELETE', `/api/operator/trips/${tripId}`);
+    await this.request('DELETE', `/api/operator/trns_trips/${tripId}`);
   }
 
   async copyTrip(tripId: string, departureTime: number): Promise<Trip> {
-    return this.request<Trip>('POST', `/api/operator/trips/${tripId}/copy`, { departure_time: departureTime });
+    return this.request<Trip>('POST', `/api/operator/trns_trips/${tripId}/copy`, { departure_time: departureTime });
   }
 
   async updateTrip(tripId: string, data: { vehicle_id?: string; departure_time?: number; driver_id?: string | null }): Promise<void> {
-    await this.request('PATCH', `/api/operator/trips/${tripId}`, data);
+    await this.request('PATCH', `/api/operator/trns_trips/${tripId}`, data);
   }
 
   async createDriver(data: { operator_id: string; name: string; phone: string; license_number?: string }): Promise<Driver> {
-    return this.request<Driver>('POST', '/api/operator/drivers', data);
+    return this.request<Driver>('POST', '/api/operator/trns_drivers', data);
   }
 
   async getDrivers(params?: { operator_id?: string; status?: string }): Promise<Driver[]> {
@@ -822,11 +822,11 @@ export class ApiClient {
     if (params?.operator_id) q.set('operator_id', params.operator_id);
     if (params?.status) q.set('status', params.status);
     const qs = q.toString() ? `?${q.toString()}` : '';
-    return this.request<Driver[]>('GET', `/api/operator/drivers${qs}`);
+    return this.request<Driver[]>('GET', `/api/operator/trns_drivers${qs}`);
   }
 
   async updateDriver(driverId: string, data: { name?: string; phone?: string; license_number?: string; status?: string }): Promise<void> {
-    await this.request('PATCH', `/api/operator/drivers/${driverId}`, data);
+    await this.request('PATCH', `/api/operator/trns_drivers/${driverId}`, data);
   }
 
   async getAgents(params?: { operator_id?: string; status?: string }): Promise<Agent[]> {
@@ -834,15 +834,15 @@ export class ApiClient {
     if (params?.operator_id) q.set('operator_id', params.operator_id);
     if (params?.status) q.set('status', params.status);
     const qs = q.toString() ? `?${q.toString()}` : '';
-    return this.request<Agent[]>('GET', `/api/agent/agents${qs}`);
+    return this.request<Agent[]>('GET', `/api/agent/trns_agents${qs}`);
   }
 
-  async createAgent(data: { operator_id: string; name: string; phone: string; email?: string; role?: string; bus_parks?: string[] }): Promise<Agent> {
-    return this.request<Agent>('POST', '/api/agent/agents', data);
+  async createAgent(data: { operator_id: string; name: string; phone: string; email?: string; role?: string; trns_bus_parks?: string[] }): Promise<Agent> {
+    return this.request<Agent>('POST', '/api/agent/trns_agents', data);
   }
 
-  async updateAgent(agentId: string, data: { name?: string; phone?: string; email?: string; role?: string; status?: string; bus_parks?: string[] }): Promise<void> {
-    await this.request('PATCH', `/api/agent/agents/${agentId}`, data);
+  async updateAgent(agentId: string, data: { name?: string; phone?: string; email?: string; role?: string; status?: string; trns_bus_parks?: string[] }): Promise<void> {
+    await this.request('PATCH', `/api/agent/trns_agents/${agentId}`, data);
   }
 
   async getRevenueReport(params?: { from?: number; to?: number; operator_id?: string }): Promise<RevenueReport> {
@@ -860,17 +860,17 @@ export class ApiClient {
     const q = new URLSearchParams();
     if (params?.status) q.set('status', params.status);
     const qs = q.toString() ? `?${q.toString()}` : '';
-    const res = await this.request<{ data: PlatformOperator[] }>('GET', `/api/operator/operators${qs}`);
+    const res = await this.request<{ data: PlatformOperator[] }>('GET', `/api/operator/trns_operators${qs}`);
     return res.data;
   }
 
   async createOperator(body: { name: string; code: string; phone?: string; email?: string }): Promise<PlatformOperator> {
-    const res = await this.request<{ id: string; name: string; code: string; status: string }>('POST', '/api/operator/operators', body);
+    const res = await this.request<{ id: string; name: string; code: string; status: string }>('POST', '/api/operator/trns_operators', body);
     return { ...res, phone: null, email: null, created_at: Date.now(), updated_at: Date.now() };
   }
 
   async updateOperator(id: string, body: { name?: string; phone?: string; email?: string; status?: string }): Promise<void> {
-    await this.request('PATCH', `/api/operator/operators/${id}`, body);
+    await this.request('PATCH', `/api/operator/trns_operators/${id}`, body);
   }
 
   // ---- P09-T3: Operator Notification Center ----
@@ -902,34 +902,34 @@ export class ApiClient {
     const today = new Date().toISOString().split('T')[0]!;
     const res = await this.request<{ data: Trip[]; meta: unknown }>(
       'GET',
-      `/api/operator/trips?driver_id=me&date=${today}&limit=50`
+      `/api/operator/trns_trips?driver_id=me&date=${today}&limit=50`
     );
     return res.data;
   }
 
   async markPassengerBoarded(tripId: string, bookingId: string): Promise<void> {
-    await this.request('PATCH', `/api/operator/trips/${tripId}/manifest/${bookingId}/board`, {});
+    await this.request('PATCH', `/api/operator/trns_trips/${tripId}/manifest/${bookingId}/board`, {});
   }
 
   // ---- P06: Extended Driver API ----
 
   async getTrip(tripId: string): Promise<TripDetail> {
-    const res = await this.request<{ data: TripDetail }>('GET', `/api/operator/trips/${tripId}`);
+    const res = await this.request<{ data: TripDetail }>('GET', `/api/operator/trns_trips/${tripId}`);
     return res.data;
   }
 
   async updateTripLocation(tripId: string, lat: number, lng: number, accuracy?: number): Promise<void> {
-    await this.request('POST', `/api/operator/trips/${tripId}/location`, {
+    await this.request('POST', `/api/operator/trns_trips/${tripId}/location`, {
       latitude: lat, longitude: lng, accuracy_meters: accuracy,
     });
   }
 
   async triggerSOS(tripId: string): Promise<{ message: string }> {
-    return this.request('POST', `/api/operator/trips/${tripId}/sos`, {});
+    return this.request('POST', `/api/operator/trns_trips/${tripId}/sos`, {});
   }
 
   async clearSOS(tripId: string): Promise<{ message: string }> {
-    return this.request('POST', `/api/operator/trips/${tripId}/sos/clear`, {});
+    return this.request('POST', `/api/operator/trns_trips/${tripId}/sos/clear`, {});
   }
 
   async submitInspection(tripId: string, data: {
@@ -937,37 +937,37 @@ export class ApiClient {
     fuel_ok: boolean; emergency_equipment_ok: boolean;
     manifest_count?: number; notes?: string;
   }): Promise<{ data: InspectionRecord }> {
-    return this.request('POST', `/api/operator/trips/${tripId}/inspection`, data);
+    return this.request('POST', `/api/operator/trns_trips/${tripId}/inspection`, data);
   }
 
   async getInspection(tripId: string): Promise<InspectionRecord | null> {
-    const res = await this.request<{ data: InspectionRecord | null }>('GET', `/api/operator/trips/${tripId}/inspection`);
+    const res = await this.request<{ data: InspectionRecord | null }>('GET', `/api/operator/trns_trips/${tripId}/inspection`);
     return res.data;
   }
 
   async boardByQR(tripId: string, qrPayload: string): Promise<BoardResult> {
-    const res = await this.request<{ data: BoardResult }>('POST', `/api/operator/trips/${tripId}/board`, { qr_payload: qrPayload });
+    const res = await this.request<{ data: BoardResult }>('POST', `/api/operator/trns_trips/${tripId}/board`, { qr_payload: qrPayload });
     return res.data;
   }
 
   async getBoardingStatus(tripId: string): Promise<BoardingStatus> {
-    const res = await this.request<{ data: BoardingStatus }>('GET', `/api/operator/trips/${tripId}/boarding-status`);
+    const res = await this.request<{ data: BoardingStatus }>('GET', `/api/operator/trns_trips/${tripId}/boarding-status`);
     return res.data;
   }
 
   async reportDelay(tripId: string, data: {
     reason_code: string; estimated_departure_ms: number; reason_details?: string;
   }): Promise<void> {
-    await this.request('POST', `/api/operator/trips/${tripId}/delay`, data);
+    await this.request('POST', `/api/operator/trns_trips/${tripId}/delay`, data);
   }
 
   async getDelay(tripId: string): Promise<DelayInfo | null> {
-    const res = await this.request<{ data: DelayInfo | null }>('GET', `/api/operator/trips/${tripId}/delay`);
+    const res = await this.request<{ data: DelayInfo | null }>('GET', `/api/operator/trns_trips/${tripId}/delay`);
     return res.data;
   }
 
   async transitionTripState(tripId: string, toState: string, reason?: string): Promise<void> {
-    await this.request('POST', `/api/operator/trips/${tripId}/transition`, { to_state: toState, reason });
+    await this.request('POST', `/api/operator/trns_trips/${tripId}/transition`, { to_state: toState, reason });
   }
 
   // ---- C-007: AI Natural Language Trip Search ----
@@ -975,7 +975,7 @@ export class ApiClient {
   async aiSearchTrips(query: string): Promise<TripSummary[]> {
     const res = await this.request<{ data: TripSummary[]; ai_params?: unknown }>(
       'POST',
-      '/api/booking/trips/ai-search',
+      '/api/booking/trns_trips/ai-search',
       { query }
     );
     return res.data;
@@ -1004,7 +1004,7 @@ export class ApiClient {
     total_amount: number; per_seat_fare: number; payment_method: string;
     payment_reference: string; qr_code: string;
   }> {
-    const res = await this.request('POST', '/api/agent-sales/group-bookings', body);
+    const res = await this.request('POST', '/api/agent-sales/group-trns_bookings', body);
     return res as {
       group_booking_id: string; booking_id: string; transaction_id: string;
       receipt_id: string; trip_id: string; seat_count: number; seat_numbers: string[];
@@ -1014,7 +1014,7 @@ export class ApiClient {
   }
 
   async getGroupBooking(id: string): Promise<Record<string, unknown>> {
-    const res = await this.request('GET', `/api/agent-sales/group-bookings/${id}`);
+    const res = await this.request('GET', `/api/agent-sales/group-trns_bookings/${id}`);
     return res as Record<string, unknown>;
   }
 
@@ -1085,7 +1085,7 @@ export class ApiClient {
 
   async getRouteStops(routeId: string): Promise<RouteStop[]> {
     const res = await this.request<{ success: boolean; data: RouteStop[] }>(
-      'GET', `/api/operator/routes/${routeId}/stops`
+      'GET', `/api/operator/trns_routes/${routeId}/stops`
     );
     return res.data;
   }
@@ -1095,7 +1095,7 @@ export class ApiClient {
     distance_from_origin_km?: number; fare_from_origin_kobo?: number;
   }[]): Promise<RouteStop[]> {
     const res = await this.request<{ success: boolean; data: RouteStop[] }>(
-      'POST', `/api/operator/routes/${routeId}/stops`, { stops }
+      'POST', `/api/operator/trns_routes/${routeId}/stops`, { stops }
     );
     return res.data;
   }
@@ -1166,7 +1166,7 @@ export class ApiClient {
     return res.data;
   }
 
-  async getTollFees(routeId: string): Promise<{ toll_gates: unknown[]; total_toll_fee_kobo: number }> {
+  async getTollFees(routeId: string): Promise<{ trns_toll_gates: unknown[]; total_toll_fee_kobo: number }> {
     const res = await this.request<{ success: boolean; data: Awaited<ReturnType<ApiClient['getTollFees']>> }>('GET', `/api/ride-hailing/toll-fees?route_id=${routeId}`);
     return res.data;
   }
@@ -1220,15 +1220,15 @@ export class ApiClient {
   }
 
   async driverSOS(tripId: string, data?: { message?: string; latitude?: number; longitude?: number }): Promise<void> {
-    await this.request('POST', `/api/driver-app/trips/${tripId}/sos`, data ?? {});
+    await this.request('POST', `/api/driver-app/trns_trips/${tripId}/sos`, data ?? {});
   }
 
   async clearDriverSOS(tripId: string, clearedBy: string): Promise<void> {
-    await this.request('DELETE', `/api/driver-app/trips/${tripId}/sos`, { cleared_by: clearedBy });
+    await this.request('DELETE', `/api/driver-app/trns_trips/${tripId}/sos`, { cleared_by: clearedBy });
   }
 
   async updateDriverLocation(tripId: string, data: { latitude: number; longitude: number; driver_id: string }): Promise<void> {
-    await this.request('PATCH', `/api/driver-app/trips/${tripId}/location`, data);
+    await this.request('PATCH', `/api/driver-app/trns_trips/${tripId}/location`, data);
   }
 
   // ============================================================

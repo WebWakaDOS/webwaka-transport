@@ -96,7 +96,7 @@ export interface CachedTrip {
 }
 
 export interface CachedSeat {
-  id: string;                // seat_id (unique across trips)
+  id: string;                // seat_id (unique across trns_trips)
   trip_id: string;
   seat_number: string;
   status: 'available' | 'reserved' | 'confirmed' | 'blocked';
@@ -174,7 +174,7 @@ export interface NdprConsentRecord {
 export interface DriverTripCompletion {
   id?: number;
   local_id: string;            // client-generated idempotency key
-  ride_request_id: string;     // matches ride_requests.id in D1
+  ride_request_id: string;     // matches trns_ride_requests.id in D1
   driver_id: string;
   operator_id: string;
   distance_km?: number;
@@ -196,9 +196,9 @@ class TransportOfflineDB extends Dexie {
   mutations!: Table<OfflineMutation>;
   transactions!: Table<OfflineTransaction>;
   tickets!: Table<OfflineTicket>;
-  trips!: Table<CachedTrip>;
-  seats!: Table<CachedSeat>;
-  bookings!: Table<OfflineBooking>;
+  trns_trips!: Table<CachedTrip>;
+  trns_seats!: Table<CachedSeat>;
+  trns_bookings!: Table<OfflineBooking>;
   agent_sessions!: Table<AgentSession>;
   conflict_log!: Table<ConflictRecord>;
   operator_config!: Table<CachedOperatorConfig>;
@@ -212,17 +212,17 @@ class TransportOfflineDB extends Dexie {
     this.version(1).stores({
       mutations: '++id, entity_type, entity_id, status, created_at',
       transactions: '++id, local_id, agent_id, trip_id, synced, created_at',
-      trips: 'id, origin, destination, departure_time, state, cached_at',
-      bookings: '++id, local_id, customer_id, trip_id, status, synced',
+      trns_trips: 'id, origin, destination, departure_time, state, cached_at',
+      trns_bookings: '++id, local_id, customer_id, trip_id, status, synced',
     });
 
     // v2 schema: adds new fields + new tables
     this.version(2).stores({
       mutations: '++id, entity_type, entity_id, status, next_retry_at, created_at',
       transactions: '++id, local_id, agent_id, trip_id, synced, created_at',
-      trips: 'id, operator_id, origin, destination, departure_time, state, cached_at',
-      seats: 'id, trip_id, status, cached_at',
-      bookings: '++id, local_id, customer_id, trip_id, status, synced',
+      trns_trips: 'id, operator_id, origin, destination, departure_time, state, cached_at',
+      trns_seats: 'id, trip_id, status, cached_at',
+      trns_bookings: '++id, local_id, customer_id, trip_id, status, synced',
       agent_sessions: '++id, agent_id, operator_id, expires_at',
       conflict_log: '++id, entity_type, entity_id, created_at, resolved',
       operator_config: 'operator_id, cached_at',
@@ -240,9 +240,9 @@ class TransportOfflineDB extends Dexie {
     this.version(3).stores({
       mutations: '++id, entity_type, entity_id, status, next_retry_at, created_at',
       transactions: '++id, local_id, agent_id, trip_id, synced, idempotencyKey, created_at',
-      trips: 'id, operator_id, origin, destination, departure_time, state, cached_at',
-      seats: 'id, trip_id, status, cached_at',
-      bookings: '++id, local_id, customer_id, trip_id, status, synced',
+      trns_trips: 'id, operator_id, origin, destination, departure_time, state, cached_at',
+      trns_seats: 'id, trip_id, status, cached_at',
+      trns_bookings: '++id, local_id, customer_id, trip_id, status, synced',
       agent_sessions: '++id, agent_id, operator_id, expires_at',
       conflict_log: '++id, entity_type, entity_id, created_at, resolved',
       operator_config: 'operator_id, cached_at',
@@ -267,7 +267,7 @@ class TransportOfflineDB extends Dexie {
      *   1. It carries a pre-generated `qr_payload` for boarding scan.
      *   2. It records `conflict_at` / `conflict_reason` when the server
      *      returns 409 (seat already booked online) during sync.
-     *   3. It surfaces `ticket_number` for printing on physical receipts.
+     *   3. It surfaces `ticket_number` for printing on physical trns_receipts.
      *
      * Indexes: ticket_number (unique lookup), trip_id, agent_id, synced,
      *          conflict_at (for the conflict resolution UI).
@@ -276,9 +276,9 @@ class TransportOfflineDB extends Dexie {
       mutations: '++id, entity_type, entity_id, status, next_retry_at, created_at',
       transactions: '++id, local_id, agent_id, trip_id, synced, idempotencyKey, created_at',
       tickets: '++id, ticket_number, trip_id, agent_id, synced, conflict_at, created_at',
-      trips: 'id, operator_id, origin, destination, departure_time, state, cached_at',
-      seats: 'id, trip_id, status, cached_at',
-      bookings: '++id, local_id, customer_id, trip_id, status, synced',
+      trns_trips: 'id, operator_id, origin, destination, departure_time, state, cached_at',
+      trns_seats: 'id, trip_id, status, cached_at',
+      trns_bookings: '++id, local_id, customer_id, trip_id, status, synced',
       agent_sessions: '++id, agent_id, operator_id, expires_at',
       conflict_log: '++id, entity_type, entity_id, created_at, resolved',
       operator_config: 'operator_id, cached_at',
@@ -299,9 +299,9 @@ class TransportOfflineDB extends Dexie {
       mutations: '++id, entity_type, entity_id, status, next_retry_at, created_at',
       transactions: '++id, local_id, agent_id, trip_id, synced, idempotencyKey, created_at',
       tickets: '++id, ticket_number, trip_id, agent_id, synced, conflict_at, created_at',
-      trips: 'id, operator_id, origin, destination, departure_time, state, cached_at',
-      seats: 'id, trip_id, status, cached_at',
-      bookings: '++id, local_id, customer_id, trip_id, status, synced',
+      trns_trips: 'id, operator_id, origin, destination, departure_time, state, cached_at',
+      trns_seats: 'id, trip_id, status, cached_at',
+      trns_bookings: '++id, local_id, customer_id, trip_id, status, synced',
       agent_sessions: '++id, agent_id, operator_id, expires_at',
       conflict_log: '++id, entity_type, entity_id, created_at, resolved',
       operator_config: 'operator_id, cached_at',
@@ -625,21 +625,21 @@ export async function resolveTicketConflict(
 
 const TRIP_CACHE_TTL_MS = 5 * 60 * 1_000; // 5 minutes
 
-export async function cacheTrips(trips: CachedTrip[]): Promise<void> {
+export async function cacheTrips(trns_trips: CachedTrip[]): Promise<void> {
   const now = Date.now();
-  const withTTL = trips.map(t => ({
+  const withTTL = trns_trips.map(t => ({
     ...t,
     cached_at: t.cached_at ?? now,
     ttl_ms: t.ttl_ms ?? TRIP_CACHE_TTL_MS,
   }));
-  await getOfflineDB().trips.bulkPut(withTTL);
+  await getOfflineDB().trns_trips.bulkPut(withTTL);
 }
 
 export async function getCachedTrips(origin?: string, destination?: string): Promise<CachedTrip[]> {
   const db = getOfflineDB();
   const now = Date.now();
-  let query = db.trips.toCollection();
-  if (origin) query = db.trips.where('origin').startsWithIgnoreCase(origin);
+  let query = db.trns_trips.toCollection();
+  if (origin) query = db.trns_trips.where('origin').startsWithIgnoreCase(origin);
   const results = await query.toArray();
   // Filter: not expired + optional destination match
   return results.filter(t => {
@@ -654,10 +654,10 @@ export async function getCachedTrips(origin?: string, destination?: string): Pro
 export async function evictExpiredTrips(): Promise<number> {
   const db = getOfflineDB();
   const now = Date.now();
-  const all = await db.trips.toArray();
+  const all = await db.trns_trips.toArray();
   const expired = all.filter(t => now - t.cached_at >= t.ttl_ms);
   if (expired.length === 0) return 0;
-  await db.trips.bulkDelete(expired.map(t => t.id));
+  await db.trns_trips.bulkDelete(expired.map(t => t.id));
   return expired.length;
 }
 
@@ -667,25 +667,25 @@ export async function evictExpiredTrips(): Promise<number> {
 
 const SEAT_CACHE_TTL_MS = 30_000; // 30 seconds — matches server reservation TTL
 
-export async function cacheSeats(trip_id: string, seats: Omit<CachedSeat, 'cached_at' | 'ttl_ms'>[], cached_at?: number): Promise<void> {
+export async function cacheSeats(trip_id: string, trns_seats: Omit<CachedSeat, 'cached_at' | 'ttl_ms'>[], cached_at?: number): Promise<void> {
   const ts = cached_at ?? Date.now();
-  const withMeta = seats.map(s => ({ ...s, cached_at: ts, ttl_ms: SEAT_CACHE_TTL_MS }));
-  await getOfflineDB().seats.bulkPut(withMeta);
+  const withMeta = trns_seats.map(s => ({ ...s, cached_at: ts, ttl_ms: SEAT_CACHE_TTL_MS }));
+  await getOfflineDB().trns_seats.bulkPut(withMeta);
 }
 
 export async function getCachedSeats(trip_id: string): Promise<CachedSeat[]> {
   const now = Date.now();
-  const all = await getOfflineDB().seats.where('trip_id').equals(trip_id).toArray();
+  const all = await getOfflineDB().trns_seats.where('trip_id').equals(trip_id).toArray();
   return all.filter(s => now - s.cached_at < s.ttl_ms);
 }
 
 export async function evictExpiredSeats(): Promise<number> {
   const db = getOfflineDB();
   const now = Date.now();
-  const all = await db.seats.toArray();
+  const all = await db.trns_seats.toArray();
   const expired = all.filter(s => now - s.cached_at >= s.ttl_ms);
   if (expired.length === 0) return 0;
-  await db.seats.bulkDelete(expired.map(s => s.id));
+  await db.trns_seats.bulkDelete(expired.map(s => s.id));
   return expired.length;
 }
 

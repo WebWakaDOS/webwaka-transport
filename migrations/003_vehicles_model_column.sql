@@ -1,4 +1,4 @@
--- Migration 003: Add model column to vehicles table (idempotent)
+-- Migration 003: Add model column to trns_vehicles table (idempotent)
 -- Additive migration for environments where 001 has already been applied
 -- Uses SQLite workaround: create temp table to check column existence
 CREATE TABLE IF NOT EXISTS _migration_003_applied (id INTEGER PRIMARY KEY);
@@ -17,7 +17,7 @@ INSERT OR IGNORE INTO _migration_003_applied (id) VALUES (1);
 -- Check if model column exists by selecting it (will succeed silently if exists)
 -- If column doesn't exist, this will fail and we skip; if it does exist, we're done
 -- Since we can't use IF NOT EXISTS for columns in SQLite/D1, we use a safe migration:
--- We create a new vehicles table with the model column already in migration 001,
+-- We create a new trns_vehicles table with the model column already in migration 001,
 -- so migration 003 is now a no-op (the column was already added in 001).
 
 -- NO-OP: model column already exists from migration 001 schema

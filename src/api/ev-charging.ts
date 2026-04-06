@@ -4,7 +4,7 @@
  * Provides:
  *   - Geospatial search for nearby EV stations (bounding-box + Haversine)
  *   - Station availability management (real-time charger point status)
- *   - Station CRUD for operators and platform admins
+ *   - Station CRUD for trns_operators and platform admins
  *   - Connector type filtering
  *
  * Invariants: Nigeria-First, Multi-tenant optional
@@ -43,7 +43,7 @@ evChargingRouter.get('/nearby', async (c) => {
   const box = boundingBox(lat, lon, radiusKm);
 
   let query = `
-    SELECT * FROM ev_charging_stations
+    SELECT * FROM trns_ev_charging_stations
     WHERE status != 'offline'
       AND latitude BETWEEN ? AND ?
       AND longitude BETWEEN ? AND ?
@@ -88,7 +88,7 @@ evChargingRouter.get('/', async (c) => {
   const operatorId = c.req.query('operator_id');
   const status = c.req.query('status');
 
-  let query = `SELECT * FROM ev_charging_stations WHERE deleted_at IS NULL`;
+  let query = `SELECT * FROM trns_ev_charging_stations WHERE deleted_at IS NULL`;
   const bindings: unknown[] = [];
 
   if (city) { query += ' AND LOWER(city) LIKE ?'; bindings.push(`%${city.toLowerCase()}%`); }
@@ -106,7 +106,7 @@ evChargingRouter.get('/', async (c) => {
 // ============================================================
 evChargingRouter.get('/:id', async (c) => {
   const id = c.req.param('id');
-  const station = await c.env.DB.prepare(`SELECT * FROM ev_charging_stations WHERE id = ? AND deleted_at IS NULL`).bind(id).first();
+  const station = await c.env.DB.prepare(`SELECT * FROM trns_ev_charging_stations WHERE id = ? AND deleted_at IS NULL`).bind(id).first();
   if (!station) return c.json({ success: false, error: 'Station not found' }, 404);
   return c.json({ success: true, data: station });
 });
@@ -141,7 +141,7 @@ evChargingRouter.post('/', async (c) => {
   const stationId = `ev_${nanoid()}`;
 
   await c.env.DB.prepare(`
-    INSERT INTO ev_charging_stations
+    INSERT INTO trns_ev_charging_stations
       (id, operator_id, name, address, city, state, latitude, longitude,
        connector_types, total_points, available_points, max_power_kw, price_per_kwh_kobo,
        is_public, amenities, operating_hours, status, last_heartbeat, created_at, updated_at)
@@ -171,7 +171,7 @@ evChargingRouter.patch('/:id/availability', async (c) => {
   const now = Date.now();
 
   await c.env.DB.prepare(`
-    UPDATE ev_charging_stations
+    UPDATE trns_ev_charging_stations
     SET available_points = ?,
         status = COALESCE(?, status),
         last_heartbeat = ?,
@@ -188,7 +188,7 @@ evChargingRouter.patch('/:id/availability', async (c) => {
 // ============================================================
 evChargingRouter.delete('/:id', async (c) => {
   const id = c.req.param('id');
-  await c.env.DB.prepare(`UPDATE ev_charging_stations SET deleted_at = ?, updated_at = ? WHERE id = ?`).bind(Date.now(), Date.now(), id).run();
+  await c.env.DB.prepare(`UPDATE trns_ev_charging_stations SET deleted_at = ?, updated_at = ? WHERE id = ?`).bind(Date.now(), Date.now(), id).run();
   return c.json({ success: true });
 });
 
@@ -211,7 +211,7 @@ evChargingRouter.post('/seed', async (c) => {
     const id = `ev_${nanoid()}`;
     try {
       await c.env.DB.prepare(`
-        INSERT OR IGNORE INTO ev_charging_stations (id, name, city, state, latitude, longitude, connector_types, total_points, available_points, max_power_kw, is_public, amenities, operating_hours, status, last_heartbeat, created_at, updated_at)
+        INSERT OR IGNORE INTO trns_ev_charging_stations (id, name, city, state, latitude, longitude, connector_types, total_points, available_points, max_power_kw, is_public, amenities, operating_hours, status, last_heartbeat, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, 2, 2, ?, 1, ?, '06:00-22:00', 'active', ?, ?, ?)
       `).bind(id, s.name, s.city, s.state, s.lat, s.lon, JSON.stringify(s.connectors), s.kw, JSON.stringify(s.amenities), now, now, now).run();
       inserted.push(s.name);

@@ -114,7 +114,7 @@ describe('TRN-3: Customer Booking Portal', () => {
       expect(result.error).toBe('Customer not found');
     });
 
-    it('should not create booking with mismatched seats and passengers', () => {
+    it('should not create booking with mismatched trns_seats and passengers', () => {
       const result = bookingManager.createBooking(
         customer.id,
         tripId,
@@ -367,7 +367,7 @@ describe('TRN-3: Customer Booking Portal', () => {
       expect(booking!.id).toBe(bookingResult.bookingId);
     });
 
-    it('should get customer bookings', () => {
+    it('should get customer trns_bookings', () => {
       bookingManager.createBooking(
         customer.id,
         tripId,
@@ -386,12 +386,12 @@ describe('TRN-3: Customer Booking Portal', () => {
         'flutterwave'
       );
 
-      const bookings = bookingManager.getCustomerBookings(customer.id);
+      const trns_bookings = bookingManager.getCustomerBookings(customer.id);
 
-      expect(bookings.length).toBe(2);
+      expect(trns_bookings.length).toBe(2);
     });
 
-    it('should get trip bookings', () => {
+    it('should get trip trns_bookings', () => {
       const result1 = bookingManager.createBooking(
         customer.id,
         tripId,
@@ -415,7 +415,7 @@ describe('TRN-3: Customer Booking Portal', () => {
 
       const tripBookings = bookingManager.getTripBookings(tripId);
 
-      // Only confirmed bookings are returned
+      // Only confirmed trns_bookings are returned
       expect(tripBookings.length).toBe(1);
       expect(tripBookings[0]!.id).toBe(result1.bookingId);
     });
@@ -461,7 +461,7 @@ describe('TRN-3: Customer Booking Portal', () => {
   });
 
   describe('Integration with TRN-1', () => {
-    it('should reserve seats via TRN-1', () => {
+    it('should reserve trns_seats via TRN-1', () => {
       const bookingResult = bookingManager.createBooking(
         customer.id,
         tripId,
@@ -480,7 +480,7 @@ describe('TRN-3: Customer Booking Portal', () => {
       expect(availability!.availableSeats).toBe(49);
     });
 
-    it('should confirm seats via TRN-1', () => {
+    it('should confirm trns_seats via TRN-1', () => {
       const bookingResult = bookingManager.createBooking(
         customer.id,
         tripId,
@@ -498,7 +498,7 @@ describe('TRN-3: Customer Booking Portal', () => {
       expect(availability!.reservedSeats).toBe(0);
     });
 
-    it('should release seats via TRN-1 on cancellation', () => {
+    it('should release trns_seats via TRN-1 on cancellation', () => {
       const bookingResult = bookingManager.createBooking(
         customer.id,
         tripId,
@@ -518,7 +518,7 @@ describe('TRN-3: Customer Booking Portal', () => {
   });
 
   describe('Multiple Bookings', () => {
-    it('should handle multiple concurrent bookings', () => {
+    it('should handle multiple concurrent trns_bookings', () => {
       const result1 = bookingManager.createBooking(
         customer.id,
         tripId,

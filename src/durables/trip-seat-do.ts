@@ -21,8 +21,8 @@
  *     so it cannot be silently GC'd when the error Response is returned.
  *
  * Endpoints:
- *   POST /reserve-seats  — atomically reserve N seats for a trip
- *   POST /release-seats  — release previously held seats (token-verified)
+ *   POST /reserve-trns_seats  — atomically reserve N trns_seats for a trip
+ *   POST /release-trns_seats  — release previously held trns_seats (token-verified)
  *   GET  /ws             — WebSocket upgrade for real-time seat fan-out
  *   POST /broadcast      — internal: fan-out a seat_changed message to WS clients
  */
@@ -98,12 +98,12 @@ export class TripSeatDO implements DurableObject {
     }
 
     // ── T-TRN-01: Atomic multi-seat reservation ────────────────────────────
-    if (url.pathname === '/reserve-seats' && request.method === 'POST') {
+    if (url.pathname === '/reserve-trns_seats' && request.method === 'POST') {
       return this.handleReserveSeats(request);
     }
 
     // ── T-TRN-01: Token-verified seat release ──────────────────────────────
-    if (url.pathname === '/release-seats' && request.method === 'POST') {
+    if (url.pathname === '/release-trns_seats' && request.method === 'POST') {
       return this.handleReleaseSeats(request);
     }
 
@@ -130,7 +130,7 @@ export class TripSeatDO implements DurableObject {
     try {
       const result = await db.prepare(
         `SELECT id, reservation_token, reservation_expires_at, reserved_by
-         FROM seats
+         FROM trns_seats
          WHERE trip_id = ? AND status = 'reserved' AND reservation_expires_at > ?`
       ).bind(tripId, now).all<{
         id: string;
@@ -154,7 +154,7 @@ export class TripSeatDO implements DurableObject {
     this.hydrated = true;
   }
 
-  // ── POST /reserve-seats ───────────────────────────────────────────────────
+  // ── POST /reserve-trns_seats ───────────────────────────────────────────────────
   // Because this DO is single-threaded, concurrent callers queue behind this
   // await chain. The in-memory check is a fast early-reject; the D1 write
   // with WHERE status = 'available' is the authoritative atomic gate.
@@ -200,7 +200,7 @@ export class TripSeatDO implements DurableObject {
         success: false,
         error: 'seat_unavailable',
         conflicted_seats: conflicted,
-        message: 'One or more seats are not available',
+        message: 'One or more trns_seats are not available',
       }, { status: 409 });
     }
 
@@ -213,7 +213,7 @@ export class TripSeatDO implements DurableObject {
 
     const updateStmts = seat_ids.map(seatId =>
       db.prepare(
-        `UPDATE seats
+        `UPDATE trns_seats
          SET status = 'reserved', reserved_by = ?, reservation_token = ?,
              reservation_expires_at = ?, version = version + 1, updated_at = ?
          WHERE id = ? AND trip_id = ? AND status = 'available'`
@@ -227,7 +227,7 @@ export class TripSeatDO implements DurableObject {
       return Response.json({ success: false, error: 'Failed to write reservation to database' }, { status: 500 });
     }
 
-    // 5. Detect seats that didn't update (another path reserved them before us)
+    // 5. Detect trns_seats that didn't update (another path reserved them before us)
     const failedIds = seat_ids.filter((_, i) => (batchResults[i]?.meta?.changes ?? 0) === 0);
 
     if (failedIds.length > 0) {
@@ -239,7 +239,7 @@ export class TripSeatDO implements DurableObject {
           db.batch(
             successIds.map(seatId =>
               db.prepare(
-                `UPDATE seats
+                `UPDATE trns_seats
                  SET status = 'available', reserved_by = NULL, reservation_token = NULL,
                      reservation_expires_at = NULL, updated_at = ?
                  WHERE id = ? AND trip_id = ? AND reservation_token = ?`
@@ -249,7 +249,7 @@ export class TripSeatDO implements DurableObject {
         );
       }
 
-      // BUG-3 FIX: include conflicted_seats so callers know which seats caused
+      // BUG-3 FIX: include conflicted_seats so callers know which trns_seats caused
       // the conflict and can surface accurate UX / retry targeted subsets.
       return Response.json({
         success: false,
@@ -259,7 +259,7 @@ export class TripSeatDO implements DurableObject {
       }, { status: 409 });
     }
 
-    // 6. Update in-memory state — the DO now considers these seats held
+    // 6. Update in-memory state — the DO now considers these trns_seats held
     for (const seatId of seat_ids) {
       this.heldSeats.set(seatId, {
         token: tokens[seatId]!,
@@ -281,7 +281,7 @@ export class TripSeatDO implements DurableObject {
     }, { status: 200 });
   }
 
-  // ── POST /release-seats ───────────────────────────────────────────────────
+  // ── POST /release-trns_seats ───────────────────────────────────────────────────
   // Token-verified release: removes from in-memory map AND syncs D1.
   // The HTTP /release endpoint already updated D1 before calling this, so
   // the D1 write here is belt-and-suspenders (future direct callers).
@@ -309,7 +309,7 @@ export class TripSeatDO implements DurableObject {
       db.batch(
         seat_ids.map(seatId =>
           db.prepare(
-            `UPDATE seats
+            `UPDATE trns_seats
              SET status = 'available', reserved_by = NULL, reservation_token = NULL,
                  reservation_expires_at = NULL, updated_at = ?
              WHERE id = ? AND trip_id = ? AND reservation_token = ?`

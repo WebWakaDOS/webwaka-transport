@@ -64,8 +64,9 @@ bucket_name = "webwaka-operator-assets"
 
 [[env.production.d1_databases]]
 binding = "DB"
-database_name = "webwaka-transport-db-prod"
-database_id = "1faa6600-d4ce-4c1c-9868-ec23566da100"
+database_name = "webwaka-production-db"
+database_id = "d01940d3-d69e-4455-94ba-bc2404cb3872"
+migrations_dir = "migrations"
 
 [[env.production.kv_namespaces]]
 binding = "SESSIONS_KV"

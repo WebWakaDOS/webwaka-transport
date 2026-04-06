@@ -85,24 +85,24 @@ beforeEach(async () => {
 // API Route Mapping — generic mutations
 // ============================================================
 describe('SyncEngine — API route mapping', () => {
-  it('routes booking CREATE to POST /api/booking/bookings', async () => {
+  it('trns_routes booking CREATE to POST /api/booking/trns_bookings', async () => {
     mockFetch.mockResolvedValueOnce(mockOk());
     const engine = new SyncEngine();
-    await queueMutation('booking', 'bk_1', 'CREATE', { trip_id: 'tr_1', seats: ['s1'] });
+    await queueMutation('booking', 'bk_1', 'CREATE', { trip_id: 'tr_1', trns_seats: ['s1'] });
     const result = await engine.flush();
     expect(result.synced).toBe(1);
-    expect(mockFetch).toHaveBeenCalledWith('/api/booking/bookings', expect.objectContaining({ method: 'POST' }));
+    expect(mockFetch).toHaveBeenCalledWith('/api/booking/trns_bookings', expect.objectContaining({ method: 'POST' }));
   });
 
-  it('routes booking UPDATE to PATCH /api/booking/bookings/:id', async () => {
+  it('trns_routes booking UPDATE to PATCH /api/booking/trns_bookings/:id', async () => {
     mockFetch.mockResolvedValueOnce(mockOk());
     const engine = new SyncEngine();
     await queueMutation('booking', 'bk_2', 'UPDATE', { id: 'bk_2', status: 'confirmed' });
     await engine.flush();
-    expect(mockFetch).toHaveBeenCalledWith('/api/booking/bookings/bk_2', expect.objectContaining({ method: 'PATCH' }));
+    expect(mockFetch).toHaveBeenCalledWith('/api/booking/trns_bookings/bk_2', expect.objectContaining({ method: 'PATCH' }));
   });
 
-  it('routes transaction CREATE to POST /api/agent-sales/transactions', async () => {
+  it('trns_routes transaction CREATE to POST /api/agent-sales/transactions', async () => {
     mockFetch.mockResolvedValueOnce(mockOk());
     const engine = new SyncEngine();
     await queueMutation('transaction', 'tx_1', 'CREATE', { trip_id: 'tr_1', amount: 5000_00 });
@@ -110,7 +110,7 @@ describe('SyncEngine — API route mapping', () => {
     expect(mockFetch).toHaveBeenCalledWith('/api/agent-sales/transactions', expect.objectContaining({ method: 'POST' }));
   });
 
-  it('routes ticket CREATE to POST /api/agent-sales/transactions', async () => {
+  it('trns_routes ticket CREATE to POST /api/agent-sales/transactions', async () => {
     mockFetch.mockResolvedValueOnce(mockOk());
     const engine = new SyncEngine();
     await queueMutation('ticket', 'TKT-001', 'CREATE', {
@@ -126,20 +126,20 @@ describe('SyncEngine — API route mapping', () => {
     );
   });
 
-  it('routes seat UPDATE to PATCH /api/seat-inventory/trips/:tripId/seats/:seatId', async () => {
+  it('trns_routes seat UPDATE to PATCH /api/seat-inventory/trns_trips/:tripId/trns_seats/:seatId', async () => {
     mockFetch.mockResolvedValueOnce(mockOk());
     const engine = new SyncEngine();
     await queueMutation('seat', 's_1', 'UPDATE', { id: 's_1', trip_id: 'tr_1', status: 'confirmed' });
     await engine.flush();
-    expect(mockFetch).toHaveBeenCalledWith('/api/seat-inventory/trips/tr_1/seats/s_1', expect.objectContaining({ method: 'PATCH' }));
+    expect(mockFetch).toHaveBeenCalledWith('/api/seat-inventory/trns_trips/tr_1/trns_seats/s_1', expect.objectContaining({ method: 'PATCH' }));
   });
 
-  it('routes trip CREATE to POST /api/operator/trips', async () => {
+  it('trns_routes trip CREATE to POST /api/operator/trns_trips', async () => {
     mockFetch.mockResolvedValueOnce(mockOk());
     const engine = new SyncEngine();
     await queueMutation('trip', 'tr_new', 'CREATE', { origin: 'Lagos', destination: 'Abuja' });
     await engine.flush();
-    expect(mockFetch).toHaveBeenCalledWith('/api/operator/trips', expect.objectContaining({ method: 'POST' }));
+    expect(mockFetch).toHaveBeenCalledWith('/api/operator/trns_trips', expect.objectContaining({ method: 'POST' }));
   });
 
   it('abandons mutations with no valid route (missing required fields)', async () => {
@@ -301,7 +301,7 @@ describe('SyncEngine — empty queue', () => {
 describe('SyncEngine Phase 3 — ticket flush (success)', () => {
   it('sends ticket to POST /api/agent-sales/transactions with correct payload shape', async () => {
     // Phase 3 tickets are routed to /api/agent-sales/transactions — the
-    // endpoint that atomically validates seat availability and confirms seats.
+    // endpoint that atomically validates seat availability and confirms trns_seats.
     // Sending to /api/agent-sales/sync (old behaviour) always returned 400
     // because that endpoint has no ticket handler.
     mockFetch.mockResolvedValueOnce(mockOk({ ticket_number: 'TKT-TEST-01', booking_id: 'bk_001' }));

@@ -9,7 +9,7 @@
  * Design:
  *   - Pure async function: accepts db + env, returns multiplier + metadata.
  *   - AI call is non-fatal: falls back to demand-only multiplier on failure.
- *   - Snapshots are persisted to `surge_snapshots` for analytics + audit.
+ *   - Snapshots are persisted to `trns_surge_snapshots` for analytics + audit.
  *
  * Integration points:
  *   - Called by seat-inventory API before fare display.
@@ -22,7 +22,7 @@
 import { getAICompletion, type AiEnv } from '../../lib/ai.js';
 
 // QA-TRA-2: getAICompletion() is the certified AI completion function.
-// callOpenRouter alias: routes all AI calls through webwaka-ai-platform. No direct provider calls.
+// callOpenRouter alias: trns_routes all AI calls through webwaka-ai-platform. No direct provider calls.
 const callOpenRouter = getAICompletion;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -84,7 +84,7 @@ const SURGE_CONFIG = {
  */
 export function computeDemandSurge(activeRiders: number, availableDrivers: number): number {
   if (availableDrivers === 0) {
-    // No drivers available: apply maximum surge to signal unavailability
+    // No trns_drivers available: apply maximum surge to signal unavailability
     return availableDrivers === 0 && activeRiders > 0
       ? SURGE_CONFIG.maxMultiplier
       : SURGE_CONFIG.minMultiplier;
@@ -200,7 +200,7 @@ export async function calculateSurge(
   try {
     riderRow = await db
       .prepare(`
-        SELECT COUNT(*) as cnt FROM ride_requests
+        SELECT COUNT(*) as cnt FROM trns_ride_requests
         WHERE status IN ('pending','matched')
           AND created_at >= ?
           ${context.operator_id ? 'AND operator_id = ?' : ''}
@@ -211,12 +211,12 @@ export async function calculateSurge(
 
   const activeRiders = riderRow?.cnt ?? 0;
 
-  // 2. Count available drivers in zone
+  // 2. Count available trns_drivers in zone
   let driverRow: { cnt: number } | null = null;
   try {
     driverRow = await db
       .prepare(`
-        SELECT COUNT(*) as cnt FROM active_drivers
+        SELECT COUNT(*) as cnt FROM trns_active_drivers
         WHERE status = 'available'
           AND last_seen_at >= ?
           ${context.operator_id ? 'AND operator_id = ?' : ''}
@@ -264,7 +264,7 @@ export async function calculateSurge(
     const snapshotId = `surge_${now}_${Math.random().toString(36).slice(2, 7)}`;
     await db
       .prepare(`
-        INSERT INTO surge_snapshots
+        INSERT INTO trns_surge_snapshots
           (id, zone_id, operator_id, active_riders, available_drivers, demand_ratio, surge_multiplier, ai_context, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)

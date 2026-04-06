@@ -56,14 +56,14 @@ function computeFareByClass(
 export const bookingPortalRouter = new Hono<AppContext>();
 
 // ============================================================
-// GET /routes — public: search available routes
+// GET /trns_routes — public: search available trns_routes
 // ============================================================
-bookingPortalRouter.get('/routes', async (c) => {
+bookingPortalRouter.get('/trns_routes', async (c) => {
   const { origin, destination } = c.req.query();
   const db = c.env.DB;
 
-  let query = `SELECT r.*, o.name as operator_name FROM routes r
-    JOIN operators o ON r.operator_id = o.id
+  let query = `SELECT r.*, o.name as operator_name FROM trns_routes r
+    JOIN trns_operators o ON r.operator_id = o.id
     WHERE r.deleted_at IS NULL AND r.status = 'active'`;
   const params: unknown[] = [];
   if (origin) { query += ` AND r.origin LIKE ?`; params.push(`%${origin}%`); }
@@ -74,18 +74,18 @@ bookingPortalRouter.get('/routes', async (c) => {
     const result = await db.prepare(query).bind(...params).all();
     return c.json({ success: true, data: result.results });
   } catch {
-    return c.json({ success: false, error: 'Failed to fetch routes' }, 500);
+    return c.json({ success: false, error: 'Failed to fetch trns_routes' }, 500);
   }
 });
 
 // ============================================================
-// GET /trips/search — public: search trips by route and date
+// GET /trns_trips/search — public: search trns_trips by route and date
 // ============================================================
-bookingPortalRouter.get('/trips/search', async (c) => {
+bookingPortalRouter.get('/trns_trips/search', async (c) => {
   const { origin, destination, date, origin_stop, destination_stop } = c.req.query();
   const db = c.env.DB;
 
-  // P11-T3: If origin_stop or destination_stop provided, use route_stops JOIN
+  // P11-T3: If origin_stop or destination_stop provided, use trns_route_stops JOIN
   const useStops = !!(origin_stop || destination_stop);
 
   let query: string;
@@ -100,16 +100,16 @@ bookingPortalRouter.get('/trips/search', async (c) => {
       rs_orig.sequence as origin_stop_seq, rs_orig.fare_from_origin_kobo as origin_fare_kobo,
       rs_dest.id as destination_stop_id, rs_dest.stop_name as destination_stop_name,
       rs_dest.sequence as destination_stop_seq, rs_dest.fare_from_origin_kobo as dest_fare_kobo
-      FROM trips t
-      JOIN routes r ON t.route_id = r.id
-      JOIN operators o ON t.operator_id = o.id
-      LEFT JOIN seats s ON t.id = s.trip_id
+      FROM trns_trips t
+      JOIN trns_routes r ON t.route_id = r.id
+      JOIN trns_operators o ON t.operator_id = o.id
+      LEFT JOIN trns_seats s ON t.id = s.trip_id
       LEFT JOIN (
         SELECT operator_id, AVG(CAST(rating AS REAL)) as avg_rating, COUNT(id) as review_count
-        FROM operator_reviews WHERE deleted_at IS NULL GROUP BY operator_id
+        FROM trns_operator_reviews WHERE deleted_at IS NULL GROUP BY operator_id
       ) rev ON rev.operator_id = t.operator_id
-      JOIN route_stops rs_orig ON rs_orig.route_id = r.id
-      JOIN route_stops rs_dest ON rs_dest.route_id = r.id
+      JOIN trns_route_stops rs_orig ON rs_orig.route_id = r.id
+      JOIN trns_route_stops rs_dest ON rs_dest.route_id = r.id
       WHERE t.deleted_at IS NULL AND t.state IN ('scheduled', 'boarding')
         AND r.route_stops_enabled = 1
         AND rs_orig.sequence < rs_dest.sequence`;
@@ -130,13 +130,13 @@ bookingPortalRouter.get('/trips/search', async (c) => {
       o.name as operator_name,
       COUNT(CASE WHEN s.status = 'available' THEN 1 END) as available_seats,
       ROUND(COALESCE(rev.avg_rating, 0), 1) as avg_rating, COALESCE(rev.review_count, 0) as review_count
-      FROM trips t
-      JOIN routes r ON t.route_id = r.id
-      JOIN operators o ON t.operator_id = o.id
-      LEFT JOIN seats s ON t.id = s.trip_id
+      FROM trns_trips t
+      JOIN trns_routes r ON t.route_id = r.id
+      JOIN trns_operators o ON t.operator_id = o.id
+      LEFT JOIN trns_seats s ON t.id = s.trip_id
       LEFT JOIN (
         SELECT operator_id, AVG(CAST(rating AS REAL)) as avg_rating, COUNT(id) as review_count
-        FROM operator_reviews WHERE deleted_at IS NULL GROUP BY operator_id
+        FROM trns_operator_reviews WHERE deleted_at IS NULL GROUP BY operator_id
       ) rev ON rev.operator_id = t.operator_id
       WHERE t.deleted_at IS NULL AND t.state IN ('scheduled', 'boarding')`;
 
@@ -162,17 +162,17 @@ bookingPortalRouter.get('/trips/search', async (c) => {
       destination_stop_id?: string; destination_stop_name?: string; destination_stop_seq?: number; dest_fare_kobo?: number | null;
     }>();
 
-    // WWT-005: Batch-fetch active fare_rules for all returned trips so we can apply
+    // WWT-005: Batch-fetch active trns_fare_rules for all returned trns_trips so we can apply
     // the structured pricing engine (higher priority than fare_matrix JSON).
-    const trips = result.results;
+    const trns_trips = result.results;
     type FareRuleRow = FareRule & { route_id: string; operator_id: string };
     let fareRulesByKey: Map<string, FareRule[]> = new Map();
-    if (trips.length > 0) {
-      // Collect unique (route_id, operator_id) pairs from trips that include them.
+    if (trns_trips.length > 0) {
+      // Collect unique (route_id, operator_id) pairs from trns_trips that include them.
       // The SELECT queries above don't select route_id/operator_id explicitly — add placeholders
       // by extracting from the trip object (they may be present depending on DB aliasing).
       const keys = new Set<string>();
-      for (const t of trips) {
+      for (const t of trns_trips) {
         if (t.route_id && t.operator_id) keys.add(`${t.route_id}:${t.operator_id}`);
       }
       if (keys.size > 0) {
@@ -182,7 +182,7 @@ bookingPortalRouter.get('/trips/search', async (c) => {
         try {
           const rulesResult = await db
             .prepare(
-              `SELECT * FROM fare_rules WHERE is_active = 1 AND deleted_at IS NULL AND (${placeholders}) ORDER BY priority DESC`,
+              `SELECT * FROM trns_fare_rules WHERE is_active = 1 AND deleted_at IS NULL AND (${placeholders}) ORDER BY priority DESC`,
             )
             .bind(...binds)
             .all<FareRuleRow>();
@@ -198,7 +198,7 @@ bookingPortalRouter.get('/trips/search', async (c) => {
       }
     }
 
-    const enriched = trips.map(trip => {
+    const enriched = trns_trips.map(trip => {
       const fareMatrix: FareMatrix | null = trip.fare_matrix ? JSON.parse(trip.fare_matrix) as FareMatrix : null;
       // Base fare_matrix pricing (local, always available)
       let effective_fare_by_class = computeFareByClass(trip.base_fare, fareMatrix, trip.departure_time);
@@ -206,7 +206,7 @@ bookingPortalRouter.get('/trips/search', async (c) => {
       const avg_rating = (trip as Record<string, unknown>)['avg_rating'] as number ?? 0;
       const review_count = (trip as Record<string, unknown>)['review_count'] as number ?? 0;
 
-      // WWT-005: Layer in structured fare_rules from DB (higher priority)
+      // WWT-005: Layer in structured trns_fare_rules from DB (higher priority)
       const rulesKey = trip.route_id && trip.operator_id ? `${trip.route_id}:${trip.operator_id}` : '';
       const fareRules = rulesKey ? (fareRulesByKey.get(rulesKey) ?? []) : [];
       if (fareRules.length > 0) {
@@ -245,14 +245,14 @@ bookingPortalRouter.get('/trips/search', async (c) => {
 
     return c.json({ success: true, data: enriched });
   } catch {
-    return c.json({ success: false, error: 'Failed to search trips' }, 500);
+    return c.json({ success: false, error: 'Failed to search trns_trips' }, 500);
   }
 });
 
 // ============================================================
-// POST /customers — register or update customer (NDPR enforced)
+// POST /trns_customers — register or update customer (NDPR enforced)
 // ============================================================
-bookingPortalRouter.post('/customers', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'CUSTOMER']), async (c) => {
+bookingPortalRouter.post('/trns_customers', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'CUSTOMER']), async (c) => {
   const body = await c.req.json() as Record<string, unknown>;
   const err = requireFields(body, ['name', 'phone']);
   if (err) return c.json({ success: false, error: err }, 400);
@@ -270,18 +270,18 @@ bookingPortalRouter.post('/customers', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN
 
   try {
     const existing = await db.prepare(
-      `SELECT * FROM customers WHERE phone = ? AND deleted_at IS NULL`
+      `SELECT * FROM trns_customers WHERE phone = ? AND deleted_at IS NULL`
     ).bind(phone).first<DbCustomer>();
 
     if (existing) {
-      await db.prepare(`UPDATE customers SET name = ?, email = ?, ndpr_consent = 1, updated_at = ? WHERE id = ?`)
+      await db.prepare(`UPDATE trns_customers SET name = ?, email = ?, ndpr_consent = 1, updated_at = ? WHERE id = ?`)
         .bind(name, email ?? null, now, existing.id).run();
       return c.json({ success: true, data: { id: existing.id, name, phone, ndpr_consent: true } });
     }
 
     const id = genId('cust');
     await db.prepare(
-      `INSERT INTO customers (id, name, phone, email, ndpr_consent, status, created_at, updated_at)
+      `INSERT INTO trns_customers (id, name, phone, email, ndpr_consent, status, created_at, updated_at)
        VALUES (?, ?, ?, ?, 1, 'active', ?, ?)`
     ).bind(id, name, phone, email ?? null, now, now).run();
 
@@ -292,9 +292,9 @@ bookingPortalRouter.post('/customers', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN
 });
 
 // ============================================================
-// POST /bookings — create a booking (seat reservation → pending)
+// POST /trns_bookings — create a booking (seat reservation → pending)
 // ============================================================
-bookingPortalRouter.post('/bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'CUSTOMER']), async (c) => {
+bookingPortalRouter.post('/trns_bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'CUSTOMER']), async (c) => {
   const body = await c.req.json() as Record<string, unknown>;
   const err = requireFields(body, ['customer_id', 'trip_id', 'seat_ids', 'passenger_names', 'payment_method']);
   if (err) return c.json({ success: false, error: err }, 400);
@@ -325,26 +325,26 @@ bookingPortalRouter.post('/bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN'
         : 'Guest';
       const guestPhone = user?.phone ?? '';
       await db.prepare(
-        `INSERT OR IGNORE INTO customers (id, name, phone, email, ndpr_consent, status, created_at, updated_at)
+        `INSERT OR IGNORE INTO trns_customers (id, name, phone, email, ndpr_consent, status, created_at, updated_at)
          VALUES (?, ?, ?, NULL, 1, 'active', ?, ?)`
       ).bind(guestId, guestName, guestPhone, now, now).run();
     }
 
     const customer = await db.prepare(
-      `SELECT * FROM customers WHERE id = ? AND ndpr_consent = 1`
+      `SELECT * FROM trns_customers WHERE id = ? AND ndpr_consent = 1`
     ).bind(customer_id).first<DbCustomer>();
     if (!customer) return c.json({ success: false, error: 'Customer not found or NDPR consent not given' }, 404);
 
     const trip = await db.prepare(
       `SELECT t.id, t.state, t.operator_id, t.departure_time, r.id as route_id, r.base_fare, r.fare_matrix
-       FROM trips t JOIN routes r ON t.route_id = r.id WHERE t.id = ?`
+       FROM trns_trips t JOIN trns_routes r ON t.route_id = r.id WHERE t.id = ?`
     ).bind(trip_id).first<{ id: string; state: string; operator_id: string; departure_time: number; route_id: string; base_fare: number; fare_matrix: string | null }>();
     if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
 
-    // T-TRN-03: Query seats with locked_fare_kobo (set at reservation time)
+    // T-TRN-03: Query trns_seats with locked_fare_kobo (set at reservation time)
     // and seat_class (needed as fallback if no lock exists)
     const seatRows = await db.prepare(
-      `SELECT id, seat_class, locked_fare_kobo FROM seats WHERE id IN (${seat_ids.map(() => '?').join(',')}) AND trip_id = ?`
+      `SELECT id, seat_class, locked_fare_kobo FROM trns_seats WHERE id IN (${seat_ids.map(() => '?').join(',')}) AND trip_id = ?`
     ).bind(...seat_ids, trip_id).all<{ id: string; seat_class: string; locked_fare_kobo: number | null }>();
 
     if (seatRows.results.length !== seat_ids.length) {
@@ -353,13 +353,13 @@ bookingPortalRouter.post('/bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN'
 
     // T-TRN-03: Authoritative fare computation order:
     //   1. locked_fare_kobo on the seat (price locked at reservation time) — HIGHEST AUTHORITY
-    //   2. computeEffectiveFare from structured fare_rules table
+    //   2. computeEffectiveFare from structured trns_fare_rules table
     //   3. computeFareByClass from legacy fare_matrix JSON (backward compat)
     const [fareRulesResult, fareMatrix] = await Promise.all([
       // Scoped by both route_id AND operator_id — defense-in-depth for multi-tenancy.
       // route_id alone is sufficient (a route belongs to exactly one operator) but
       // operator_id makes the tenant boundary explicit and survives any future refactor.
-      db.prepare(`SELECT * FROM fare_rules WHERE route_id = ? AND operator_id = ? AND is_active = 1 AND deleted_at IS NULL`)
+      db.prepare(`SELECT * FROM trns_fare_rules WHERE route_id = ? AND operator_id = ? AND is_active = 1 AND deleted_at IS NULL`)
         .bind(trip.route_id, trip.operator_id).all<FareRule>(),
       Promise.resolve(trip.fare_matrix ? JSON.parse(trip.fare_matrix) as FareMatrix : null),
     ]);
@@ -395,19 +395,19 @@ bookingPortalRouter.post('/bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN'
     let validatedDestStopId: string | null = null;
     if (origin_stop_id || destination_stop_id) {
       const tripRoute = await db.prepare(
-        `SELECT r.id as route_id FROM trips t JOIN routes r ON t.route_id = r.id WHERE t.id = ?`
+        `SELECT r.id as route_id FROM trns_trips t JOIN trns_routes r ON t.route_id = r.id WHERE t.id = ?`
       ).bind(trip_id).first<{ route_id: string }>();
 
       if (origin_stop_id) {
         const origStop = await db.prepare(
-          `SELECT id, sequence FROM route_stops WHERE id = ? AND route_id = ?`
+          `SELECT id, sequence FROM trns_route_stops WHERE id = ? AND route_id = ?`
         ).bind(origin_stop_id, tripRoute?.route_id ?? '').first<{ id: string; sequence: number }>();
         if (!origStop) return c.json({ success: false, error: 'origin_stop_id not found on this route' }, 400);
         validatedOriginStopId = origStop.id;
 
         if (destination_stop_id) {
           const destStop = await db.prepare(
-            `SELECT id, sequence FROM route_stops WHERE id = ? AND route_id = ?`
+            `SELECT id, sequence FROM trns_route_stops WHERE id = ? AND route_id = ?`
           ).bind(destination_stop_id, tripRoute?.route_id ?? '').first<{ id: string; sequence: number }>();
           if (!destStop) return c.json({ success: false, error: 'destination_stop_id not found on this route' }, 400);
           if (destStop.sequence <= origStop.sequence) {
@@ -417,7 +417,7 @@ bookingPortalRouter.post('/bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN'
         }
       } else if (destination_stop_id) {
         const destStop = await db.prepare(
-          `SELECT id FROM route_stops WHERE id = ? AND route_id = ?`
+          `SELECT id FROM trns_route_stops WHERE id = ? AND route_id = ?`
         ).bind(destination_stop_id, tripRoute?.route_id ?? '').first<{ id: string }>();
         if (!destStop) return c.json({ success: false, error: 'destination_stop_id not found on this route' }, 400);
         validatedDestStopId = destStop.id;
@@ -429,11 +429,11 @@ bookingPortalRouter.post('/bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN'
     const payment_reference = `waka_${nanoid('', 16)}`;
     const id = genId('bkg');
 
-    // P15-T3: Credit payment for corporate customers
+    // P15-T3: Credit payment for corporate trns_customers
     let initialPaymentStatus = 'pending';
     if (payment_method === 'credit') {
       const corpCustomer = await db.prepare(
-        `SELECT customer_type, credit_limit_kobo FROM customers WHERE id = ? AND deleted_at IS NULL`
+        `SELECT customer_type, credit_limit_kobo FROM trns_customers WHERE id = ? AND deleted_at IS NULL`
       ).bind(customer_id).first<{ customer_type: string; credit_limit_kobo: number }>();
 
       if (!corpCustomer || corpCustomer.customer_type !== 'corporate') {
@@ -455,16 +455,16 @@ bookingPortalRouter.post('/bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN'
       initialPaymentStatus = 'completed';
       await db.batch([
         db.prepare(
-          `UPDATE customers SET credit_limit_kobo = ? WHERE id = ?`
+          `UPDATE trns_customers SET credit_limit_kobo = ? WHERE id = ?`
         ).bind(new_credit_balance, customer_id),
         db.prepare(
-          `INSERT INTO bookings (id, customer_id, trip_id, seat_ids, passenger_names, total_amount, status, payment_status, payment_method, payment_reference, is_guest, origin_stop_id, destination_stop_id, created_at)
+          `INSERT INTO trns_bookings (id, customer_id, trip_id, seat_ids, passenger_names, total_amount, status, payment_status, payment_method, payment_reference, is_guest, origin_stop_id, destination_stop_id, created_at)
            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`
         ).bind(id, customer_id, trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, initialPaymentStatus, payment_method, payment_reference, isGuest ? 1 : 0, validatedOriginStopId, validatedDestStopId, now),
       ]);
     } else {
       await db.prepare(
-        `INSERT INTO bookings (id, customer_id, trip_id, seat_ids, passenger_names, total_amount, status, payment_status, payment_method, payment_reference, is_guest, origin_stop_id, destination_stop_id, created_at)
+        `INSERT INTO trns_bookings (id, customer_id, trip_id, seat_ids, passenger_names, total_amount, status, payment_status, payment_method, payment_reference, is_guest, origin_stop_id, destination_stop_id, created_at)
          VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`
       ).bind(id, customer_id, trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, initialPaymentStatus, payment_method, payment_reference, isGuest ? 1 : 0, validatedOriginStopId, validatedDestStopId, now).run();
     }
@@ -482,10 +482,10 @@ bookingPortalRouter.post('/bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN'
 });
 
 // ============================================================
-// PATCH /bookings/:id — update booking (SyncEngine offline mutations)
+// PATCH /trns_bookings/:id — update booking (SyncEngine offline mutations)
 // Supports: payment_reference, payment_method update before confirmation
 // ============================================================
-bookingPortalRouter.patch('/bookings/:id', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'CUSTOMER']), async (c) => {
+bookingPortalRouter.patch('/trns_bookings/:id', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'CUSTOMER']), async (c) => {
   const id = c.req.param('id');
   const body = await c.req.json() as Record<string, unknown>;
   const db = c.env.DB;
@@ -493,7 +493,7 @@ bookingPortalRouter.patch('/bookings/:id', requireRole(['SUPER_ADMIN', 'TENANT_A
 
   try {
     const booking = await db.prepare(
-      `SELECT * FROM bookings WHERE id = ? AND deleted_at IS NULL`
+      `SELECT * FROM trns_bookings WHERE id = ? AND deleted_at IS NULL`
     ).bind(id).first<DbBooking>();
 
     if (!booking) return c.json({ success: false, error: 'Booking not found' }, 404);
@@ -513,7 +513,7 @@ bookingPortalRouter.patch('/bookings/:id', requireRole(['SUPER_ADMIN', 'TENANT_A
     }
 
     await db.prepare(
-      `UPDATE bookings
+      `UPDATE trns_bookings
        SET payment_reference = COALESCE(?, payment_reference),
            payment_method = COALESCE(?, payment_method),
            status = COALESCE(?, status)
@@ -527,9 +527,9 @@ bookingPortalRouter.patch('/bookings/:id', requireRole(['SUPER_ADMIN', 'TENANT_A
 });
 
 // ============================================================
-// PATCH /bookings/:id/confirm — confirm payment; publishes booking.created event
+// PATCH /trns_bookings/:id/confirm — confirm payment; publishes booking.created event
 // ============================================================
-bookingPortalRouter.patch('/bookings/:id/confirm', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'CUSTOMER']), async (c) => {
+bookingPortalRouter.patch('/trns_bookings/:id/confirm', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'CUSTOMER']), async (c) => {
   const id = c.req.param('id');
   const body = await c.req.json() as Record<string, unknown>;
   const { payment_reference } = body as { payment_reference?: string };
@@ -540,10 +540,10 @@ bookingPortalRouter.patch('/bookings/:id/confirm', requireRole(['SUPER_ADMIN', '
   try {
     const booking = await db.prepare(
       `SELECT b.*, r.origin, r.destination, t.departure_time, t.operator_id as trip_operator_id, c.phone as customer_phone, c.name as customer_name
-       FROM bookings b
-       JOIN trips t ON t.id = b.trip_id
-       JOIN routes r ON r.id = t.route_id
-       JOIN customers c ON c.id = b.customer_id
+       FROM trns_bookings b
+       JOIN trns_trips t ON t.id = b.trip_id
+       JOIN trns_routes r ON r.id = t.route_id
+       JOIN trns_customers c ON c.id = b.customer_id
        WHERE b.id = ?`
     ).bind(id).first<DbBooking & {
       origin: string; destination: string; departure_time: number; trip_operator_id: string;
@@ -559,17 +559,17 @@ bookingPortalRouter.patch('/bookings/:id/confirm', requireRole(['SUPER_ADMIN', '
     // Fetch seat numbers for SMS message
     const seatPlaceholders = seatIds.map(() => '?').join(', ');
     const seatsResult = await db.prepare(
-      `SELECT seat_number FROM seats WHERE id IN (${seatPlaceholders})`
+      `SELECT seat_number FROM trns_seats WHERE id IN (${seatPlaceholders})`
     ).bind(...seatIds).all<{ seat_number: string }>();
     const seatNumbers = seatsResult.results.map(s => s.seat_number).join(', ');
 
     await db.batch([
       db.prepare(
-        `UPDATE bookings SET status = 'confirmed', payment_status = 'completed', confirmed_at = ? WHERE id = ?`
+        `UPDATE trns_bookings SET status = 'confirmed', payment_status = 'completed', confirmed_at = ? WHERE id = ?`
       ).bind(now, id),
       ...seatIds.map(seatId =>
         db.prepare(
-          `UPDATE seats SET status = ?, confirmed_by = ?, confirmed_at = ?, updated_at = ? WHERE id = ?`
+          `UPDATE trns_seats SET status = ?, confirmed_by = ?, confirmed_at = ?, updated_at = ? WHERE id = ?`
         ).bind('confirmed', id, now, now, seatId)
       ),
     ]);
@@ -615,17 +615,17 @@ bookingPortalRouter.patch('/bookings/:id/confirm', requireRole(['SUPER_ADMIN', '
 });
 
 // ============================================================
-// PATCH /bookings/:id/cancel — cancel + P08-T3 policy-based refund
+// PATCH /trns_bookings/:id/cancel — cancel + P08-T3 policy-based refund
 // ============================================================
-bookingPortalRouter.patch('/bookings/:id/cancel', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'CUSTOMER']), async (c) => {
+bookingPortalRouter.patch('/trns_bookings/:id/cancel', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'CUSTOMER']), async (c) => {
   const id = c.req.param('id');
   const db = c.env.DB;
   const now = Date.now();
 
   try {
     const booking = await db.prepare(
-      `SELECT b.*, t.departure_time, t.operator_id FROM bookings b
-       JOIN trips t ON b.trip_id = t.id
+      `SELECT b.*, t.departure_time, t.operator_id FROM trns_bookings b
+       JOIN trns_trips t ON b.trip_id = t.id
        WHERE b.id = ?`
     ).bind(id).first<DbBooking & { departure_time: number; operator_id: string }>();
 
@@ -667,14 +667,14 @@ bookingPortalRouter.patch('/bookings/:id/cancel', requireRole(['SUPER_ADMIN', 'T
 
     await db.batch([
       db.prepare(
-        `UPDATE bookings
+        `UPDATE trns_bookings
          SET status = 'cancelled', cancelled_at = ?,
              refund_amount_kobo = ?, refund_reference = ?, manual_refund_required = ?
          WHERE id = ?`
       ).bind(now, refund_amount_kobo, refund_reference, manual_refund_required, id),
       ...seatIds.map(seatId =>
         db.prepare(
-          `UPDATE seats SET status = 'available', reserved_by = NULL, reservation_token = NULL, confirmed_by = NULL, updated_at = ? WHERE id = ?`
+          `UPDATE trns_seats SET status = 'available', reserved_by = NULL, reservation_token = NULL, confirmed_by = NULL, updated_at = ? WHERE id = ?`
         ).bind(now, seatId)
       ),
     ]);
@@ -698,7 +698,7 @@ bookingPortalRouter.patch('/bookings/:id/cancel', requireRole(['SUPER_ADMIN', 'T
       ).catch((err) => console.error('[transport] central-mgmt refund notify failed:', err));
     }
 
-    // P08-T4: Notify the first waitlisted customer for this trip after seats are freed
+    // P08-T4: Notify the first waitlisted customer for this trip after trns_seats are freed
     await notifyWaitlist(db, booking.trip_id, c.env).catch(() => {});
 
     return c.json({
@@ -711,18 +711,18 @@ bookingPortalRouter.patch('/bookings/:id/cancel', requireRole(['SUPER_ADMIN', 'T
 });
 
 // ============================================================
-// GET /bookings — list bookings
+// GET /trns_bookings — list trns_bookings
 // ============================================================
-bookingPortalRouter.get('/bookings', async (c) => {
+bookingPortalRouter.get('/trns_bookings', async (c) => {
   const q = c.req.query();
   const { customer_id, status } = q;
   const { limit, offset } = parsePagination(q);
   const db = c.env.DB;
 
   let query = `SELECT b.*, r.origin, r.destination, t.departure_time
-    FROM bookings b
-    JOIN trips t ON b.trip_id = t.id
-    JOIN routes r ON t.route_id = r.id
+    FROM trns_bookings b
+    JOIN trns_trips t ON b.trip_id = t.id
+    JOIN trns_routes r ON t.route_id = r.id
     WHERE b.deleted_at IS NULL`;
   const params: unknown[] = [];
   if (customer_id) { query += ` AND b.customer_id = ?`; params.push(customer_id); }
@@ -734,12 +734,12 @@ bookingPortalRouter.get('/bookings', async (c) => {
     const result = await db.prepare(query).bind(...params).all<DbBooking>();
     return c.json({ success: true, data: result.results, meta: metaResponse(result.results.length, limit, offset) });
   } catch {
-    return c.json({ success: false, error: 'Failed to fetch bookings' }, 500);
+    return c.json({ success: false, error: 'Failed to fetch trns_bookings' }, 500);
   }
 });
 
 // ============================================================
-// P08-T4: Waitlist — helper to notify first queued customer after seats freed
+// P08-T4: Waitlist — helper to notify first queued customer after trns_seats freed
 // ============================================================
 type D1Database = AppContext['Bindings']['DB'];
 
@@ -751,25 +751,25 @@ interface WaitlistRow {
 async function notifyWaitlist(db: D1Database, trip_id: string, env: AppContext['Bindings']) {
   type WL = { id: string; customer_id: string; seat_class: string };
   const entry = await db.prepare(
-    `SELECT wl.id, wl.customer_id, wl.seat_class FROM waiting_list wl
+    `SELECT wl.id, wl.customer_id, wl.seat_class FROM trns_waiting_list wl
      WHERE wl.trip_id = ? AND wl.deleted_at IS NULL AND wl.notified_at IS NULL
      ORDER BY wl.position ASC LIMIT 1`
   ).bind(trip_id).first<WL>();
   if (!entry) return;
 
   const seat = await db.prepare(
-    `SELECT id FROM seats WHERE trip_id = ? AND seat_class = ? AND status = 'available' LIMIT 1`
+    `SELECT id FROM trns_seats WHERE trip_id = ? AND seat_class = ? AND status = 'available' LIMIT 1`
   ).bind(trip_id, entry.seat_class).first<{ id: string }>();
   if (!seat) return;
 
   const customer = await db.prepare(
-    `SELECT phone FROM customers WHERE id = ?`
+    `SELECT phone FROM trns_customers WHERE id = ?`
   ).bind(entry.customer_id).first<{ phone: string }>();
 
   const now = Date.now();
   const expires_at = now + 10 * 60_000; // T4-5: 10-minute hold window
   await db.prepare(
-    `UPDATE waiting_list SET notified_at = ?, expires_at = ? WHERE id = ?`
+    `UPDATE trns_waiting_list SET notified_at = ?, expires_at = ? WHERE id = ?`
   ).bind(now, expires_at, entry.id).run();
 
   if (customer?.phone) {
@@ -782,9 +782,9 @@ async function notifyWaitlist(db: D1Database, trip_id: string, env: AppContext['
 }
 
 // ============================================================
-// P08-T4: POST /trips/:id/waitlist — join a waiting list
+// P08-T4: POST /trns_trips/:id/waitlist — join a waiting list
 // ============================================================
-bookingPortalRouter.post('/trips/:id/waitlist', requireRole(['CUSTOMER', 'STAFF', 'TENANT_ADMIN', 'SUPER_ADMIN']), requireTierFeature('waiting_list'), async (c) => {
+bookingPortalRouter.post('/trns_trips/:id/waitlist', requireRole(['CUSTOMER', 'STAFF', 'TENANT_ADMIN', 'SUPER_ADMIN']), requireTierFeature('trns_waiting_list'), async (c) => {
   const trip_id = c.req.param('id');
   const body = await c.req.json() as { customer_id?: string; seat_class?: string };
   const { customer_id, seat_class } = body;
@@ -799,12 +799,12 @@ bookingPortalRouter.post('/trips/:id/waitlist', requireRole(['CUSTOMER', 'STAFF'
   }
 
   try {
-    const trip = await db.prepare(`SELECT id FROM trips WHERE id = ? AND deleted_at IS NULL`).bind(trip_id).first<{ id: string }>();
+    const trip = await db.prepare(`SELECT id FROM trns_trips WHERE id = ? AND deleted_at IS NULL`).bind(trip_id).first<{ id: string }>();
     if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
 
-    // T4-1: Reject if seats of the requested class are still available — waitlist is only for full trips
+    // T4-1: Reject if trns_seats of the requested class are still available — waitlist is only for full trns_trips
     const availableCount = await db.prepare(
-      `SELECT COUNT(*) as cnt FROM seats WHERE trip_id = ? AND seat_class = ? AND status = 'available'`
+      `SELECT COUNT(*) as cnt FROM trns_seats WHERE trip_id = ? AND seat_class = ? AND status = 'available'`
     ).bind(trip_id, seat_class).first<{ cnt: number }>();
     if ((availableCount?.cnt ?? 0) > 0) {
       return c.json({
@@ -816,19 +816,19 @@ bookingPortalRouter.post('/trips/:id/waitlist', requireRole(['CUSTOMER', 'STAFF'
 
     // Check if already on waitlist
     const existing = await db.prepare(
-      `SELECT id FROM waiting_list WHERE trip_id = ? AND customer_id = ? AND deleted_at IS NULL`
+      `SELECT id FROM trns_waiting_list WHERE trip_id = ? AND customer_id = ? AND deleted_at IS NULL`
     ).bind(trip_id, customer_id).first();
     if (existing) return c.json({ success: false, error: 'Already on waitlist for this trip' }, 409);
 
     // Get next position
     const posRow = await db.prepare(
-      `SELECT COALESCE(MAX(position), 0) + 1 as next_pos FROM waiting_list WHERE trip_id = ? AND deleted_at IS NULL`
+      `SELECT COALESCE(MAX(position), 0) + 1 as next_pos FROM trns_waiting_list WHERE trip_id = ? AND deleted_at IS NULL`
     ).bind(trip_id).first<{ next_pos: number }>();
     const position = posRow?.next_pos ?? 1;
 
     const wl_id = genId('wl');
     await db.prepare(
-      `INSERT INTO waiting_list (id, trip_id, customer_id, seat_class, position, created_at) VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT INTO trns_waiting_list (id, trip_id, customer_id, seat_class, position, created_at) VALUES (?, ?, ?, ?, ?, ?)`
     ).bind(wl_id, trip_id, customer_id, seat_class, position, now).run();
 
     return c.json({ success: true, data: { id: wl_id, trip_id, customer_id, seat_class, position } }, 201);
@@ -838,15 +838,15 @@ bookingPortalRouter.post('/trips/:id/waitlist', requireRole(['CUSTOMER', 'STAFF'
 });
 
 // ============================================================
-// P08-T4: GET /trips/:id/waitlist — list all entries (STAFF+)
+// P08-T4: GET /trns_trips/:id/waitlist — list all entries (STAFF+)
 // ============================================================
-bookingPortalRouter.get('/trips/:id/waitlist', requireRole(['STAFF', 'TENANT_ADMIN', 'SUPER_ADMIN']), async (c) => {
+bookingPortalRouter.get('/trns_trips/:id/waitlist', requireRole(['STAFF', 'TENANT_ADMIN', 'SUPER_ADMIN']), async (c) => {
   const trip_id = c.req.param('id');
   const db = c.env.DB;
   try {
     const rows = await db.prepare(
-      `SELECT wl.*, c.full_name, c.phone FROM waiting_list wl
-       JOIN customers c ON wl.customer_id = c.id
+      `SELECT wl.*, c.full_name, c.phone FROM trns_waiting_list wl
+       JOIN trns_customers c ON wl.customer_id = c.id
        WHERE wl.trip_id = ? AND wl.deleted_at IS NULL
        ORDER BY wl.position ASC`
     ).bind(trip_id).all<WaitlistRow & { full_name: string; phone: string }>();
@@ -857,31 +857,31 @@ bookingPortalRouter.get('/trips/:id/waitlist', requireRole(['STAFF', 'TENANT_ADM
 });
 
 // ============================================================
-// P08-T4: DELETE /trips/:id/waitlist/:wl_id — leave the waiting list (soft delete)
+// P08-T4: DELETE /trns_trips/:id/waitlist/:wl_id — leave the waiting list (soft delete)
 // ============================================================
-bookingPortalRouter.delete('/trips/:id/waitlist/:wl_id', requireRole(['CUSTOMER', 'STAFF', 'TENANT_ADMIN', 'SUPER_ADMIN']), async (c) => {
+bookingPortalRouter.delete('/trns_trips/:id/waitlist/:wl_id', requireRole(['CUSTOMER', 'STAFF', 'TENANT_ADMIN', 'SUPER_ADMIN']), async (c) => {
   const { id: trip_id, wl_id } = c.req.param() as { id: string; wl_id: string };
   const db = c.env.DB;
   const now = Date.now();
   try {
     const entry = await db.prepare(
-      `SELECT id FROM waiting_list WHERE id = ? AND trip_id = ? AND deleted_at IS NULL`
+      `SELECT id FROM trns_waiting_list WHERE id = ? AND trip_id = ? AND deleted_at IS NULL`
     ).bind(wl_id, trip_id).first();
     if (!entry) return c.json({ success: false, error: 'Waitlist entry not found' }, 404);
-    await db.prepare(`UPDATE waiting_list SET deleted_at = ? WHERE id = ?`).bind(now, wl_id).run();
+    await db.prepare(`UPDATE trns_waiting_list SET deleted_at = ? WHERE id = ?`).bind(now, wl_id).run();
     return c.json({ success: true, data: { id: wl_id, removed: true } });
   } catch {
     return c.json({ success: false, error: 'Failed to remove waitlist entry' }, 500);
   }
 });
 
-// NOTE: POST /group-bookings and GET /group-bookings/:id live on the agent-sales router
-// at /api/agent-sales/group-bookings — they require sales_transaction + receipt creation.
+// NOTE: POST /group-trns_bookings and GET /group-trns_bookings/:id live on the agent-sales router
+// at /api/agent-sales/group-trns_bookings — they require sales_transaction + receipt creation.
 
 // ============================================================
-// P08-T5: PATCH /group-bookings/:id/cancel — cancel group booking (STAFF+)
+// P08-T5: PATCH /group-trns_bookings/:id/cancel — cancel group booking (STAFF+)
 // ============================================================
-bookingPortalRouter.patch('/group-bookings/:id/cancel', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
+bookingPortalRouter.patch('/group-trns_bookings/:id/cancel', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
   const id = c.req.param('id');
   const db = c.env.DB;
   const now = Date.now();
@@ -890,8 +890,8 @@ bookingPortalRouter.patch('/group-bookings/:id/cancel', requireRole(['SUPER_ADMI
       `SELECT gb.booking_id, gb.trip_id, b.status, b.seat_ids, b.total_amount, b.payment_status,
               b.payment_method, b.payment_reference, t.departure_time, t.operator_id
        FROM group_bookings gb
-       JOIN bookings b ON gb.booking_id = b.id
-       JOIN trips t ON gb.trip_id = t.id
+       JOIN trns_bookings b ON gb.booking_id = b.id
+       JOIN trns_trips t ON gb.trip_id = t.id
        WHERE gb.id = ?`
     ).bind(id).first<{
       booking_id: string; trip_id: string; status: string; seat_ids: string; total_amount: number;
@@ -922,10 +922,10 @@ bookingPortalRouter.patch('/group-bookings/:id/cancel', requireRole(['SUPER_ADMI
     const seatIds = JSON.parse(group.seat_ids) as string[];
     await db.batch([
       db.prepare(
-        `UPDATE bookings SET status = 'cancelled', cancelled_at = ?, refund_amount_kobo = ?, refund_reference = ?, manual_refund_required = ? WHERE id = ?`
+        `UPDATE trns_bookings SET status = 'cancelled', cancelled_at = ?, refund_amount_kobo = ?, refund_reference = ?, manual_refund_required = ? WHERE id = ?`
       ).bind(now, refund_amount_kobo, refund_reference, manual_refund_required, group.booking_id),
       ...seatIds.map(seatId =>
-        db.prepare(`UPDATE seats SET status = 'available', confirmed_by = NULL, updated_at = ? WHERE id = ?`).bind(now, seatId)
+        db.prepare(`UPDATE trns_seats SET status = 'available', confirmed_by = NULL, updated_at = ? WHERE id = ?`).bind(now, seatId)
       ),
     ]);
 
@@ -938,14 +938,14 @@ bookingPortalRouter.patch('/group-bookings/:id/cancel', requireRole(['SUPER_ADMI
 });
 
 // ============================================================
-// C-007: POST /trips/ai-search — AI Natural Language Trip Search
+// C-007: POST /trns_trips/ai-search — AI Natural Language Trip Search
 // Accepts a freeform query like "Lagos to Abuja tomorrow morning cheap"
 // Extracts structured search params via OpenRouter, then runs standard search.
 // Falls back to empty results (not 500) if AI is unavailable.
 // Rate limit: 5 requests/minute/IP via SESSIONS_KV
 // ============================================================
 
-bookingPortalRouter.post('/trips/ai-search', requireTierFeature('ai_search'), async (c) => {
+bookingPortalRouter.post('/trns_trips/ai-search', requireTierFeature('ai_search'), async (c) => {
   let body: Record<string, unknown>;
   try {
     body = await c.req.json<Record<string, unknown>>();
@@ -1003,10 +1003,10 @@ bookingPortalRouter.post('/trips/ai-search', requireTierFeature('ai_search'), as
   let searchQuery = `SELECT t.id, t.departure_time, t.state, r.origin, r.destination, r.base_fare,
     o.name as operator_name,
     COUNT(CASE WHEN s.status = 'available' THEN 1 END) as available_seats
-    FROM trips t
-    JOIN routes r ON t.route_id = r.id
-    JOIN operators o ON t.operator_id = o.id
-    LEFT JOIN seats s ON s.trip_id = t.id
+    FROM trns_trips t
+    JOIN trns_routes r ON t.route_id = r.id
+    JOIN trns_operators o ON t.operator_id = o.id
+    LEFT JOIN trns_seats s ON s.trip_id = t.id
     WHERE t.deleted_at IS NULL AND t.state IN ('scheduled', 'boarding')
       AND r.deleted_at IS NULL`;
   const params: unknown[] = [];
@@ -1035,9 +1035,9 @@ bookingPortalRouter.post('/trips/ai-search', requireTierFeature('ai_search'), as
 });
 
 // ============================================================
-// GET /bookings/:id — booking detail
+// GET /trns_bookings/:id — booking detail
 // ============================================================
-bookingPortalRouter.get('/bookings/:id', async (c) => {
+bookingPortalRouter.get('/trns_bookings/:id', async (c) => {
   const id = c.req.param('id');
   const db = c.env.DB;
   try {
@@ -1045,10 +1045,10 @@ bookingPortalRouter.get('/bookings/:id', async (c) => {
       `SELECT b.*, r.origin, r.destination,
               t.departure_time, t.current_latitude, t.current_longitude, t.location_updated_at,
               o.name as operator_name
-       FROM bookings b
-       JOIN trips t ON b.trip_id = t.id
-       JOIN routes r ON t.route_id = r.id
-       JOIN operators o ON t.operator_id = o.id
+       FROM trns_bookings b
+       JOIN trns_trips t ON b.trip_id = t.id
+       JOIN trns_routes r ON t.route_id = r.id
+       JOIN trns_operators o ON t.operator_id = o.id
        WHERE b.id = ?`
     ).bind(id).first();
     if (!booking) return c.json({ success: false, error: 'Booking not found' }, 404);
@@ -1060,7 +1060,7 @@ bookingPortalRouter.get('/bookings/:id', async (c) => {
 
 // ============================================================
 // P03-T6: Guest Booking — public phone verification endpoints
-// These routes are mounted BEFORE jwtAuthMiddleware in worker.ts
+// These trns_routes are mounted BEFORE jwtAuthMiddleware in worker.ts
 // ============================================================
 
 export const publicBookingRouter = new Hono<AppContext>();
@@ -1187,7 +1187,7 @@ bookingPortalRouter.post('/corporate-accounts', requireRole(['SUPER_ADMIN', 'TEN
 
   try {
     await db.prepare(
-      `INSERT INTO customers (id, name, phone, email, company_name, contact_email, customer_type, credit_limit_kobo, ndpr_consent, status, created_at, updated_at)
+      `INSERT INTO trns_customers (id, name, phone, email, company_name, contact_email, customer_type, credit_limit_kobo, ndpr_consent, status, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, 'corporate', ?, 1, 'active', ?, ?)`
     ).bind(id, contact_name, contact_phone, contact_email ?? null, company_name, contact_email ?? null, credit_limit_kobo, now, now).run();
 
@@ -1209,7 +1209,7 @@ bookingPortalRouter.get('/corporate-accounts', requireRole(['SUPER_ADMIN', 'TENA
   try {
     const result = await db.prepare(
       `SELECT id, name, phone, email, company_name, credit_limit_kobo, status, created_at
-       FROM customers WHERE customer_type = 'corporate' AND deleted_at IS NULL
+       FROM trns_customers WHERE customer_type = 'corporate' AND deleted_at IS NULL
        ORDER BY company_name ASC LIMIT ? OFFSET ?`
     ).bind(limit, offset).all<{ id: string; name: string; phone: string; email: string | null; company_name: string | null; credit_limit_kobo: number; status: string; created_at: number }>();
 
@@ -1227,19 +1227,19 @@ bookingPortalRouter.get('/corporate-accounts/:id/statement', requireRole(['SUPER
 
   try {
     const customer = await db.prepare(
-      `SELECT id, name, company_name, credit_limit_kobo FROM customers
+      `SELECT id, name, company_name, credit_limit_kobo FROM trns_customers
        WHERE id = ? AND customer_type = 'corporate' AND deleted_at IS NULL`
     ).bind(customerId).first<{ id: string; name: string; company_name: string | null; credit_limit_kobo: number }>();
 
     if (!customer) return c.json({ success: false, error: 'Corporate account not found' }, 404);
 
-    // All bookings for this customer with trip summary
+    // All trns_bookings for this customer with trip summary
     const bookingsRes = await db.prepare(
       `SELECT b.id as booking_id, b.total_amount, b.created_at, b.seat_ids,
               r.origin, r.destination, t.departure_time, b.payment_method
-       FROM bookings b
-       JOIN trips t ON b.trip_id = t.id
-       JOIN routes r ON t.route_id = r.id
+       FROM trns_bookings b
+       JOIN trns_trips t ON b.trip_id = t.id
+       JOIN trns_routes r ON t.route_id = r.id
        WHERE b.customer_id = ? AND b.deleted_at IS NULL
        ORDER BY b.created_at DESC LIMIT 100`
     ).bind(customerId).all<{
@@ -1250,7 +1250,7 @@ bookingPortalRouter.get('/corporate-accounts/:id/statement', requireRole(['SUPER
     // Monthly spend
     const monthlyRes = await db.prepare(
       `SELECT COALESCE(SUM(total_amount), 0) as total_spent_this_month
-       FROM bookings WHERE customer_id = ? AND created_at >= ? AND created_at <= ? AND deleted_at IS NULL`
+       FROM trns_bookings WHERE customer_id = ? AND created_at >= ? AND created_at <= ? AND deleted_at IS NULL`
     ).bind(customerId, monthStart, now).first<{ total_spent_this_month: number }>();
 
     return c.json({
@@ -1260,7 +1260,7 @@ bookingPortalRouter.get('/corporate-accounts/:id/statement', requireRole(['SUPER
         company_name: customer.company_name,
         remaining_credit_kobo: customer.credit_limit_kobo,
         total_spent_kobo_this_month: monthlyRes?.total_spent_this_month ?? 0,
-        bookings: bookingsRes.results.map(b => ({
+        trns_bookings: bookingsRes.results.map(b => ({
           booking_id: b.booking_id,
           origin: b.origin,
           destination: b.destination,
@@ -1282,7 +1282,7 @@ bookingPortalRouter.get('/corporate-accounts/:id/statement', requireRole(['SUPER
 // Auth: CUSTOMER phone must match booking's customer phone
 // Constraint: trip must be completed; one review per booking
 // ============================================================
-bookingPortalRouter.post('/reviews', requireRole(['CUSTOMER', 'STAFF', 'TENANT_ADMIN', 'SUPER_ADMIN']), requireTierFeature('operator_reviews'), async (c) => {
+bookingPortalRouter.post('/reviews', requireRole(['CUSTOMER', 'STAFF', 'TENANT_ADMIN', 'SUPER_ADMIN']), requireTierFeature('trns_operator_reviews'), async (c) => {
   const body = await c.req.json() as Record<string, unknown>;
   const err = requireFields(body, ['booking_id', 'rating']);
   if (err) return c.json({ success: false, error: err }, 400);
@@ -1302,9 +1302,9 @@ bookingPortalRouter.post('/reviews', requireRole(['CUSTOMER', 'STAFF', 'TENANT_A
     const booking = await db.prepare(
       `SELECT b.id, b.status, b.customer_id, t.state as trip_state, t.operator_id,
               c.phone as customer_phone
-       FROM bookings b
-       JOIN trips t ON b.trip_id = t.id
-       JOIN customers c ON c.id = b.customer_id
+       FROM trns_bookings b
+       JOIN trns_trips t ON b.trip_id = t.id
+       JOIN trns_customers c ON c.id = b.customer_id
        WHERE b.id = ? AND b.deleted_at IS NULL`
     ).bind(booking_id).first<{
       id: string; status: string; customer_id: string; trip_state: string;
@@ -1322,7 +1322,7 @@ bookingPortalRouter.post('/reviews', requireRole(['CUSTOMER', 'STAFF', 'TENANT_A
     }
 
     if (!['confirmed', 'completed'].includes(booking.status)) {
-      return c.json({ success: false, error: 'Only confirmed or completed bookings can be reviewed' }, 422);
+      return c.json({ success: false, error: 'Only confirmed or completed trns_bookings can be reviewed' }, 422);
     }
 
     if (booking.trip_state !== 'completed') {
@@ -1331,7 +1331,7 @@ bookingPortalRouter.post('/reviews', requireRole(['CUSTOMER', 'STAFF', 'TENANT_A
 
     // One review per booking
     const existing = await db.prepare(
-      `SELECT id FROM operator_reviews WHERE booking_id = ? AND deleted_at IS NULL`
+      `SELECT id FROM trns_operator_reviews WHERE booking_id = ? AND deleted_at IS NULL`
     ).bind(booking_id).first<{ id: string }>();
 
     if (existing) {
@@ -1340,7 +1340,7 @@ bookingPortalRouter.post('/reviews', requireRole(['CUSTOMER', 'STAFF', 'TENANT_A
 
     const reviewId = genId('rev_');
     await db.prepare(
-      `INSERT INTO operator_reviews (id, operator_id, booking_id, customer_id, rating, review_text, created_at)
+      `INSERT INTO trns_operator_reviews (id, operator_id, booking_id, customer_id, rating, review_text, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`
     ).bind(reviewId, booking.operator_id, booking_id, booking.customer_id, ratingNum, review_text ?? null, now).run();
 
@@ -1362,10 +1362,10 @@ bookingPortalRouter.post('/reviews', requireRole(['CUSTOMER', 'STAFF', 'TENANT_A
 });
 
 // ============================================================
-// P13-T2: GET /operators/:id/reviews — list reviews for an operator (public)
+// P13-T2: GET /trns_operators/:id/reviews — list reviews for an operator (public)
 // Returns paginated reviews with avg_rating summary
 // ============================================================
-bookingPortalRouter.get('/operators/:id/reviews', async (c) => {
+bookingPortalRouter.get('/trns_operators/:id/reviews', async (c) => {
   const operatorId = c.req.param('id');
   const db = c.env.DB;
   const { limit: lim, offset: off } = parsePagination(c.req.query());
@@ -1374,7 +1374,7 @@ bookingPortalRouter.get('/operators/:id/reviews', async (c) => {
     const [reviewsRes, summaryRes] = await Promise.all([
       db.prepare(
         `SELECT r.id, r.rating, r.review_text, r.created_at
-         FROM operator_reviews r
+         FROM trns_operator_reviews r
          WHERE r.operator_id = ? AND r.deleted_at IS NULL
          ORDER BY r.created_at DESC
          LIMIT ? OFFSET ?`
@@ -1383,7 +1383,7 @@ bookingPortalRouter.get('/operators/:id/reviews', async (c) => {
       }>(),
       db.prepare(
         `SELECT COUNT(id) as total_reviews, ROUND(AVG(CAST(rating AS REAL)), 1) as avg_rating
-         FROM operator_reviews
+         FROM trns_operator_reviews
          WHERE operator_id = ? AND deleted_at IS NULL`
       ).bind(operatorId).first<{ total_reviews: number; avg_rating: number | null }>(),
     ]);

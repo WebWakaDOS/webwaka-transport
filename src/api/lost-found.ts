@@ -1,7 +1,7 @@
 /**
  * WebWaka Transport — Lost & Found Portal API
  *
- * Allows passengers, drivers, and staff to:
+ * Allows passengers, trns_drivers, and staff to:
  *   - Report lost or found items
  *   - Search the lost & found registry
  *   - Claim items with verification
@@ -45,7 +45,7 @@ lostFoundRouter.post('/', async (c) => {
   const itemId = `lf_${nanoid()}`;
 
   await c.env.DB.prepare(`
-    INSERT INTO lost_found_items
+    INSERT INTO trns_lost_found_items
       (id, operator_id, reporter_type, reporter_id, reporter_name, reporter_phone,
        trip_id, vehicle_id, item_description, item_category, found_at,
        storage_location, photos, status, notes, created_at, updated_at)
@@ -81,7 +81,7 @@ lostFoundRouter.get('/', async (c) => {
   const search = c.req.query('search');
   const limit = Math.min(Number(c.req.query('limit') ?? 20), 100);
 
-  let query = `SELECT * FROM lost_found_items WHERE 1=1`;
+  let query = `SELECT * FROM trns_lost_found_items WHERE 1=1`;
   const bindings: unknown[] = [];
 
   if (operatorId) { query += ' AND operator_id = ?'; bindings.push(operatorId); }
@@ -106,9 +106,9 @@ lostFoundRouter.get('/:id', async (c) => {
   const item = await c.env.DB
     .prepare(`
       SELECT lf.*, t.route_id, v.plate_number
-      FROM lost_found_items lf
-      LEFT JOIN trips t ON lf.trip_id = t.id
-      LEFT JOIN vehicles v ON lf.vehicle_id = v.id
+      FROM trns_lost_found_items lf
+      LEFT JOIN trns_trips t ON lf.trip_id = t.id
+      LEFT JOIN trns_vehicles v ON lf.vehicle_id = v.id
       WHERE lf.id = ?
     `)
     .bind(id)
@@ -138,7 +138,7 @@ lostFoundRouter.patch('/:id/status', async (c) => {
 
   const now = Date.now();
   await c.env.DB.prepare(`
-    UPDATE lost_found_items SET
+    UPDATE trns_lost_found_items SET
       status = ?,
       storage_location = COALESCE(?, storage_location),
       notes = COALESCE(?, notes),
@@ -173,7 +173,7 @@ lostFoundRouter.post('/:id/claim', async (c) => {
   }>();
 
   const item = await c.env.DB
-    .prepare(`SELECT id, status, item_description FROM lost_found_items WHERE id = ?`)
+    .prepare(`SELECT id, status, item_description FROM trns_lost_found_items WHERE id = ?`)
     .bind(id)
     .first<{ id: string; status: string; item_description: string }>();
 
@@ -185,7 +185,7 @@ lostFoundRouter.post('/:id/claim', async (c) => {
 
   const now = Date.now();
   await c.env.DB.prepare(`
-    UPDATE lost_found_items SET
+    UPDATE trns_lost_found_items SET
       status = 'claimed',
       claimant_name = ?, claimant_phone = ?,
       claimed_at = ?, updated_at = ?

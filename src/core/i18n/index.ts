@@ -29,7 +29,7 @@ const translations: Record<Language, Record<string, string>> = {
     arrives: 'Arrives',
     fare: 'Fare',
     book_now: 'Book Now',
-    no_trips_found: 'No trips found',
+    no_trips_found: 'No trns_trips found',
     sold_out: 'Sold Out',
     // Seat selection
     select_seats: 'Select Seats',

@@ -1,10 +1,10 @@
 -- WebWaka Transport Suite - Migration 006
--- Adds drivers table for operator-managed driver profiles
--- driver_id already exists as a nullable FK column in trips (001_transport_schema.sql)
+-- Adds trns_drivers table for operator-managed driver profiles
+-- driver_id already exists as a nullable FK column in trns_trips (001_transport_schema.sql)
 
-CREATE TABLE IF NOT EXISTS drivers (
+CREATE TABLE IF NOT EXISTS trns_drivers (
   id TEXT PRIMARY KEY,
-  operator_id TEXT NOT NULL REFERENCES operators(id),
+  operator_id TEXT NOT NULL REFERENCES trns_operators(id),
   name TEXT NOT NULL,
   phone TEXT NOT NULL,
   license_number TEXT,
@@ -14,5 +14,5 @@ CREATE TABLE IF NOT EXISTS drivers (
   deleted_at INTEGER
 );
 
-CREATE INDEX IF NOT EXISTS idx_drivers_operator ON drivers(operator_id);
-CREATE INDEX IF NOT EXISTS idx_drivers_status ON drivers(status);
+CREATE INDEX IF NOT EXISTS idx_drivers_operator ON trns_drivers(operator_id);
+CREATE INDEX IF NOT EXISTS idx_drivers_status ON trns_drivers(status);

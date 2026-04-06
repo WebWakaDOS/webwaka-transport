@@ -267,7 +267,7 @@ describe('TRN-4: Operator Management - Trip State Machine', () => {
       expect(trip).toBeNull();
     });
 
-    it('should get operator trips', () => {
+    it('should get operator trns_trips', () => {
       const trip2Id = 'trip_002';
       stateMachine.createTrip(
         trip2Id,
@@ -279,12 +279,12 @@ describe('TRN-4: Operator Management - Trip State Machine', () => {
         tripData.estimatedArrivalTime
       );
 
-      const trips = stateMachine.getOperatorTrips(tripData.operatorId);
+      const trns_trips = stateMachine.getOperatorTrips(tripData.operatorId);
 
-      expect(trips.length).toBe(2);
+      expect(trns_trips.length).toBe(2);
     });
 
-    it('should filter operator trips by state', () => {
+    it('should filter operator trns_trips by state', () => {
       const trip2Id = 'trip_002';
       stateMachine.createTrip(
         trip2Id,
@@ -314,7 +314,7 @@ describe('TRN-4: Operator Management - Trip State Machine', () => {
 
   describe('Operator Statistics', () => {
     beforeEach(() => {
-      // Create multiple trips in different states
+      // Create multiple trns_trips in different states
       stateMachine.createTrip(
         'trip_001',
         tripData.operatorId,
@@ -345,7 +345,7 @@ describe('TRN-4: Operator Management - Trip State Machine', () => {
         tripData.estimatedArrivalTime
       );
 
-      // Transition trips to different states
+      // Transition trns_trips to different states
       stateMachine.startBoarding('trip_001');
       stateMachine.startBoarding('trip_002');
       stateMachine.startTrip('trip_002');

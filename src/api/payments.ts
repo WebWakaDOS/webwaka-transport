@@ -1,7 +1,7 @@
 /**
  * TRN-3 / T-TRN-04: Paystack + Flutterwave Payment Integration
  * Invariants: Nigeria-First (Paystack Inline), Offline-First (dev-mode auto-confirm), NDPR,
- *             Event-Driven (payment.successful → platform_events outbox)
+ *             Event-Driven (payment.successful → trns_platform_events outbox)
  *
  * Routes (mounted at /api/payments — before requireTenantMiddleware):
  *   POST /api/payments/initiate              — create Paystack transaction; returns access_code for Inline popup
@@ -46,7 +46,7 @@ type DbBookingPayment = {
   payment_provider: string | null;
 };
 
-/** Confirm a booking + seats atomically via db.batch(). Called after payment verified.
+/** Confirm a booking + trns_seats atomically via db.batch(). Called after payment verified.
  *  Emits payment.successful to the platform event bus (non-fatal on failure). */
 async function confirmBookingById(
   db: D1Database,
@@ -58,7 +58,7 @@ async function confirmBookingById(
   const seatIds = JSON.parse(booking.seat_ids) as string[];
   await db.batch([
     db.prepare(
-      `UPDATE bookings
+      `UPDATE trns_bookings
        SET status = ?,
            payment_status = ?,
            payment_reference = ?,
@@ -69,7 +69,7 @@ async function confirmBookingById(
     ).bind('confirmed', 'completed', reference, provider, now, now, booking.id),
     ...seatIds.map(seatId =>
       db.prepare(
-        `UPDATE seats SET status = ?, confirmed_at = ?, updated_at = ? WHERE id = ?`
+        `UPDATE trns_seats SET status = ?, confirmed_at = ?, updated_at = ? WHERE id = ?`
       ).bind('confirmed', now, now, seatId)
     ),
   ]);
@@ -110,7 +110,7 @@ paymentsRouter.post('/initiate', async (c) => {
 
   const booking = await db.prepare(
     `SELECT id, status, total_amount, seat_ids, payment_reference, payment_provider
-     FROM bookings WHERE id = ? AND deleted_at IS NULL`
+     FROM trns_bookings WHERE id = ? AND deleted_at IS NULL`
   ).bind(booking_id).first<DbBookingPayment>();
 
   if (!booking) return c.json({ success: false, error: 'Booking not found' }, 404);
@@ -173,7 +173,7 @@ paymentsRouter.post('/initiate', async (c) => {
   }
 
   await db.prepare(
-    `UPDATE bookings SET payment_reference = ?, payment_provider = 'paystack', updated_at = ? WHERE id = ?`
+    `UPDATE trns_bookings SET payment_reference = ?, payment_provider = 'paystack', updated_at = ? WHERE id = ?`
   ).bind(psData.data.reference, Date.now(), booking.id).run();
 
   return c.json({
@@ -210,13 +210,13 @@ paymentsRouter.post('/verify', async (c) => {
   if (booking_id) {
     booking = await db.prepare(
       `SELECT id, status, total_amount, seat_ids, payment_reference, payment_provider
-       FROM bookings WHERE id = ? AND deleted_at IS NULL LIMIT 1`
+       FROM trns_bookings WHERE id = ? AND deleted_at IS NULL LIMIT 1`
     ).bind(booking_id).first<DbBookingPayment>();
   }
   if (!booking && reference) {
     booking = await db.prepare(
       `SELECT id, status, total_amount, seat_ids, payment_reference, payment_provider
-       FROM bookings WHERE payment_reference = ? AND deleted_at IS NULL LIMIT 1`
+       FROM trns_bookings WHERE payment_reference = ? AND deleted_at IS NULL LIMIT 1`
     ).bind(reference).first<DbBookingPayment>();
   }
 
@@ -280,7 +280,7 @@ paymentsRouter.post('/verify', async (c) => {
     try {
       const evtId = `evt_fraud_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       await db.prepare(
-        `INSERT OR IGNORE INTO platform_events
+        `INSERT OR IGNORE INTO trns_platform_events
          (id, event_type, aggregate_id, aggregate_type, payload, status, created_at)
          VALUES (?, 'payment:AMOUNT_MISMATCH', ?, 'booking', ?, 'pending', ?)`
       ).bind(
@@ -330,7 +330,7 @@ paymentsRouter.post('/flutterwave/initiate', async (c) => {
   const db = c.env.DB;
   const booking = await db.prepare(
     `SELECT id, status, total_amount, seat_ids, payment_reference, payment_provider
-     FROM bookings WHERE id = ? AND deleted_at IS NULL`
+     FROM trns_bookings WHERE id = ? AND deleted_at IS NULL`
   ).bind(booking_id).first<DbBookingPayment>();
 
   if (!booking) return c.json({ success: false, error: 'Booking not found' }, 404);
@@ -395,7 +395,7 @@ paymentsRouter.post('/flutterwave/initiate', async (c) => {
   }
 
   await db.prepare(
-    `UPDATE bookings SET payment_reference = ?, payment_provider = 'flutterwave', updated_at = ? WHERE id = ?`
+    `UPDATE trns_bookings SET payment_reference = ?, payment_provider = 'flutterwave', updated_at = ? WHERE id = ?`
   ).bind(tx_ref, Date.now(), booking.id).run();
 
   return c.json({
@@ -425,13 +425,13 @@ paymentsRouter.post('/flutterwave/verify', async (c) => {
   if (booking_id) {
     booking = await db.prepare(
       `SELECT id, status, total_amount, seat_ids, payment_reference, payment_provider
-       FROM bookings WHERE id = ? AND deleted_at IS NULL LIMIT 1`
+       FROM trns_bookings WHERE id = ? AND deleted_at IS NULL LIMIT 1`
     ).bind(booking_id).first<DbBookingPayment>();
   }
   if (!booking && tx_ref) {
     booking = await db.prepare(
       `SELECT id, status, total_amount, seat_ids, payment_reference, payment_provider
-       FROM bookings WHERE payment_reference = ? AND deleted_at IS NULL LIMIT 1`
+       FROM trns_bookings WHERE payment_reference = ? AND deleted_at IS NULL LIMIT 1`
     ).bind(tx_ref).first<DbBookingPayment>();
   }
 
@@ -505,7 +505,7 @@ paymentsRouter.post('/flutterwave/verify', async (c) => {
     try {
       const evtId = `evt_fw_fraud_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       await db.prepare(
-        `INSERT OR IGNORE INTO platform_events
+        `INSERT OR IGNORE INTO trns_platform_events
          (id, event_type, aggregate_id, aggregate_type, payload, status, created_at)
          VALUES (?, 'payment:AMOUNT_MISMATCH', ?, 'booking', ?, 'pending', ?)`
       ).bind(
@@ -574,7 +574,7 @@ webhooksRouter.post('/paystack', async (c) => {
 
       const booking = await db.prepare(
         `SELECT id, status, total_amount, seat_ids, payment_reference, payment_provider
-         FROM bookings
+         FROM trns_bookings
          WHERE (payment_reference = ? OR id = ?) AND deleted_at IS NULL LIMIT 1`
       ).bind(reference, reference).first<DbBookingPayment>();
 
@@ -618,7 +618,7 @@ webhooksRouter.post('/flutterwave', async (c) => {
 
       const booking = await db.prepare(
         `SELECT id, status, total_amount, seat_ids, payment_reference, payment_provider
-         FROM bookings
+         FROM trns_bookings
          WHERE (payment_reference = ? OR id = ?) AND deleted_at IS NULL LIMIT 1`
       ).bind(tx_ref, tx_ref).first<DbBookingPayment>();
 

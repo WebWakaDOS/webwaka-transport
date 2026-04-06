@@ -23,7 +23,7 @@ import type { AiEnv } from '../../lib/ai';
 // ── computeDemandSurge ────────────────────────────────────────────────────────
 
 describe('computeDemandSurge', () => {
-  it('returns 1.0 when riders equal drivers (ratio = 1.0)', () => {
+  it('returns 1.0 when riders equal trns_drivers (ratio = 1.0)', () => {
     expect(computeDemandSurge(5, 5)).toBe(1.0);
   });
 
@@ -47,12 +47,12 @@ describe('computeDemandSurge', () => {
     expect(computeDemandSurge(15, 5)).toBe(2.5); // ratio = 3.0
   });
 
-  it('applies maximum surge when 0 drivers available but riders present', () => {
+  it('applies maximum surge when 0 trns_drivers available but riders present', () => {
     const result = computeDemandSurge(10, 0);
     expect(result).toBe(3.5); // maxMultiplier
   });
 
-  it('returns 1.0 when both riders and drivers are 0', () => {
+  it('returns 1.0 when both riders and trns_drivers are 0', () => {
     const result = computeDemandSurge(0, 0);
     expect(result).toBe(1.0);
   });
@@ -93,8 +93,8 @@ function makeSurgeDb(riderCount: number, driverCount: number): SurgeDb {
     prepare: (q: string) => ({
       bind: (..._args: unknown[]) => ({
         first: async <T>() => {
-          if (q.includes('ride_requests')) return { cnt: riderCount } as T;
-          if (q.includes('active_drivers')) return { cnt: driverCount } as T;
+          if (q.includes('trns_ride_requests')) return { cnt: riderCount } as T;
+          if (q.includes('trns_active_drivers')) return { cnt: driverCount } as T;
           return null;
         },
         run: async () => undefined,

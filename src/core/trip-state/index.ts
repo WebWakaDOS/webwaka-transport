@@ -36,7 +36,7 @@ export interface StateTransitionResult {
 }
 
 export class TripStateMachine {
-  private trips: Map<string, Trip> = new Map();
+  private trns_trips: Map<string, Trip> = new Map();
   private eventCallbacks: Map<string, Function[]> = new Map();
 
   // Valid state transitions
@@ -79,7 +79,7 @@ export class TripStateMachine {
       createdAt: new Date()
     };
 
-    this.trips.set(tripId, trip);
+    this.trns_trips.set(tripId, trip);
     this.emit('trip.created', trip);
 
     return trip;
@@ -96,7 +96,7 @@ export class TripStateMachine {
    * Transitions a trip to in_transit state.
    */
   startTrip(tripId: string, currentLocation?: { latitude: number; longitude: number }): StateTransitionResult {
-    const trip = this.trips.get(tripId);
+    const trip = this.trns_trips.get(tripId);
     if (!trip) {
       return { success: false, error: 'Trip not found' };
     }
@@ -115,7 +115,7 @@ export class TripStateMachine {
    * Transitions a trip to completed state.
    */
   completeTrip(tripId: string, finalLocation?: { latitude: number; longitude: number }): StateTransitionResult {
-    const trip = this.trips.get(tripId);
+    const trip = this.trns_trips.get(tripId);
     if (!trip) {
       return { success: false, error: 'Trip not found' };
     }
@@ -135,7 +135,7 @@ export class TripStateMachine {
    * Cancels a trip.
    */
   cancelTrip(tripId: string, reason: string): StateTransitionResult {
-    const trip = this.trips.get(tripId);
+    const trip = this.trns_trips.get(tripId);
     if (!trip) {
       return { success: false, error: 'Trip not found' };
     }
@@ -159,13 +159,13 @@ export class TripStateMachine {
     latitude: number,
     longitude: number
   ): StateTransitionResult {
-    const trip = this.trips.get(tripId);
+    const trip = this.trns_trips.get(tripId);
     if (!trip) {
       return { success: false, error: 'Trip not found' };
     }
 
     if (trip.state !== 'in_transit') {
-      return { success: false, error: 'Can only update location for in-transit trips' };
+      return { success: false, error: 'Can only update location for in-transit trns_trips' };
     }
 
     trip.currentLocation = { latitude, longitude };
@@ -178,14 +178,14 @@ export class TripStateMachine {
    * Gets a trip by ID.
    */
   getTrip(tripId: string): Trip | null {
-    return this.trips.get(tripId) || null;
+    return this.trns_trips.get(tripId) || null;
   }
 
   /**
-   * Gets all trips for an operator.
+   * Gets all trns_trips for an operator.
    */
   getOperatorTrips(operatorId: string, state?: TripState): Trip[] {
-    return Array.from(this.trips.values()).filter(
+    return Array.from(this.trns_trips.values()).filter(
       trip =>
         trip.operatorId === operatorId &&
         (!state || trip.state === state)
@@ -203,15 +203,15 @@ export class TripStateMachine {
     completedTrips: number;
     cancelledTrips: number;
   } {
-    const trips = this.getOperatorTrips(operatorId);
+    const trns_trips = this.getOperatorTrips(operatorId);
 
     return {
-      totalTrips: trips.length,
-      scheduledTrips: trips.filter(t => t.state === 'scheduled').length,
-      boardingTrips: trips.filter(t => t.state === 'boarding').length,
-      inTransitTrips: trips.filter(t => t.state === 'in_transit').length,
-      completedTrips: trips.filter(t => t.state === 'completed').length,
-      cancelledTrips: trips.filter(t => t.state === 'cancelled').length
+      totalTrips: trns_trips.length,
+      scheduledTrips: trns_trips.filter(t => t.state === 'scheduled').length,
+      boardingTrips: trns_trips.filter(t => t.state === 'boarding').length,
+      inTransitTrips: trns_trips.filter(t => t.state === 'in_transit').length,
+      completedTrips: trns_trips.filter(t => t.state === 'completed').length,
+      cancelledTrips: trns_trips.filter(t => t.state === 'cancelled').length
     };
   }
 
@@ -219,7 +219,7 @@ export class TripStateMachine {
    * Gets trip history (state transitions).
    */
   getTripHistory(tripId: string): TripStateTransition[] {
-    const trip = this.trips.get(tripId);
+    const trip = this.trns_trips.get(tripId);
     return trip ? trip.transitions : [];
   }
 
@@ -239,7 +239,7 @@ export class TripStateMachine {
     newState: TripState,
     reason?: string
   ): StateTransitionResult {
-    const trip = this.trips.get(tripId);
+    const trip = this.trns_trips.get(tripId);
     if (!trip) {
       return { success: false, error: 'Trip not found' };
     }

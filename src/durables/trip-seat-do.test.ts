@@ -6,14 +6,14 @@
  * Cloudflare runtime — all tests run in Vitest (Node).
  *
  * Key invariants verified:
- *   1. /reserve-seats rejects seats already held in memory (concurrent conflict)
- *   2. /reserve-seats accepts all seats if none are held
- *   3. /reserve-seats writes through to D1 and updates in-memory state
- *   4. /release-seats removes seats from in-memory held map
+ *   1. /reserve-trns_seats rejects trns_seats already held in memory (concurrent conflict)
+ *   2. /reserve-trns_seats accepts all trns_seats if none are held
+ *   3. /reserve-trns_seats writes through to D1 and updates in-memory state
+ *   4. /release-trns_seats removes trns_seats from in-memory held map
  *   5. Expired holds are swept before each reservation check
  *   6. Cold-start hydration loads active reservations from D1
  *   7. /broadcast fans out messages to connected WebSocket clients
- *   8. Unknown routes return 404
+ *   8. Unknown trns_routes return 404
  *
  * Bug-fix coverage (BUG-1 / BUG-2 / BUG-3):
  *   BUG-1: Background D1 ops use ctx.waitUntil() — mock executes them so
@@ -80,10 +80,10 @@ function createMockDB(initialSeats: Array<{
   reserved_by?: string | null;
   version?: number;
 }> = []) {
-  let seats = initialSeats.map(s => ({ version: 0, ...s }));
+  let trns_seats = initialSeats.map(s => ({ version: 0, ...s }));
 
   const db: any = {
-    _seats: seats,
+    _seats: trns_seats,
     prepare(sql: string) {
       const stmt = {
         _sql: sql,
@@ -93,10 +93,10 @@ function createMockDB(initialSeats: Array<{
           const sqlUp = this._sql.trim().toUpperCase();
           if (sqlUp.startsWith('UPDATE')) {
             const now = Date.now();
-            // Detect reserved seats update
+            // Detect reserved trns_seats update
             if (this._sql.includes("status = 'reserved'")) {
               const [userId, token, expiresAt, , seatId, tripId] = this._params;
-              const seat = seats.find((s: any) => s.id === seatId && s.trip_id === tripId && s.status === 'available') as any;
+              const seat = trns_seats.find((s: any) => s.id === seatId && s.trip_id === tripId && s.status === 'available') as any;
               if (seat) {
                 seat.status = 'reserved';
                 seat.reserved_by = userId;
@@ -111,7 +111,7 @@ function createMockDB(initialSeats: Array<{
             // Detect release update
             if (this._sql.includes("status = 'available'")) {
               const [, seatId, tripId, token] = this._params;
-              const seat = seats.find((s: any) => s.id === seatId && s.trip_id === tripId && s.reservation_token === token) as any;
+              const seat = trns_seats.find((s: any) => s.id === seatId && s.trip_id === tripId && s.reservation_token === token) as any;
               if (seat) {
                 seat.status = 'available';
                 seat.reserved_by = null;
@@ -132,7 +132,7 @@ function createMockDB(initialSeats: Array<{
           // Hydration query: trip_id = ?, status = 'reserved', reservation_expires_at > ?
           if (this._sql.includes("status = 'reserved'") && this._sql.includes('trip_id = ?')) {
             const [tripId, now] = this._params;
-            const results = seats.filter((s: any) =>
+            const results = trns_seats.filter((s: any) =>
               s.trip_id === tripId &&
               s.status === 'reserved' &&
               (s.reservation_expires_at ?? 0) > now
@@ -171,7 +171,7 @@ function makeDOWithCtx(db: any): { do_: TripSeatDO; ctx: MockCtx } {
   return { do_: new TripSeatDO(ctx, makeEnv(db)), ctx };
 }
 
-// ── Helper: POST /reserve-seats ──────────────────────────────────────────────
+// ── Helper: POST /reserve-trns_seats ──────────────────────────────────────────────
 async function reserveSeats(
   do_: TripSeatDO,
   opts: {
@@ -184,7 +184,7 @@ async function reserveSeats(
 ) {
   const seatIds = opts.seat_ids;
   const tokens: Record<string, string> = opts.tokens ?? Object.fromEntries(seatIds.map(id => [id, `tok_${id}`]));
-  return do_.fetch(new Request('https://do/reserve-seats', {
+  return do_.fetch(new Request('https://do/reserve-trns_seats', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -197,12 +197,12 @@ async function reserveSeats(
   }));
 }
 
-// ── Helper: POST /release-seats ───────────────────────────────────────────────
+// ── Helper: POST /release-trns_seats ───────────────────────────────────────────────
 async function releaseSeats(
   do_: TripSeatDO,
   opts: { seat_ids: string[]; tokens: Record<string, string>; trip_id?: string }
 ) {
-  return do_.fetch(new Request('https://do/release-seats', {
+  return do_.fetch(new Request('https://do/release-trns_seats', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -216,7 +216,7 @@ async function releaseSeats(
 // ============================================================
 // TripSeatDO Unit Tests
 // ============================================================
-describe('TripSeatDO: /reserve-seats', () => {
+describe('TripSeatDO: /reserve-trns_seats', () => {
   let db: any;
   let do_: TripSeatDO;
 
@@ -229,7 +229,7 @@ describe('TripSeatDO: /reserve-seats', () => {
     do_ = makeDO(db);
   });
 
-  it('reserves available seats and returns tokens', async () => {
+  it('reserves available trns_seats and returns tokens', async () => {
     const res = await reserveSeats(do_, { seat_ids: ['s1', 's2'] });
     expect(res.status).toBe(200);
     const body = await res.json() as any;
@@ -264,7 +264,7 @@ describe('TripSeatDO: /reserve-seats', () => {
     expect(body.conflicted_seats).toContain('s1');
   });
 
-  it('two sequential reservations for different seats both succeed', async () => {
+  it('two sequential reservations for different trns_seats both succeed', async () => {
     const res1 = await reserveSeats(do_, { seat_ids: ['s1'], tokens: { s1: 'tok_1a' } });
     const res2 = await reserveSeats(do_, { seat_ids: ['s2'], tokens: { s2: 'tok_2a' } });
     expect(res1.status).toBe(200);
@@ -298,7 +298,7 @@ describe('TripSeatDO: /reserve-seats', () => {
   });
 
   it('returns 400 when body is malformed JSON', async () => {
-    const res = await do_.fetch(new Request('https://do/reserve-seats', {
+    const res = await do_.fetch(new Request('https://do/reserve-trns_seats', {
       method: 'POST',
       body: 'not-json',
     }));
@@ -332,7 +332,7 @@ describe('TripSeatDO: /reserve-seats', () => {
   });
 
   it('BUG-2: returns 400 when tokens map is completely absent', async () => {
-    const res = await do_.fetch(new Request('https://do/reserve-seats', {
+    const res = await do_.fetch(new Request('https://do/reserve-trns_seats', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -394,7 +394,7 @@ describe('TripSeatDO: /reserve-seats', () => {
   });
 });
 
-describe('TripSeatDO: /release-seats', () => {
+describe('TripSeatDO: /release-trns_seats', () => {
   let db: any;
   let do_: TripSeatDO;
 
@@ -503,7 +503,7 @@ describe('TripSeatDO: /ws', () => {
   });
 });
 
-describe('TripSeatDO: unknown routes', () => {
+describe('TripSeatDO: unknown trns_routes', () => {
   it('returns 404 for unknown paths', async () => {
     const db = createMockDB([]);
     const do_ = makeDO(db);
@@ -511,10 +511,10 @@ describe('TripSeatDO: unknown routes', () => {
     expect(res.status).toBe(404);
   });
 
-  it('returns 404 for GET /reserve-seats (wrong method)', async () => {
+  it('returns 404 for GET /reserve-trns_seats (wrong method)', async () => {
     const db = createMockDB([]);
     const do_ = makeDO(db);
-    const res = await do_.fetch(new Request('https://do/reserve-seats', { method: 'GET' }));
+    const res = await do_.fetch(new Request('https://do/reserve-trns_seats', { method: 'GET' }));
     expect(res.status).toBe(404);
   });
 });

@@ -42,8 +42,8 @@ export interface BookingResult {
 }
 
 export class BookingManager {
-  private bookings: Map<string, Booking> = new Map();
-  private customers: Map<string, Customer> = new Map();
+  private trns_bookings: Map<string, Booking> = new Map();
+  private trns_customers: Map<string, Customer> = new Map();
   private seatInventory: SeatInventoryManager;
   private eventCallbacks: Map<string, Function[]> = new Map();
 
@@ -55,7 +55,7 @@ export class BookingManager {
    * Registers a customer.
    */
   registerCustomer(customer: Customer): void {
-    this.customers.set(customer.id, customer);
+    this.trns_customers.set(customer.id, customer);
     this.emit('customer.registered', customer);
   }
 
@@ -71,7 +71,7 @@ export class BookingManager {
     totalAmount: number,
     paymentMethod: 'paystack' | 'flutterwave' | 'bank_transfer'
   ): BookingResult {
-    const customer = this.customers.get(customerId);
+    const customer = this.trns_customers.get(customerId);
     if (!customer) {
       return { success: false, error: 'Customer not found' };
     }
@@ -88,7 +88,7 @@ export class BookingManager {
       return { success: false, error: 'Invalid amount' };
     }
 
-    // Attempt to reserve all seats via TRN-1
+    // Attempt to reserve all trns_seats via TRN-1
     const reservationTokens: string[] = [];
     for (const seatId of seatIds) {
       const trip = this.seatInventory.getTrip(tripId);
@@ -96,9 +96,9 @@ export class BookingManager {
         return { success: false, error: 'Trip not found' };
       }
 
-      const seat = trip.seats.find(s => s.id === seatId);
+      const seat = trip.trns_seats.find(s => s.id === seatId);
       if (!seat) {
-        // Release already reserved seats
+        // Release already reserved trns_seats
         for (const token of reservationTokens) {
           // In a real system, we'd have a way to release by token
         }
@@ -113,7 +113,7 @@ export class BookingManager {
       );
 
       if (!reservationResult.success) {
-        // Release already reserved seats
+        // Release already reserved trns_seats
         for (const token of reservationTokens) {
           // In a real system, we'd have a way to release by token
         }
@@ -137,7 +137,7 @@ export class BookingManager {
       createdAt: new Date()
     };
 
-    this.bookings.set(booking.id, booking);
+    this.trns_bookings.set(booking.id, booking);
 
     this.emit('booking.created', booking);
 
@@ -152,7 +152,7 @@ export class BookingManager {
    * Confirms a booking after payment is completed.
    */
   confirmBooking(bookingId: string, paymentReference: string): BookingResult {
-    const booking = this.bookings.get(bookingId);
+    const booking = this.trns_bookings.get(bookingId);
     if (!booking) {
       return { success: false, error: 'Booking not found' };
     }
@@ -161,14 +161,14 @@ export class BookingManager {
       return { success: false, error: `Booking is ${booking.status}` };
     }
 
-    // Confirm all seats via TRN-1
+    // Confirm all trns_seats via TRN-1
     const trip = this.seatInventory.getTrip(booking.tripId);
     if (!trip) {
       return { success: false, error: 'Trip not found' };
     }
 
     for (const seatId of booking.seatIds) {
-      const seat = trip.seats.find(s => s.id === seatId);
+      const seat = trip.trns_seats.find(s => s.id === seatId);
       if (seat && seat.reservationToken) {
         this.seatInventory.confirmSeat(
           booking.tripId,
@@ -190,10 +190,10 @@ export class BookingManager {
   }
 
   /**
-   * Cancels a booking and releases seats.
+   * Cancels a booking and releases trns_seats.
    */
   cancelBooking(bookingId: string, reason: string): BookingResult {
-    const booking = this.bookings.get(bookingId);
+    const booking = this.trns_bookings.get(bookingId);
     if (!booking) {
       return { success: false, error: 'Booking not found' };
     }
@@ -202,7 +202,7 @@ export class BookingManager {
       return { success: false, error: 'Booking is already cancelled' };
     }
 
-    // Release all seats via TRN-1
+    // Release all trns_seats via TRN-1
     for (const seatId of booking.seatIds) {
       this.seatInventory.releaseSeat(booking.tripId, seatId);
     }
@@ -223,24 +223,24 @@ export class BookingManager {
    * Gets a booking by ID.
    */
   getBooking(bookingId: string): Booking | null {
-    return this.bookings.get(bookingId) || null;
+    return this.trns_bookings.get(bookingId) || null;
   }
 
   /**
-   * Gets all bookings for a customer.
+   * Gets all trns_bookings for a customer.
    */
   getCustomerBookings(customerId: string, limit: number = 50): Booking[] {
-    return Array.from(this.bookings.values())
+    return Array.from(this.trns_bookings.values())
       .filter(b => b.customerId === customerId)
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
       .slice(0, limit);
   }
 
   /**
-   * Gets bookings for a specific trip.
+   * Gets trns_bookings for a specific trip.
    */
   getTripBookings(tripId: string): Booking[] {
-    return Array.from(this.bookings.values())
+    return Array.from(this.trns_bookings.values())
       .filter(b => b.tripId === tripId && b.status === 'confirmed');
   }
 
@@ -255,7 +255,7 @@ export class BookingManager {
    * Marks payment as failed.
    */
   failPayment(bookingId: string, reason: string): BookingResult {
-    const booking = this.bookings.get(bookingId);
+    const booking = this.trns_bookings.get(bookingId);
     if (!booking) {
       return { success: false, error: 'Booking not found' };
     }
@@ -282,7 +282,7 @@ export class BookingManager {
     totalSeatsBooked: number;
     totalRevenue: number;
   } {
-    const tripBookings = Array.from(this.bookings.values()).filter(
+    const tripBookings = Array.from(this.trns_bookings.values()).filter(
       b => b.tripId === tripId
     );
 

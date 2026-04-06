@@ -1,9 +1,9 @@
--- Migration 013: fare_rules table — Dynamic Pricing Engine (WWT-005)
+-- Migration 013: trns_fare_rules table — Dynamic Pricing Engine (WWT-005)
 -- Supports rule types: surge_period, peak_hours, peak_days, weekend, always
 -- Multi-tenant: scoped by operator_id + route_id
 -- Managed via admin.ts MIGRATIONS array
 
-CREATE TABLE IF NOT EXISTS fare_rules (
+CREATE TABLE IF NOT EXISTS trns_fare_rules (
   id TEXT PRIMARY KEY,
   operator_id TEXT NOT NULL,
   route_id TEXT NOT NULL,
@@ -23,5 +23,5 @@ CREATE TABLE IF NOT EXISTS fare_rules (
   deleted_at INTEGER
 );
 
-CREATE INDEX IF NOT EXISTS idx_fare_rules_route ON fare_rules(route_id, operator_id, is_active);
-CREATE INDEX IF NOT EXISTS idx_fare_rules_operator ON fare_rules(operator_id);
+CREATE INDEX IF NOT EXISTS idx_fare_rules_route ON trns_fare_rules(route_id, operator_id, is_active);
+CREATE INDEX IF NOT EXISTS idx_fare_rules_operator ON trns_fare_rules(operator_id);

@@ -8,7 +8,7 @@
  *   Server-side: await publishEvent(c.env.TRANSPORT_EVENTS, event)
  *   Dev / tests:  falls back to in-memory eventBus
  *
- * The existing D1 platform_events outbox + drainEventBus() sweeper remains in
+ * The existing D1 trns_platform_events outbox + drainEventBus() sweeper remains in
  * sweepers.ts for backward compatibility (seat cache, SMS, SOS routing).
  * New events published via this module go directly to CF Queues.
  */

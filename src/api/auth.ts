@@ -1,6 +1,6 @@
 /**
  * WebWaka Auth API — OTP-based phone authentication
- * Public routes: POST /api/auth/otp/request, POST /api/auth/otp/verify
+ * Public trns_routes: POST /api/auth/otp/request, POST /api/auth/otp/verify
  * These are exempted from jwtAuthMiddleware in middleware/auth.ts
  *
  * OTP Flow:
@@ -174,18 +174,18 @@ authRouter.post('/otp/verify', async (c) => {
   let operatorId: string | null = null;
 
   try {
-    // Check customers table first
+    // Check trns_customers table first
     const existingCustomer = await c.env.DB.prepare(
-      'SELECT id, name FROM customers WHERE phone = ? LIMIT 1'
+      'SELECT id, name FROM trns_customers WHERE phone = ? LIMIT 1'
     ).bind(phone).first<{ id: string; name: string | null }>();
 
     if (existingCustomer) {
       userId = existingCustomer.id;
       userName = existingCustomer.name;
     } else {
-      // Check agents table (agents may log in via phone too)
+      // Check trns_agents table (trns_agents may log in via phone too)
       const existingAgent = await c.env.DB.prepare(
-        'SELECT id, name, operator_id, status FROM agents WHERE phone = ? LIMIT 1'
+        'SELECT id, name, operator_id, status FROM trns_agents WHERE phone = ? LIMIT 1'
       ).bind(phone).first<{ id: string; name: string; operator_id: string; status: string }>();
 
       if (existingAgent) {
@@ -198,7 +198,7 @@ authRouter.post('/otp/verify', async (c) => {
         const newId = genId('cus');
         const nowMs = Date.now();
         await c.env.DB.prepare(
-          'INSERT INTO customers (id, name, phone, ndpr_consent, created_at, updated_at) VALUES (?, NULL, ?, 0, ?, ?)'
+          'INSERT INTO trns_customers (id, name, phone, ndpr_consent, created_at, updated_at) VALUES (?, NULL, ?, 0, ?, ?)'
         ).bind(newId, phone, nowMs, nowMs).run();
         userId = newId;
       }

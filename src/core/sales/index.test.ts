@@ -114,7 +114,7 @@ describe('TRN-2: Agent Sales Application (Offline-first POS)', () => {
       expect(result.error).toBe('Agent not found');
     });
 
-    it('should not create transaction with mismatched seats and passengers', () => {
+    it('should not create transaction with mismatched trns_seats and passengers', () => {
       const result = manager.createTransaction(
         agent.id,
         'trip_001',

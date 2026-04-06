@@ -10,9 +10,9 @@
  *   Transport does NOT build parcel tracking here — that lives in the Logistics repo.
  *
  * Routes (mounted at /api/logistics):
- *   POST   /trips/:tripId/parcels                — link parcel(s) to trip (cargo load)
- *   GET    /trips/:tripId/parcels                — list all parcels on a trip
- *   DELETE /trips/:tripId/parcels/:trackingRef   — remove parcel from trip (manual unload)
+ *   POST   /trns_trips/:tripId/parcels                — link parcel(s) to trip (cargo load)
+ *   GET    /trns_trips/:tripId/parcels                — list all parcels on a trip
+ *   DELETE /trns_trips/:tripId/parcels/:trackingRef   — remove parcel from trip (manual unload)
  */
 import { Hono } from 'hono';
 import type { AppContext } from './types';
@@ -43,12 +43,12 @@ type DbTripParcel = {
 };
 
 // ============================================================
-// POST /api/logistics/trips/:tripId/parcels
+// POST /api/logistics/trns_trips/:tripId/parcels
 // Link one or more parcel tracking references to a trip.
 // Emits trip.cargo_loaded (one event containing the full parcel list).
 // Roles: STAFF, TENANT_ADMIN, SUPER_ADMIN
 // ============================================================
-logisticsRouter.post('/trips/:tripId/parcels',
+logisticsRouter.post('/trns_trips/:tripId/parcels',
   requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']),
   async (c) => {
     const tripId = c.req.param('tripId');
@@ -86,7 +86,7 @@ logisticsRouter.post('/trips/:tripId/parcels',
 
     // Validate trip exists and is not completed/cancelled
     const trip = await db.prepare(
-      `SELECT id, operator_id, state FROM trips WHERE id = ? AND deleted_at IS NULL`
+      `SELECT id, operator_id, state FROM trns_trips WHERE id = ? AND deleted_at IS NULL`
     ).bind(tripId).first<{ id: string; operator_id: string; state: string }>();
 
     if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
@@ -105,7 +105,7 @@ logisticsRouter.post('/trips/:tripId/parcels',
 
     // Check for duplicate (same trip + tracking_ref)
     const existing = await db.prepare(
-      `SELECT id FROM trip_parcels WHERE trip_id = ? AND tracking_ref = ?`
+      `SELECT id FROM trns_trip_parcels WHERE trip_id = ? AND tracking_ref = ?`
     ).bind(tripId, trackingRef).first<{ id: string }>();
     if (existing) {
       return c.json({
@@ -116,7 +116,7 @@ logisticsRouter.post('/trips/:tripId/parcels',
 
     const parcelId = genId('prc');
     await db.prepare(
-      `INSERT INTO trip_parcels
+      `INSERT INTO trns_trip_parcels
        (id, trip_id, operator_id, tracking_ref, description, weight_kg,
         sender_name, receiver_name, receiver_phone, loaded_at, loaded_by,
         unloaded_at, status, created_at)
@@ -182,11 +182,11 @@ logisticsRouter.post('/trips/:tripId/parcels',
 );
 
 // ============================================================
-// GET /api/logistics/trips/:tripId/parcels
+// GET /api/logistics/trns_trips/:tripId/parcels
 // List all parcels currently linked to a trip.
 // Roles: STAFF, TENANT_ADMIN, SUPER_ADMIN
 // ============================================================
-logisticsRouter.get('/trips/:tripId/parcels',
+logisticsRouter.get('/trns_trips/:tripId/parcels',
   requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']),
   async (c) => {
     const tripId = c.req.param('tripId');
@@ -194,7 +194,7 @@ logisticsRouter.get('/trips/:tripId/parcels',
     const user = c.get('user');
 
     const trip = await db.prepare(
-      `SELECT id, operator_id FROM trips WHERE id = ? AND deleted_at IS NULL`
+      `SELECT id, operator_id FROM trns_trips WHERE id = ? AND deleted_at IS NULL`
     ).bind(tripId).first<{ id: string; operator_id: string }>();
     if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
 
@@ -204,7 +204,7 @@ logisticsRouter.get('/trips/:tripId/parcels',
     }
 
     const parcels = await db.prepare(
-      `SELECT * FROM trip_parcels WHERE trip_id = ? ORDER BY loaded_at ASC`
+      `SELECT * FROM trns_trip_parcels WHERE trip_id = ? ORDER BY loaded_at ASC`
     ).bind(tripId).all<DbTripParcel>();
 
     return c.json({
@@ -216,12 +216,12 @@ logisticsRouter.get('/trips/:tripId/parcels',
 );
 
 // ============================================================
-// DELETE /api/logistics/trips/:tripId/parcels/:trackingRef
+// DELETE /api/logistics/trns_trips/:tripId/parcels/:trackingRef
 // Manually remove a parcel from a trip (before trip completes).
 // Emits trip.cargo_unloaded for this specific parcel.
 // Roles: STAFF, TENANT_ADMIN, SUPER_ADMIN
 // ============================================================
-logisticsRouter.delete('/trips/:tripId/parcels/:trackingRef',
+logisticsRouter.delete('/trns_trips/:tripId/parcels/:trackingRef',
   requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']),
   async (c) => {
     const tripId = c.req.param('tripId');
@@ -231,7 +231,7 @@ logisticsRouter.delete('/trips/:tripId/parcels/:trackingRef',
     const now = Date.now();
 
     const trip = await db.prepare(
-      `SELECT id, operator_id, state FROM trips WHERE id = ? AND deleted_at IS NULL`
+      `SELECT id, operator_id, state FROM trns_trips WHERE id = ? AND deleted_at IS NULL`
     ).bind(tripId).first<{ id: string; operator_id: string; state: string }>();
     if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
 
@@ -241,7 +241,7 @@ logisticsRouter.delete('/trips/:tripId/parcels/:trackingRef',
     }
 
     const parcel = await db.prepare(
-      `SELECT id, status FROM trip_parcels WHERE trip_id = ? AND tracking_ref = ?`
+      `SELECT id, status FROM trns_trip_parcels WHERE trip_id = ? AND tracking_ref = ?`
     ).bind(tripId, trackingRef).first<{ id: string; status: string }>();
 
     if (!parcel) {
@@ -255,7 +255,7 @@ logisticsRouter.delete('/trips/:tripId/parcels/:trackingRef',
     }
 
     await db.prepare(
-      `UPDATE trip_parcels SET status = ?, unloaded_at = ? WHERE id = ?`
+      `UPDATE trns_trip_parcels SET status = ?, unloaded_at = ? WHERE id = ?`
     ).bind('removed', now, parcel.id).run();
 
     // Emit trip.cargo_unloaded — non-fatal
@@ -300,7 +300,7 @@ export async function emitCargoUnloadedOnTripEnd(
 ): Promise<void> {
   try {
     const onBoard = await db.prepare(
-      `SELECT id, tracking_ref FROM trip_parcels
+      `SELECT id, tracking_ref FROM trns_trip_parcels
        WHERE trip_id = ? AND status = 'on_board'`
     ).bind(tripId).all<{ id: string; tracking_ref: string }>();
 
@@ -312,7 +312,7 @@ export async function emitCargoUnloadedOnTripEnd(
     await db.batch(
       onBoard.results.map(p =>
         db.prepare(
-          `UPDATE trip_parcels SET status = ?, unloaded_at = ? WHERE id = ?`
+          `UPDATE trns_trip_parcels SET status = ?, unloaded_at = ? WHERE id = ?`
         ).bind(finalStatus, now, p.id)
       )
     );

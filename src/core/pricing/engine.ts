@@ -19,7 +19,7 @@
  * This engine is stateless and only receives pre-fetched rows.
  */
 
-// ── Shared FareRule row interface (matches fare_rules D1 table) ───────────────
+// ── Shared FareRule row interface (matches trns_fare_rules D1 table) ───────────────
 
 export interface FareRule {
   id: string;
@@ -48,7 +48,7 @@ export interface FareRule {
  *
  * @param baseFare     Route base_fare in kobo
  * @param seatClass    e.g. 'standard' | 'window' | 'vip' | 'front'
- * @param fareRules    All fare_rules rows for this route (active + inactive, function filters)
+ * @param fareRules    All trns_fare_rules rows for this route (active + inactive, function filters)
  * @param refTimeMs    Reference timestamp for rule matching (usually trip.departure_time)
  * @returns            Effective fare in kobo (integer, rounded)
  */

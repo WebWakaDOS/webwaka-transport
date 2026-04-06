@@ -180,7 +180,7 @@ export interface DbAgent {
   phone: string;
   email: string | null;
   role: string;
-  bus_parks: string;
+  trns_bus_parks: string;
   status: string;
   created_at: number;
   updated_at: number;
@@ -224,8 +224,8 @@ export interface DbReceipt {
 
 /**
  * Returns the operator_id that all D1 queries MUST be scoped to.
- * Returns null for SUPER_ADMIN (can see all operators) and for
- * unauthenticated routes (tests / public endpoints).
+ * Returns null for SUPER_ADMIN (can see all trns_operators) and for
+ * unauthenticated trns_routes (tests / public endpoints).
  */
 export function getOperatorScope(c: HonoCtx): string | null {
   const user = c.get('user');

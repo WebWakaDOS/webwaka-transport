@@ -6,14 +6,14 @@
  * Invariants: Nigeria-First, Offline-First, Multi-tenancy, NDPR, Build Once Use Infinitely
  *
  * Security:
- *   1. jwtAuthMiddleware  — verifies Bearer JWT on all /api/* routes
+ *   1. jwtAuthMiddleware  — verifies Bearer JWT on all /api/* trns_routes
  *   2. requireTenant      — enforces operator_id scoping on all tenanted queries
  *
  * Public exceptions (no JWT required):
  *   GET  /health
- *   GET  /api/booking/routes
- *   GET  /api/booking/trips/search
- *   GET  /api/seat-inventory/trips
+ *   GET  /api/booking/trns_routes
+ *   GET  /api/booking/trns_trips/search
+ *   GET  /api/seat-inventory/trns_trips
  *   POST /webhooks/paystack
  *   POST /webhooks/flutterwave
  *   POST /api/auth/otp/request
@@ -21,9 +21,9 @@
  *
  * Scheduled (Cron):
  *   Every 60 seconds:
- *     - Drain platform_events outbox (Event Bus consumer)
+ *     - Drain trns_platform_events outbox (Event Bus consumer)
  *     - Sweep expired seat reservations (Seat Inventory TTL)
- *     - Check abandoned bookings (Booking Portal recovery)
+ *     - Check abandoned trns_bookings (Booking Portal recovery)
  */
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
@@ -148,10 +148,10 @@ app.get('/b/:bookingId/data', async (c) => {
               b.total_amount, b.status, b.payment_status, b.payment_reference,
               b.confirmed_at, b.created_at,
               t.departure_time, r.origin, r.destination, o.name as operator_name
-       FROM bookings b
-       JOIN trips t ON t.id = b.trip_id
-       JOIN routes r ON r.id = t.route_id
-       JOIN operators o ON o.id = t.operator_id
+       FROM trns_bookings b
+       JOIN trns_trips t ON t.id = b.trip_id
+       JOIN trns_routes r ON r.id = t.route_id
+       JOIN trns_operators o ON o.id = t.operator_id
        WHERE b.id = ? AND b.status = 'confirmed' AND b.deleted_at IS NULL`
     ).bind(bookingId).first<{
       id: string; seat_ids: string; passenger_names: string;
@@ -173,7 +173,7 @@ app.get('/b/:bookingId/data', async (c) => {
       if (seatIds.length > 0) {
         const placeholders = seatIds.map(() => '?').join(', ');
         const seatsRes = await db.prepare(
-          `SELECT seat_number FROM seats WHERE id IN (${placeholders})`
+          `SELECT seat_number FROM trns_seats WHERE id IN (${placeholders})`
         ).bind(...seatIds).all<{ seat_number: string }>();
         seat_numbers = seatsRes.results.map(s => s.seat_number);
       }
@@ -246,11 +246,11 @@ app.get('/api/internal/admin/analytics', requireRole(['SUPER_ADMIN']), async (c)
   const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime();
 
   try {
-    const [operators, trips, bookings, revenue] = await Promise.all([
+    const [trns_operators, trns_trips, trns_bookings, revenue] = await Promise.all([
       db.prepare(
         `SELECT COUNT(*) as total,
                 COUNT(CASE WHEN status = 'active' THEN 1 END) as active
-         FROM operators WHERE deleted_at IS NULL`
+         FROM trns_operators WHERE deleted_at IS NULL`
       ).first<{ total: number; active: number }>(),
 
       db.prepare(
@@ -260,7 +260,7 @@ app.get('/api/internal/admin/analytics', requireRole(['SUPER_ADMIN']), async (c)
                 COUNT(CASE WHEN state = 'in_transit' THEN 1 END) as in_transit,
                 COUNT(CASE WHEN state = 'completed' THEN 1 END) as completed,
                 COUNT(CASE WHEN state = 'cancelled' THEN 1 END) as cancelled
-         FROM trips WHERE deleted_at IS NULL`
+         FROM trns_trips WHERE deleted_at IS NULL`
       ).first<{ total: number; scheduled: number; boarding: number; in_transit: number; completed: number; cancelled: number }>(),
 
       db.prepare(
@@ -268,13 +268,13 @@ app.get('/api/internal/admin/analytics', requireRole(['SUPER_ADMIN']), async (c)
                 COUNT(CASE WHEN status = 'confirmed' THEN 1 END) as confirmed,
                 COUNT(CASE WHEN status = 'cancelled' THEN 1 END) as cancelled,
                 COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending
-         FROM bookings WHERE deleted_at IS NULL`
+         FROM trns_bookings WHERE deleted_at IS NULL`
       ).first<{ total: number; confirmed: number; cancelled: number; pending: number }>(),
 
       db.prepare(
         `SELECT COALESCE(SUM(CASE WHEN status = 'confirmed' THEN total_amount ELSE 0 END), 0) as total_revenue_kobo,
                 COALESCE(SUM(CASE WHEN status = 'confirmed' AND created_at >= ? THEN total_amount ELSE 0 END), 0) as this_month_revenue_kobo
-         FROM bookings WHERE deleted_at IS NULL`
+         FROM trns_bookings WHERE deleted_at IS NULL`
       ).bind(monthStart).first<{ total_revenue_kobo: number; this_month_revenue_kobo: number }>(),
     ]);
 
@@ -282,9 +282,9 @@ app.get('/api/internal/admin/analytics', requireRole(['SUPER_ADMIN']), async (c)
       `SELECT r.origin, r.destination,
               COUNT(DISTINCT b.id) as booking_count,
               COALESCE(SUM(CASE WHEN b.status = 'confirmed' THEN b.total_amount ELSE 0 END), 0) as revenue_kobo
-       FROM routes r
-       LEFT JOIN trips t ON t.route_id = r.id AND t.deleted_at IS NULL
-       LEFT JOIN bookings b ON b.trip_id = t.id AND b.deleted_at IS NULL
+       FROM trns_routes r
+       LEFT JOIN trns_trips t ON t.route_id = r.id AND t.deleted_at IS NULL
+       LEFT JOIN trns_bookings b ON b.trip_id = t.id AND b.deleted_at IS NULL
        WHERE r.deleted_at IS NULL
        GROUP BY r.id, r.origin, r.destination
        ORDER BY booking_count DESC LIMIT 5`
@@ -294,9 +294,9 @@ app.get('/api/internal/admin/analytics', requireRole(['SUPER_ADMIN']), async (c)
       `SELECT o.id, o.name,
               COUNT(DISTINCT t.id) as trip_count,
               COALESCE(SUM(CASE WHEN b.status = 'confirmed' THEN b.total_amount ELSE 0 END), 0) as revenue_kobo
-       FROM operators o
-       LEFT JOIN trips t ON t.operator_id = o.id AND t.deleted_at IS NULL
-       LEFT JOIN bookings b ON b.trip_id = t.id AND b.deleted_at IS NULL
+       FROM trns_operators o
+       LEFT JOIN trns_trips t ON t.operator_id = o.id AND t.deleted_at IS NULL
+       LEFT JOIN trns_bookings b ON b.trip_id = t.id AND b.deleted_at IS NULL
        WHERE o.deleted_at IS NULL AND o.status = 'active'
        GROUP BY o.id, o.name
        ORDER BY revenue_kobo DESC LIMIT 5`
@@ -306,9 +306,9 @@ app.get('/api/internal/admin/analytics', requireRole(['SUPER_ADMIN']), async (c)
       success: true,
       data: {
         generated_at: now,
-        operators: operators ?? { total: 0, active: 0 },
-        trips: trips ?? { total: 0, scheduled: 0, boarding: 0, in_transit: 0, completed: 0, cancelled: 0 },
-        bookings: bookings ?? { total: 0, confirmed: 0, cancelled: 0, pending: 0 },
+        trns_operators: trns_operators ?? { total: 0, active: 0 },
+        trns_trips: trns_trips ?? { total: 0, scheduled: 0, boarding: 0, in_transit: 0, completed: 0, cancelled: 0 },
+        trns_bookings: trns_bookings ?? { total: 0, confirmed: 0, cancelled: 0, pending: 0 },
         revenue: revenue ?? { total_revenue_kobo: 0, this_month_revenue_kobo: 0 },
         top_routes: topRoutes.results,
         top_operators: topOperators.results,
@@ -359,9 +359,9 @@ app.onError((err, c) => {
 // Scheduled handler — Cron Worker (runs every minute)
 //
 // Responsibilities:
-//   1. Event Bus outbox drain    — processes pending platform_events
+//   1. Event Bus outbox drain    — processes pending trns_platform_events
 //   2. Seat reservation sweeper  — releases expired reservations
-//   3. Abandoned booking sweeper — cancels bookings pending > 30 min
+//   3. Abandoned booking sweeper — cancels trns_bookings pending > 30 min
 //
 // Sweepers are extracted to src/lib/sweepers.ts for testability.
 // ============================================================
@@ -406,7 +406,7 @@ export default {
         message.ack();
       } catch (err) {
         console.error('[transport] queue handler error:', err instanceof Error ? err.message : err, message.body?.type);
-        message.ack(); // ack even on error — sweepers handle recovery via platform_events outbox
+        message.ack(); // ack even on error — sweepers handle recovery via trns_platform_events outbox
       }
     }
   },

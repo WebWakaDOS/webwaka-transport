@@ -13,20 +13,20 @@ describe('TRN-1: Seat Inventory Synchronization & Atomic Validation', () => {
   });
 
   describe('Trip Creation', () => {
-    it('should create a trip with specified number of seats', () => {
+    it('should create a trip with specified number of trns_seats', () => {
       const trip = manager.createTrip(tripId, operatorId, routeId, departureTime, 50);
 
       expect(trip.id).toBe(tripId);
       expect(trip.operatorId).toBe(operatorId);
       expect(trip.totalSeats).toBe(50);
-      expect(trip.seats.length).toBe(50);
+      expect(trip.trns_seats.length).toBe(50);
       expect(trip.state).toBe('scheduled');
     });
 
-    it('should initialize all seats as available', () => {
+    it('should initialize all trns_seats as available', () => {
       const trip = manager.createTrip(tripId, operatorId, routeId, departureTime, 10);
 
-      trip.seats.forEach(seat => {
+      trip.trns_seats.forEach(seat => {
         expect(seat.status).toBe('available');
         expect(seat.reservedBy).toBeUndefined();
       });
@@ -157,7 +157,7 @@ describe('TRN-1: Seat Inventory Synchronization & Atomic Validation', () => {
       manager.confirmSeat(tripId, reservation.seatId!, reservation.token!, 'user_001');
 
       const trip = manager.getTrip(tripId);
-      const seat = trip!.seats.find(s => s.seatNumber === '1');
+      const seat = trip!.trns_seats.find(s => s.seatNumber === '1');
 
       expect(seat!.status).toBe('confirmed');
       expect(seat!.confirmedBy).toBe('user_001');
@@ -188,7 +188,7 @@ describe('TRN-1: Seat Inventory Synchronization & Atomic Validation', () => {
 
     it('should not release an already available seat', () => {
       const trip = manager.getTrip(tripId);
-      const seatId = trip!.seats[0]!.id;
+      const seatId = trip!.trns_seats[0]!.id;
 
       const result = manager.releaseSeat(tripId, seatId);
 
@@ -201,7 +201,7 @@ describe('TRN-1: Seat Inventory Synchronization & Atomic Validation', () => {
       manager.releaseSeat(tripId, reservation.seatId!);
 
       const trip = manager.getTrip(tripId);
-      const seat = trip!.seats.find(s => s.seatNumber === '1');
+      const seat = trip!.trns_seats.find(s => s.seatNumber === '1');
 
       expect(seat!.status).toBe('available');
       expect(seat!.reservedBy).toBeUndefined();
@@ -278,7 +278,7 @@ describe('TRN-1: Seat Inventory Synchronization & Atomic Validation', () => {
 
       // Manually expire the token by modifying the seat
       const trip = manager.getTrip(tripId);
-      const seat = trip!.seats.find(s => s.seatNumber === '1');
+      const seat = trip!.trns_seats.find(s => s.seatNumber === '1');
       if (seat) {
         // Set expiration to past
         seat.reservationExpiresAt = new Date(Date.now() - 1000);
@@ -308,7 +308,7 @@ describe('TRN-1: Seat Inventory Synchronization & Atomic Validation', () => {
       manager.createTrip(tripId, operatorId, routeId, departureTime, 50);
     });
 
-    it('should handle multiple concurrent reservations on different seats', () => {
+    it('should handle multiple concurrent reservations on different trns_seats', () => {
       const res1 = manager.reserveSeat(tripId, '1', 'user_001');
       const res2 = manager.reserveSeat(tripId, '2', 'user_002');
       const res3 = manager.reserveSeat(tripId, '3', 'user_003');

@@ -16,9 +16,9 @@ export type { Env } from './types';
 export const seatInventoryRouter = new Hono<AppContext>();
 
 // ============================================================
-// GET /trips — list trips with availability (public)
+// GET /trns_trips — list trns_trips with availability (public)
 // ============================================================
-seatInventoryRouter.get('/trips', async (c) => {
+seatInventoryRouter.get('/trns_trips', async (c) => {
   const q = c.req.query();
   const { origin, destination, date } = q;
   const { limit, offset } = parsePagination(q);
@@ -27,9 +27,9 @@ seatInventoryRouter.get('/trips', async (c) => {
   let query = `SELECT t.*, r.origin, r.destination, r.base_fare,
     COUNT(CASE WHEN s.status = 'available' THEN 1 END) as available_seats,
     COUNT(s.id) as total_seats
-    FROM trips t
-    JOIN routes r ON t.route_id = r.id
-    LEFT JOIN seats s ON s.trip_id = t.id
+    FROM trns_trips t
+    JOIN trns_routes r ON t.route_id = r.id
+    LEFT JOIN trns_seats s ON s.trip_id = t.id
     WHERE t.deleted_at IS NULL AND t.state != 'cancelled'`;
 
   const params: unknown[] = [];
@@ -52,14 +52,14 @@ seatInventoryRouter.get('/trips', async (c) => {
     const result = await db.prepare(query).bind(...params).all();
     return c.json({ success: true, data: result.results, meta: metaResponse(result.results.length, limit, offset) });
   } catch {
-    return c.json({ success: false, error: 'Failed to fetch trips' }, 500);
+    return c.json({ success: false, error: 'Failed to fetch trns_trips' }, 500);
   }
 });
 
 // ============================================================
-// POST /trips — create a trip
+// POST /trns_trips — create a trip
 // ============================================================
-seatInventoryRouter.post('/trips', async (c) => {
+seatInventoryRouter.post('/trns_trips', async (c) => {
   const body = await c.req.json() as Record<string, unknown>;
   const err = requireFields(body, ['operator_id', 'route_id', 'vehicle_id', 'departure_time', 'total_seats']);
   if (err) return c.json({ success: false, error: err }, 400);
@@ -79,43 +79,43 @@ seatInventoryRouter.post('/trips', async (c) => {
   try {
     // P08-T1: Fetch vehicle's seat_template to use for seat generation
     const vehicle = await db.prepare(
-      `SELECT total_seats, seat_template FROM vehicles WHERE id = ? AND deleted_at IS NULL`
+      `SELECT total_seats, seat_template FROM trns_vehicles WHERE id = ? AND deleted_at IS NULL`
     ).bind(vehicle_id).first<{ total_seats: number; seat_template: string | null }>();
 
     let seatInserts: ReturnType<typeof db.prepare>[];
     let actualSeatCount = total_seats;
 
     if (vehicle?.seat_template) {
-      // Template-based: generate seats from the vehicle's layout definition
-      // T1-6: Malformed JSON must not crash — fall back to sequential seats
+      // Template-based: generate trns_seats from the vehicle's layout definition
+      // T1-6: Malformed JSON must not crash — fall back to sequential trns_seats
       try {
         type TemplateSeat = { number: string; row: number; column: number; class: string };
-        const template = JSON.parse(vehicle.seat_template) as { seats: TemplateSeat[] };
-        if (!Array.isArray(template.seats) || template.seats.length === 0) {
-          throw new Error('seat_template.seats is missing or empty');
+        const template = JSON.parse(vehicle.seat_template) as { trns_seats: TemplateSeat[] };
+        if (!Array.isArray(template.trns_seats) || template.trns_seats.length === 0) {
+          throw new Error('seat_template.trns_seats is missing or empty');
         }
         // T1-7: Template seat count takes precedence over vehicle capacity field
-        actualSeatCount = template.seats.length;
-        seatInserts = template.seats.map(s =>
+        actualSeatCount = template.trns_seats.length;
+        seatInserts = template.trns_seats.map(s =>
           db.prepare(
-            `INSERT INTO seats (id, trip_id, seat_number, seat_class, status, version, created_at, updated_at)
+            `INSERT INTO trns_seats (id, trip_id, seat_number, seat_class, status, version, created_at, updated_at)
              VALUES (?, ?, ?, ?, 'available', 0, ?, ?)`
           ).bind(`${id}_s${s.number}`, id, s.number, s.class, now, now)
         );
       } catch (parseErr: unknown) {
-        console.error('[seat-inventory] seat_template parse error for vehicle', vehicle_id, parseErr instanceof Error ? parseErr.message : parseErr, '— falling back to sequential seats');
-        // Fallback: sequential integer seats, all standard class
+        console.error('[seat-inventory] seat_template parse error for vehicle', vehicle_id, parseErr instanceof Error ? parseErr.message : parseErr, '— falling back to sequential trns_seats');
+        // Fallback: sequential integer trns_seats, all standard class
         seatInserts = Array.from({ length: total_seats }, (_, i) =>
           db.prepare(
-            `INSERT INTO seats (id, trip_id, seat_number, seat_class, status, version, created_at, updated_at)
+            `INSERT INTO trns_seats (id, trip_id, seat_number, seat_class, status, version, created_at, updated_at)
              VALUES (?, ?, ?, 'standard', 'available', 0, ?, ?)`
           ).bind(`${id}_s${i + 1}`, id, String(i + 1).padStart(2, '0'), now, now)
         );
       }
     } else {
-      // Fallback: sequential integer seats, all standard class
+      // Fallback: sequential integer trns_seats, all standard class
       const seatStmt = db.prepare(
-        `INSERT INTO seats (id, trip_id, seat_number, seat_class, status, version, created_at, updated_at)
+        `INSERT INTO trns_seats (id, trip_id, seat_number, seat_class, status, version, created_at, updated_at)
          VALUES (?, ?, ?, 'standard', 'available', 0, ?, ?)`
       );
       seatInserts = Array.from({ length: total_seats }, (_, i) =>
@@ -126,7 +126,7 @@ seatInventoryRouter.post('/trips', async (c) => {
     // Single atomic batch: trip row + all seat rows together
     await db.batch([
       db.prepare(
-        `INSERT INTO trips (id, operator_id, route_id, vehicle_id, departure_time, state, created_at, updated_at)
+        `INSERT INTO trns_trips (id, operator_id, route_id, vehicle_id, departure_time, state, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?)`
       ).bind(id, operator_id, route_id, vehicle_id, departure_time, now, now),
       ...seatInserts,
@@ -139,9 +139,9 @@ seatInventoryRouter.post('/trips', async (c) => {
 });
 
 // ============================================================
-// GET /trips/:id/availability — seat map
+// GET /trns_trips/:id/availability — seat map
 // ============================================================
-seatInventoryRouter.get('/trips/:id/availability', async (c) => {
+seatInventoryRouter.get('/trns_trips/:id/availability', async (c) => {
   const tripId = c.req.param('id');
   const db = c.env.DB;
   const now = Date.now();
@@ -149,40 +149,40 @@ seatInventoryRouter.get('/trips/:id/availability', async (c) => {
   try {
     // P08-T1: Also fetch vehicle's seat_template for layout rendering
     const trip = await db.prepare(
-      `SELECT t.id, v.seat_template FROM trips t
-       LEFT JOIN vehicles v ON t.vehicle_id = v.id AND v.deleted_at IS NULL
+      `SELECT t.id, v.seat_template FROM trns_trips t
+       LEFT JOIN trns_vehicles v ON t.vehicle_id = v.id AND v.deleted_at IS NULL
        WHERE t.id = ? AND t.deleted_at IS NULL`
     ).bind(tripId).first<{ id: string; seat_template: string | null }>();
     if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
 
     await db.prepare(
-      `UPDATE seats SET status = 'available', reserved_by = NULL, reservation_token = NULL, reservation_expires_at = NULL
+      `UPDATE trns_seats SET status = 'available', reserved_by = NULL, reservation_token = NULL, reservation_expires_at = NULL
        WHERE trip_id = ? AND status = 'reserved' AND reservation_expires_at < ?`
     ).bind(tripId, now).run();
 
-    const seats = await db.prepare(
-      `SELECT * FROM seats WHERE trip_id = ? ORDER BY seat_number ASC`
+    const trns_seats = await db.prepare(
+      `SELECT * FROM trns_seats WHERE trip_id = ? ORDER BY seat_number ASC`
     ).bind(tripId).all<DbSeat>();
 
-    const counts = seats.results.reduce((acc: Record<string, number>, s) => {
+    const counts = trns_seats.results.reduce((acc: Record<string, number>, s) => {
       acc[s.status] = (acc[s.status] ?? 0) + 1;
       return acc;
     }, {});
 
-    // Parse seat_layout JSON (may be null for legacy trips)
+    // Parse seat_layout JSON (may be null for legacy trns_trips)
     const seat_layout = trip.seat_template ? JSON.parse(trip.seat_template) : null;
 
     return c.json({
       success: true,
       data: {
         trip_id: tripId,
-        total_seats: seats.results.length,
+        total_seats: trns_seats.results.length,
         available: counts['available'] ?? 0,
         reserved: counts['reserved'] ?? 0,
         confirmed: counts['confirmed'] ?? 0,
         blocked: counts['blocked'] ?? 0,
         seat_layout,
-        seats: seats.results, // each seat includes seat_class
+        trns_seats: trns_seats.results, // each seat includes seat_class
       },
     });
   } catch {
@@ -191,10 +191,10 @@ seatInventoryRouter.get('/trips/:id/availability', async (c) => {
 });
 
 // ============================================================
-// POST /trips/:id/reserve — atomic seat reservation (configurable TTL)
+// POST /trns_trips/:id/reserve — atomic seat reservation (configurable TTL)
 // P03-T1: TTL sourced from operator config (online vs agent)
 // ============================================================
-seatInventoryRouter.post('/trips/:id/reserve', async (c) => {
+seatInventoryRouter.post('/trns_trips/:id/reserve', async (c) => {
   const tripId = c.req.param('id');
   const body = await c.req.json() as Record<string, unknown>;
   const err = requireFields(body, ['seat_id', 'user_id']);
@@ -206,7 +206,7 @@ seatInventoryRouter.post('/trips/:id/reserve', async (c) => {
 
   // P03-T1: Look up trip to get operator_id for config
   const tripForConfig = await db.prepare(
-    `SELECT operator_id FROM trips WHERE id = ? AND deleted_at IS NULL`
+    `SELECT operator_id FROM trns_trips WHERE id = ? AND deleted_at IS NULL`
   ).bind(tripId).first<{ operator_id: string }>();
   const operatorId = tripForConfig?.operator_id ?? '';
   const opConfig = await getOperatorConfig(c.env, operatorId);
@@ -219,19 +219,19 @@ seatInventoryRouter.post('/trips/:id/reserve', async (c) => {
 
   try {
     await db.prepare(
-      `UPDATE seats SET status = 'available', reserved_by = NULL, reservation_token = NULL, reservation_expires_at = NULL
+      `UPDATE trns_seats SET status = 'available', reserved_by = NULL, reservation_token = NULL, reservation_expires_at = NULL
        WHERE id = ? AND status = 'reserved' AND reservation_expires_at < ?`
     ).bind(seat_id, now).run();
 
     const seat = await db.prepare(
-      `SELECT * FROM seats WHERE id = ? AND trip_id = ?`
+      `SELECT * FROM trns_seats WHERE id = ? AND trip_id = ?`
     ).bind(seat_id, tripId).first<DbSeat>();
 
     if (!seat) return c.json({ success: false, error: 'Seat not found' }, 404);
     if (seat.status !== 'available') return c.json({ success: false, error: `Seat is ${seat.status}` }, 409);
 
     await db.prepare(
-      `UPDATE seats SET status = 'reserved', reserved_by = ?, reservation_token = ?, reservation_expires_at = ?, updated_at = ?
+      `UPDATE trns_seats SET status = 'reserved', reserved_by = ?, reservation_token = ?, reservation_expires_at = ?, updated_at = ?
        WHERE id = ? AND status = 'available'`
     ).bind(user_id, token, expiresAt, now, seat_id).run();
 
@@ -247,13 +247,13 @@ seatInventoryRouter.post('/trips/:id/reserve', async (c) => {
 });
 
 // ============================================================
-// POST /trips/:tripId/reserve-batch — atomic multi-seat reservation
+// POST /trns_trips/:tripId/reserve-batch — atomic multi-seat reservation
 // T-TRN-01: Routed through TripSeatDO for true serialization.
 // Idempotent via IDEMPOTENCY_KV. DO eliminates double-booking races
 // across multiple Worker instances that D1 optimistic locking alone
 // cannot prevent (concurrent reads see same version before any write).
 // ============================================================
-seatInventoryRouter.post('/trips/:tripId/reserve-batch', async (c) => {
+seatInventoryRouter.post('/trns_trips/:tripId/reserve-batch', async (c) => {
   const tripId = c.req.param('tripId');
   const body = await c.req.json() as Record<string, unknown>;
   const err = requireFields(body, ['seat_ids', 'user_id', 'idempotency_key']);
@@ -267,7 +267,7 @@ seatInventoryRouter.post('/trips/:tripId/reserve-batch', async (c) => {
     return c.json({ success: false, error: 'seat_ids must be a non-empty array' }, 400);
   }
   if (seat_ids.length > 10) {
-    return c.json({ success: false, error: 'Maximum 10 seats per batch reservation' }, 400);
+    return c.json({ success: false, error: 'Maximum 10 trns_seats per batch reservation' }, 400);
   }
 
   const db = c.env.DB;
@@ -286,7 +286,7 @@ seatInventoryRouter.post('/trips/:tripId/reserve-batch', async (c) => {
   // T-TRN-03: Also load route_id + base_fare + departure_time for fare locking
   const tripForBatchConfig = await db.prepare(
     `SELECT t.operator_id, t.departure_time, r.id as route_id, r.base_fare
-     FROM trips t JOIN routes r ON t.route_id = r.id
+     FROM trns_trips t JOIN trns_routes r ON t.route_id = r.id
      WHERE t.id = ? AND t.deleted_at IS NULL`
   ).bind(tripId).first<{ operator_id: string; departure_time: number; route_id: string; base_fare: number }>();
   if (!tripForBatchConfig) {
@@ -297,16 +297,16 @@ seatInventoryRouter.post('/trips/:tripId/reserve-batch', async (c) => {
   const batchIsOnline = Boolean(c.req.header('Origin'));
   const batchTtlMs = batchIsOnline ? batchOpConfig.online_reservation_ttl_ms : batchOpConfig.reservation_ttl_ms;
 
-  // 3. Verify all requested seats exist for this trip
+  // 3. Verify all requested trns_seats exist for this trip
   //    T-TRN-03: Also fetch seat_class so we can lock the effective fare per seat
   const seatIdList = seat_ids as string[];
   const placeholders = seatIdList.map(() => '?').join(', ');
   const seatsResult = await db.prepare(
-    `SELECT id, seat_class FROM seats WHERE trip_id = ? AND id IN (${placeholders})`
+    `SELECT id, seat_class FROM trns_seats WHERE trip_id = ? AND id IN (${placeholders})`
   ).bind(tripId, ...seatIdList).all<{ id: string; seat_class: string }>();
 
   if (seatsResult.results.length !== seatIdList.length) {
-    return c.json({ success: false, error: 'One or more seats not found for this trip' }, 404);
+    return c.json({ success: false, error: 'One or more trns_seats not found for this trip' }, 404);
   }
 
   // 4. Generate reservation tokens — nanoid('tok', 32) gives
@@ -332,7 +332,7 @@ seatInventoryRouter.post('/trips/:tripId/reserve-batch', async (c) => {
 
     let doRes: Response;
     try {
-      doRes = await stub.fetch(new Request('https://do/reserve-seats', {
+      doRes = await stub.fetch(new Request('https://do/reserve-trns_seats', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ seat_ids: seatIdList, user_id, ttl_ms: batchTtlMs, trip_id: tripId, tokens: tokenMap }),
@@ -366,12 +366,12 @@ seatInventoryRouter.post('/trips/:tripId/reserve-batch', async (c) => {
 
     // Expire stale reservations before checking availability
     await db.prepare(
-      `UPDATE seats SET status = 'available', reserved_by = NULL, reservation_token = NULL, reservation_expires_at = NULL
+      `UPDATE trns_seats SET status = 'available', reserved_by = NULL, reservation_token = NULL, reservation_expires_at = NULL
        WHERE trip_id = ? AND status = 'reserved' AND reservation_expires_at < ?`
     ).bind(tripId, now).run();
 
     const seatsWithVersion = await db.prepare(
-      `SELECT id, status, version FROM seats WHERE trip_id = ? AND id IN (${placeholders})`
+      `SELECT id, status, version FROM trns_seats WHERE trip_id = ? AND id IN (${placeholders})`
     ).bind(tripId, ...seatIdList).all<{ id: string; status: string; version: number }>();
 
     const unavailable = seatsWithVersion.results.find(s => s.status !== 'available');
@@ -380,13 +380,13 @@ seatInventoryRouter.post('/trips/:tripId/reserve-batch', async (c) => {
         success: false,
         error: 'seat_unavailable',
         seat_id: unavailable.id,
-        message: 'One or more seats are not available',
+        message: 'One or more trns_seats are not available',
       }, 409);
     }
 
     const updateStmts = seatsWithVersion.results.map(seat =>
       db.prepare(
-        `UPDATE seats SET status = 'reserved', reserved_by = ?, reservation_token = ?,
+        `UPDATE trns_seats SET status = 'reserved', reserved_by = ?, reservation_token = ?,
          reservation_expires_at = ?, version = version + 1, updated_at = ?
          WHERE id = ? AND status = 'available' AND version = ?`
       ).bind(user_id, tokenMap[seat.id]!, expiresAt, now, seat.id, seat.version)
@@ -407,7 +407,7 @@ seatInventoryRouter.post('/trips/:tripId/reserve-batch', async (c) => {
         await db.batch(
           successSeats.map(seat =>
             db.prepare(
-              `UPDATE seats SET status = 'available', reserved_by = NULL, reservation_token = NULL,
+              `UPDATE trns_seats SET status = 'available', reserved_by = NULL, reservation_token = NULL,
                reservation_expires_at = NULL, updated_at = ?
                WHERE id = ? AND reservation_token = ?`
             ).bind(now, seat.id, tokenMap[seat.id]!)
@@ -441,11 +441,11 @@ seatInventoryRouter.post('/trips/:tripId/reserve-batch', async (c) => {
   // this route the lock would stamp base_fare on every class — overriding legacy
   // fare_matrix class multipliers and causing fare_mismatch at checkout.
   // When locked_fare_kobo stays NULL the booking portal falls through to the
-  // fare_rules engine → legacy fare_matrix chain correctly.
+  // trns_fare_rules engine → legacy fare_matrix chain correctly.
   ;(async () => {
     try {
       const fareRules = await db.prepare(
-        `SELECT * FROM fare_rules WHERE route_id = ? AND operator_id = ? AND is_active = 1 AND deleted_at IS NULL`
+        `SELECT * FROM trns_fare_rules WHERE route_id = ? AND operator_id = ? AND is_active = 1 AND deleted_at IS NULL`
       ).bind(tripForBatchConfig.route_id, tripForBatchConfig.operator_id).all<FareRule>();
 
       // No active rules — leave locked_fare_kobo NULL so booking portal falls
@@ -459,7 +459,7 @@ seatInventoryRouter.post('/trips/:tripId/reserve-batch', async (c) => {
           tripForBatchConfig.base_fare, seatClass, fareRules.results, tripForBatchConfig.departure_time
         );
         return db.prepare(
-          `UPDATE seats SET locked_fare_kobo = ? WHERE id = ?`
+          `UPDATE trns_seats SET locked_fare_kobo = ? WHERE id = ?`
         ).bind(lockedFare, seatId);
       });
       await db.batch(lockStmts);
@@ -492,11 +492,11 @@ seatInventoryRouter.post('/trips/:tripId/reserve-batch', async (c) => {
 });
 
 // ============================================================
-// P03-T2: POST /trips/:tripId/extend-hold — extend a seat reservation TTL
+// P03-T2: POST /trns_trips/:tripId/extend-hold — extend a seat reservation TTL
 // Called by Paystack popup onClose to keep the seat held while user is
 // still on the payment page. Non-fatal: client ignores failure.
 // ============================================================
-seatInventoryRouter.post('/trips/:tripId/extend-hold', async (c) => {
+seatInventoryRouter.post('/trns_trips/:tripId/extend-hold', async (c) => {
   const tripId = c.req.param('tripId');
   const body = await c.req.json() as Record<string, unknown>;
   const err = requireFields(body, ['seat_id', 'token']);
@@ -507,7 +507,7 @@ seatInventoryRouter.post('/trips/:tripId/extend-hold', async (c) => {
   const now = Date.now();
 
   const seat = await db.prepare(
-    `SELECT status, reservation_token, reservation_expires_at FROM seats WHERE id = ? AND trip_id = ?`
+    `SELECT status, reservation_token, reservation_expires_at FROM trns_seats WHERE id = ? AND trip_id = ?`
   ).bind(seat_id, tripId).first<{ status: string; reservation_token: string | null; reservation_expires_at: number | null }>();
 
   if (!seat) return c.json({ success: false, error: 'Seat not found for this trip' }, 404);
@@ -529,7 +529,7 @@ seatInventoryRouter.post('/trips/:tripId/extend-hold', async (c) => {
 
   // Get operator config for TTL extension increment
   const tripForExtend = await db.prepare(
-    `SELECT operator_id FROM trips WHERE id = ? AND deleted_at IS NULL`
+    `SELECT operator_id FROM trns_trips WHERE id = ? AND deleted_at IS NULL`
   ).bind(tripId).first<{ operator_id: string }>();
   const extendOpConfig = await getOperatorConfig(c.env, tripForExtend?.operator_id ?? '');
   const extendTtlMs = extendOpConfig.online_reservation_ttl_ms;
@@ -548,16 +548,16 @@ seatInventoryRouter.post('/trips/:tripId/extend-hold', async (c) => {
   }
 
   await db.prepare(
-    `UPDATE seats SET reservation_expires_at = ?, updated_at = ? WHERE id = ? AND reservation_token = ?`
+    `UPDATE trns_seats SET reservation_expires_at = ?, updated_at = ? WHERE id = ? AND reservation_token = ?`
   ).bind(new_expires_at, now, seat_id, token).run();
 
   return c.json({ success: true, data: { expires_at: new_expires_at } });
 });
 
 // ============================================================
-// POST /trips/:id/confirm — confirm a reservation
+// POST /trns_trips/:id/confirm — confirm a reservation
 // ============================================================
-seatInventoryRouter.post('/trips/:id/confirm', async (c) => {
+seatInventoryRouter.post('/trns_trips/:id/confirm', async (c) => {
   const tripId = c.req.param('id');
   const body = await c.req.json() as Record<string, unknown>;
   const err = requireFields(body, ['seat_id', 'token']);
@@ -569,7 +569,7 @@ seatInventoryRouter.post('/trips/:id/confirm', async (c) => {
 
   try {
     const seat = await db.prepare(
-      `SELECT * FROM seats WHERE id = ? AND trip_id = ? AND reservation_token = ?`
+      `SELECT * FROM trns_seats WHERE id = ? AND trip_id = ? AND reservation_token = ?`
     ).bind(seat_id, tripId, token).first<DbSeat>();
 
     if (!seat) return c.json({ success: false, error: 'Invalid token or seat not found' }, 404);
@@ -579,7 +579,7 @@ seatInventoryRouter.post('/trips/:id/confirm', async (c) => {
     }
 
     await db.prepare(
-      `UPDATE seats SET status = 'confirmed', confirmed_by = ?, confirmed_at = ?, reservation_token = NULL, updated_at = ?
+      `UPDATE trns_seats SET status = 'confirmed', confirmed_by = ?, confirmed_at = ?, reservation_token = NULL, updated_at = ?
        WHERE id = ?`
     ).bind(booking_id ?? seat.reserved_by, now, now, seat_id).run();
 
@@ -592,10 +592,10 @@ seatInventoryRouter.post('/trips/:id/confirm', async (c) => {
 });
 
 // ============================================================
-// POST /trips/:id/release — release a reservation (token required)
+// POST /trns_trips/:id/release — release a reservation (token required)
 // SEC-006: token is mandatory to prevent unauthorized seat release
 // ============================================================
-seatInventoryRouter.post('/trips/:id/release', async (c) => {
+seatInventoryRouter.post('/trns_trips/:id/release', async (c) => {
   const tripId = c.req.param('id');
   const body = await c.req.json() as Record<string, unknown>;
   const err = requireFields(body, ['seat_id', 'token']);
@@ -607,7 +607,7 @@ seatInventoryRouter.post('/trips/:id/release', async (c) => {
 
   try {
     const seat = await db.prepare(
-      `SELECT id, reservation_token FROM seats WHERE trip_id = ? AND id = ?`
+      `SELECT id, reservation_token FROM trns_seats WHERE trip_id = ? AND id = ?`
     ).bind(tripId, seat_id).first<{ id: string; reservation_token: string | null }>();
 
     if (!seat) return c.json({ success: false, error: 'Seat not found' }, 404);
@@ -616,7 +616,7 @@ seatInventoryRouter.post('/trips/:id/release', async (c) => {
     }
 
     await db.prepare(
-      `UPDATE seats SET status = 'available', reserved_by = NULL, reservation_token = NULL,
+      `UPDATE trns_seats SET status = 'available', reserved_by = NULL, reservation_token = NULL,
        reservation_expires_at = NULL, updated_at = ?
        WHERE id = ? AND trip_id = ? AND reservation_token = ?`
     ).bind(now, seat_id, tripId, token).run();
@@ -633,10 +633,10 @@ seatInventoryRouter.post('/trips/:id/release', async (c) => {
 });
 
 // ============================================================
-// PATCH /trips/:tripId/seats/:seatId — update seat status
+// PATCH /trns_trips/:tripId/trns_seats/:seatId — update seat status
 // (Used by SyncEngine for offline seat mutations)
 // ============================================================
-seatInventoryRouter.patch('/trips/:tripId/seats/:seatId', async (c) => {
+seatInventoryRouter.patch('/trns_trips/:tripId/trns_seats/:seatId', async (c) => {
   const tripId = c.req.param('tripId');
   const seatId = c.req.param('seatId');
   const body = await c.req.json() as Record<string, unknown>;
@@ -657,13 +657,13 @@ seatInventoryRouter.patch('/trips/:tripId/seats/:seatId', async (c) => {
 
   try {
     const seat = await db.prepare(
-      `SELECT * FROM seats WHERE id = ? AND trip_id = ?`
+      `SELECT * FROM trns_seats WHERE id = ? AND trip_id = ?`
     ).bind(seatId, tripId).first<DbSeat>();
 
     if (!seat) return c.json({ success: false, error: 'Seat not found' }, 404);
 
     await db.prepare(
-      `UPDATE seats
+      `UPDATE trns_seats
        SET status = COALESCE(?, status),
            reserved_by = COALESCE(?, reserved_by),
            confirmed_by = COALESCE(?, confirmed_by),
@@ -698,7 +698,7 @@ seatInventoryRouter.post('/sync', async (c) => {
     try {
       const mutId = genId('mut');
       await db.prepare(
-        `INSERT OR REPLACE INTO sync_mutations (id, entity_type, entity_id, action, payload, version, status, retry_count, created_at, synced_at)
+        `INSERT OR REPLACE INTO trns_sync_mutations (id, entity_type, entity_id, action, payload, version, status, retry_count, created_at, synced_at)
          VALUES (?, ?, ?, ?, ?, ?, 'SYNCED', 0, ?, ?)`
       ).bind(
         mutId,
@@ -735,9 +735,9 @@ function broadcastSeatChange(
 }
 
 // ============================================================
-// T-TRN-01: Notify DO to remove seats from its in-memory held-seat map.
+// T-TRN-01: Notify DO to remove trns_seats from its in-memory held-seat map.
 // Called by the HTTP /release endpoint so the DO stays in sync when
-// seats are released outside the reserve-batch path. Non-fatal.
+// trns_seats are released outside the reserve-batch path. Non-fatal.
 // ============================================================
 function notifyDOReleaseSeats(
   env: { TRIP_SEAT_DO?: DurableObjectNamespace },
@@ -749,7 +749,7 @@ function notifyDOReleaseSeats(
   try {
     const doId = env.TRIP_SEAT_DO.idFromName(tripId);
     const stub = env.TRIP_SEAT_DO.get(doId);
-    stub.fetch(new Request('https://do/release-seats', {
+    stub.fetch(new Request('https://do/release-trns_seats', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ seat_ids: seatIds, tokens, trip_id: tripId }),
@@ -758,11 +758,11 @@ function notifyDOReleaseSeats(
 }
 
 // ============================================================
-// P15-T2: GET /trips/:id/ws — WebSocket upgrade to Durable Object
+// P15-T2: GET /trns_trips/:id/ws — WebSocket upgrade to Durable Object
 // Proxies the connection to the TripSeatDO for this trip.
 // Falls back gracefully when TRIP_SEAT_DO binding not present.
 // ============================================================
-seatInventoryRouter.get('/trips/:id/ws', async (c) => {
+seatInventoryRouter.get('/trns_trips/:id/ws', async (c) => {
   const tripId = c.req.param('id');
   const env = c.env;
 
@@ -776,15 +776,15 @@ seatInventoryRouter.get('/trips/:id/ws', async (c) => {
 });
 
 // ============================================================
-// P10-T1: GET /trips/:id/live — SSE seat availability feed
-// Public: covered by /api/seat-inventory/trips publicRoute prefix
+// P10-T1: GET /trns_trips/:id/live — SSE seat availability feed
+// Public: covered by /api/seat-inventory/trns_trips publicRoute prefix
 // Pushes seat count updates every ~30 s; closes after 5 minutes.
 // ============================================================
 
 const SSE_MAX_LIFETIME_MS = 5 * 60 * 1000;
 const SSE_PING_INTERVAL_MS = 30 * 1000;
 
-seatInventoryRouter.get('/trips/:id/live', async (c) => {
+seatInventoryRouter.get('/trns_trips/:id/live', async (c) => {
   const tripId = c.req.param('id');
   const db = c.env.DB;
   const encoder = new TextEncoder();
@@ -796,7 +796,7 @@ seatInventoryRouter.get('/trips/:id/live', async (c) => {
       };
 
       const trip = await db.prepare(
-        `SELECT id FROM trips WHERE id = ? AND deleted_at IS NULL`
+        `SELECT id FROM trns_trips WHERE id = ? AND deleted_at IS NULL`
       ).bind(tripId).first<{ id: string }>();
 
       if (!trip) {
@@ -817,7 +817,7 @@ seatInventoryRouter.get('/trips/:id/live', async (c) => {
 
         try {
           const result = await db.prepare(
-            `SELECT status, COUNT(*) as count FROM seats WHERE trip_id = ? GROUP BY status`
+            `SELECT status, COUNT(*) as count FROM trns_seats WHERE trip_id = ? GROUP BY status`
           ).bind(tripId).all<{ status: string; count: number }>();
 
           const counts: Record<string, number> = {};
@@ -826,7 +826,7 @@ seatInventoryRouter.get('/trips/:id/live', async (c) => {
           const state = JSON.stringify(counts);
           if (state !== lastSentState) {
             lastSentState = state;
-            enqueue(`data: ${JSON.stringify({ trip_id: tripId, seats: counts, ts: Date.now() })}\n\n`);
+            enqueue(`data: ${JSON.stringify({ trip_id: tripId, trns_seats: counts, ts: Date.now() })}\n\n`);
           } else {
             enqueue(`: ping\n\n`);
           }

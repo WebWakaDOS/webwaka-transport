@@ -2,7 +2,7 @@
  * TRN-2: Agent Sales Application (Offline-first bus park POS)
  * Blueprint Reference: Part 10.3 (Transportation & Mobility Suite)
  * 
- * Offline-first sales transaction management for bus park agents.
+ * Offline-first sales transaction management for bus park trns_agents.
  * Supports queuing, conflict resolution, and automatic sync.
  */
 
@@ -55,15 +55,15 @@ export interface SalesResult {
 
 export class SalesTransactionManager {
   private transactions: Map<string, SalesTransaction> = new Map();
-  private receipts: Map<string, Receipt> = new Map();
-  private agents: Map<string, Agent> = new Map();
+  private trns_receipts: Map<string, Receipt> = new Map();
+  private trns_agents: Map<string, Agent> = new Map();
   private eventCallbacks: Map<string, Function[]> = new Map();
 
   /**
    * Registers an agent for the system.
    */
   registerAgent(agent: Agent): void {
-    this.agents.set(agent.id, agent);
+    this.trns_agents.set(agent.id, agent);
     this.emit('agent.registered', agent);
   }
 
@@ -79,7 +79,7 @@ export class SalesTransactionManager {
     totalAmount: number,
     paymentMethod: 'cash' | 'mobile_money' | 'card'
   ): SalesResult {
-    const agent = this.agents.get(agentId);
+    const agent = this.trns_agents.get(agentId);
     if (!agent) {
       return { success: false, error: 'Agent not found' };
     }
@@ -113,7 +113,7 @@ export class SalesTransactionManager {
 
     // Generate receipt
     const receipt = this.generateReceipt(transaction);
-    this.receipts.set(receipt.id, receipt);
+    this.trns_receipts.set(receipt.id, receipt);
     transaction.receiptId = receipt.id;
 
     this.emit('transaction.created', transaction);
@@ -232,7 +232,7 @@ export class SalesTransactionManager {
    * Gets a receipt by ID.
    */
   getReceipt(receiptId: string): Receipt | null {
-    return this.receipts.get(receiptId) || null;
+    return this.trns_receipts.get(receiptId) || null;
   }
 
   /**

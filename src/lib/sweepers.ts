@@ -3,12 +3,12 @@
  * Functions run by the Cloudflare Worker Cron trigger (every minute).
  *
  * Responsibilities:
- *   drainEventBus()           — flush platform_events outbox to downstream consumers
+ *   drainEventBus()           — flush trns_platform_events outbox to downstream consumers
  *   sweepExpiredReservations() — release timed-out seat holds
- *   sweepAbandonedBookings()  — cancel bookings pending payment > 30 min (configurable)
+ *   sweepAbandonedBookings()  — cancel trns_bookings pending payment > 30 min (configurable)
  *
  * All sweepers are idempotent and safe to re-run on overlap.
- * Event-Driven invariant: side-effects are published as platform_events so
+ * Event-Driven invariant: side-effects are published as trns_platform_events so
  * downstream services can react without polling.
  */
 import type { Env } from '../worker';
@@ -17,7 +17,7 @@ import { notifyBookingConfirmed } from '../core/central-mgmt.js';
 
 // ============================================================
 // B-005: Abandoned booking sweeper
-// Cancels bookings where payment has not been received within
+// Cancels trns_bookings where payment has not been received within
 // ABANDONMENT_WINDOW_MS (default: 30 minutes).
 // Seats are released and a booking:ABANDONED event is published.
 // ============================================================
@@ -33,7 +33,7 @@ export async function sweepAbandonedBookings(env: Env): Promise<void> {
     const abandoned = await db
       .prepare(
         `SELECT id, customer_id, trip_id, seat_ids
-         FROM bookings
+         FROM trns_bookings
          WHERE status = 'pending'
            AND payment_status = 'pending'
            AND created_at < ?
@@ -44,7 +44,7 @@ export async function sweepAbandonedBookings(env: Env): Promise<void> {
 
     if (!abandoned.results || abandoned.results.length === 0) return;
 
-    console.warn(`[AbandonedSweeper] Cancelling ${abandoned.results.length} abandoned bookings`);
+    console.warn(`[AbandonedSweeper] Cancelling ${abandoned.results.length} abandoned trns_bookings`);
 
     for (const booking of abandoned.results) {
       try {
@@ -52,11 +52,11 @@ export async function sweepAbandonedBookings(env: Env): Promise<void> {
 
         await db.batch([
           db.prepare(
-            `UPDATE bookings SET status = 'cancelled', cancelled_at = ? WHERE id = ?`
+            `UPDATE trns_bookings SET status = 'cancelled', cancelled_at = ? WHERE id = ?`
           ).bind(now, booking.id),
           ...seatIds.map(seatId =>
             db.prepare(
-              `UPDATE seats SET status = ?, reserved_by = NULL, reservation_token = NULL,
+              `UPDATE trns_seats SET status = ?, reserved_by = NULL, reservation_token = NULL,
                reservation_expires_at = NULL, updated_at = ? WHERE id = ?`
             ).bind('available', now, seatId)
           ),
@@ -64,7 +64,7 @@ export async function sweepAbandonedBookings(env: Env): Promise<void> {
 
         const evtId = `evt_ab_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
         await db.prepare(
-          `INSERT OR IGNORE INTO platform_events
+          `INSERT OR IGNORE INTO trns_platform_events
            (id, event_type, aggregate_id, aggregate_type, payload, status, created_at)
            VALUES (?, 'booking:ABANDONED', ?, 'booking', ?, 'pending', ?)`
         ).bind(
@@ -105,7 +105,7 @@ export async function sweepExpiredReservations(env: Env): Promise<void> {
     const expired = await db
       .prepare(
         `SELECT id, trip_id, operator_id
-         FROM seats
+         FROM trns_seats
          WHERE status = 'reserved'
            AND reservation_expires_at IS NOT NULL
            AND reservation_expires_at < ?`
@@ -119,7 +119,7 @@ export async function sweepExpiredReservations(env: Env): Promise<void> {
 
     await db
       .prepare(
-        `UPDATE seats
+        `UPDATE trns_seats
          SET status = 'available',
              reserved_by = NULL,
              reservation_token = NULL,
@@ -137,7 +137,7 @@ export async function sweepExpiredReservations(env: Env): Promise<void> {
       const evtId = `evt_sw_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       await db
         .prepare(
-          `INSERT OR IGNORE INTO platform_events
+          `INSERT OR IGNORE INTO trns_platform_events
            (id, event_type, aggregate_id, aggregate_type, payload, tenant_id, status, created_at)
            VALUES (?, 'seat.reservation_expired', ?, 'seat', ?, ?, 'pending', ?)`
         )
@@ -151,7 +151,7 @@ export async function sweepExpiredReservations(env: Env): Promise<void> {
         .run();
     }
 
-    console.warn(`[SeatSweeper] Released ${expired.results.length} seats`);
+    console.warn(`[SeatSweeper] Released ${expired.results.length} trns_seats`);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[SeatSweeper] Error: ${msg}`);
@@ -159,7 +159,7 @@ export async function sweepExpiredReservations(env: Env): Promise<void> {
 }
 
 // ============================================================
-// Event Bus drain — flushes platform_events outbox
+// Event Bus drain — flushes trns_platform_events outbox
 // (moved from worker.ts for separation of concerns)
 // ============================================================
 
@@ -170,7 +170,7 @@ export async function drainEventBus(env: Env): Promise<void> {
   try {
     const pending = await db
       .prepare(
-        `SELECT * FROM platform_events
+        `SELECT * FROM trns_platform_events
          WHERE status = 'pending' AND (retry_count IS NULL OR retry_count < 3)
          ORDER BY created_at ASC
          LIMIT 50`
@@ -187,7 +187,7 @@ export async function drainEventBus(env: Env): Promise<void> {
 
         await db
           .prepare(
-            `UPDATE platform_events SET status = 'processed', processed_at = ? WHERE id = ?`
+            `UPDATE trns_platform_events SET status = 'processed', processed_at = ? WHERE id = ?`
           )
           .bind(now, evt['id'])
           .run();
@@ -200,7 +200,7 @@ export async function drainEventBus(env: Env): Promise<void> {
 
         await db
           .prepare(
-            `UPDATE platform_events SET retry_count = ?, status = ?, last_error = ? WHERE id = ?`
+            `UPDATE trns_platform_events SET retry_count = ?, status = ?, last_error = ? WHERE id = ?`
           )
           .bind(retryCount, newStatus, errMsg, evt['id'])
           .run();
@@ -243,12 +243,12 @@ async function deliverEvent(evt: Record<string, unknown>, env: Env): Promise<voi
             weekday: 'short', day: 'numeric', month: 'short',
           })
         : '';
-      const seats = String(payload['seat_numbers'] ?? '');
+      const trns_seats = String(payload['seat_numbers'] ?? '');
       const bookingId = String(payload['booking_id'] ?? evt['aggregate_id'] ?? '');
       const shortId = bookingId.slice(-8).toUpperCase();
       const message =
         `WebWaka: Booking confirmed! ${origin} → ${destination}, ${departureDate}, ` +
-        `Seat(s): ${seats}. Ref: ${shortId}. View: https://webwaka.ng/b/${bookingId}`;
+        `Seat(s): ${trns_seats}. Ref: ${shortId}. View: https://webwaka.ng/b/${bookingId}`;
       // NDPR guard: skip SMS if phone is anonymized or empty
       if (phone && !phone.startsWith('NDPR_')) await sendSms(phone, message, env);
     } catch (err) {
@@ -329,13 +329,13 @@ async function deliverEvent(evt: Record<string, unknown>, env: Env): Promise<voi
       const db = env.DB;
       const now = Date.now();
 
-      // Find all confirmed bookings for this trip that have not had a review prompt sent
-      const bookings = await db.prepare(
+      // Find all confirmed trns_bookings for this trip that have not had a review prompt sent
+      const trns_bookings = await db.prepare(
         `SELECT b.id, b.customer_id, c.phone as customer_phone, r.origin, r.destination
-         FROM bookings b
-         JOIN customers c ON c.id = b.customer_id
-         JOIN trips t ON t.id = b.trip_id
-         JOIN routes r ON r.id = t.route_id
+         FROM trns_bookings b
+         JOIN trns_customers c ON c.id = b.customer_id
+         JOIN trns_trips t ON t.id = b.trip_id
+         JOIN trns_routes r ON r.id = t.route_id
          WHERE b.trip_id = ?
            AND b.status = 'confirmed'
            AND b.deleted_at IS NULL
@@ -344,7 +344,7 @@ async function deliverEvent(evt: Record<string, unknown>, env: Env): Promise<voi
       ).bind(tripId).all<{ id: string; customer_id: string; customer_phone: string; origin: string; destination: string }>();
 
       let sent = 0;
-      for (const bk of bookings.results) {
+      for (const bk of trns_bookings.results) {
         if (!bk.customer_phone || bk.customer_phone.startsWith('NDPR_')) continue;
         const shortRef = bk.id.slice(-8).toUpperCase();
         const msg =
@@ -352,7 +352,7 @@ async function deliverEvent(evt: Record<string, unknown>, env: Env): Promise<voi
           `Please rate your experience at https://webwaka.ng/review/${shortRef} — it takes 30 seconds.`;
         try {
           await sendSms(bk.customer_phone, msg, env);
-          await db.prepare(`UPDATE bookings SET review_prompt_sent_at = ? WHERE id = ?`)
+          await db.prepare(`UPDATE trns_bookings SET review_prompt_sent_at = ? WHERE id = ?`)
             .bind(now, bk.id).run();
           sent++;
         } catch {
@@ -380,11 +380,11 @@ async function deliverEvent(evt: Record<string, unknown>, env: Env): Promise<voi
         ? new Date(estimatedMs).toLocaleString('en-NG', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true })
         : 'To be advised';
 
-      // Re-query confirmed bookings to get phones (event payload has count, not phones)
+      // Re-query confirmed trns_bookings to get phones (event payload has count, not phones)
       const db = env.DB;
       const bookingsRes = await db.prepare(
-        `SELECT c.phone as customer_phone FROM bookings b
-         JOIN customers c ON c.id = b.customer_id
+        `SELECT c.phone as customer_phone FROM trns_bookings b
+         JOIN trns_customers c ON c.id = b.customer_id
          WHERE b.trip_id = ? AND b.status = 'confirmed' AND b.deleted_at IS NULL
          LIMIT 100`
       ).bind(tripId).all<{ customer_phone: string }>();
@@ -430,10 +430,10 @@ async function deliverEvent(evt: Record<string, unknown>, env: Env): Promise<voi
                 b.payment_provider, t.operator_id as trip_operator_id,
                 c.phone as customer_phone, c.name as customer_name,
                 r.origin, r.destination, t.departure_time
-         FROM bookings b
-         JOIN trips t ON t.id = b.trip_id
-         JOIN routes r ON r.id = t.route_id
-         JOIN customers c ON c.id = b.customer_id
+         FROM trns_bookings b
+         JOIN trns_trips t ON t.id = b.trip_id
+         JOIN trns_routes r ON r.id = t.route_id
+         JOIN trns_customers c ON c.id = b.customer_id
          WHERE b.id = ? AND b.deleted_at IS NULL`
       ).bind(bookingId).first<{
         id: string; total_amount: number; seat_ids: string;
@@ -454,7 +454,7 @@ async function deliverEvent(evt: Record<string, unknown>, env: Env): Promise<voi
       if (seatIds.length > 0) {
         const ph = seatIds.map(() => '?').join(', ');
         const seatsResult = await db.prepare(
-          `SELECT seat_number FROM seats WHERE id IN (${ph})`
+          `SELECT seat_number FROM trns_seats WHERE id IN (${ph})`
         ).bind(...seatIds).all<{ seat_number: string }>();
         seatNumbers = seatsResult.results.map(s => s.seat_number).join(', ');
       }
@@ -503,7 +503,7 @@ async function deliverEvent(evt: Record<string, unknown>, env: Env): Promise<voi
 
 // ============================================================
 // C-002: NDPR Data Retention Sweepers
-// sweepExpiredPII     — anonymize customers inactive for 2+ years
+// sweepExpiredPII     — anonymize trns_customers inactive for 2+ years
 // purgeExpiredFinancialData — soft-delete records older than 7 years
 // Both run in the daily cron (cron: 0 0 * * *)
 // ============================================================
@@ -512,8 +512,8 @@ const TWO_YEARS_MS = 2 * 365 * 24 * 60 * 60 * 1000;
 const SEVEN_YEARS_MS = 7 * 365 * 24 * 60 * 60 * 1000;
 
 /**
- * Anonymize PII for customers with no activity for 2+ years and
- * no active or future bookings (NDPR Article 2.1 — retention minimisation).
+ * Anonymize PII for trns_customers with no activity for 2+ years and
+ * no active or future trns_bookings (NDPR Article 2.1 — retention minimisation).
  */
 export async function sweepExpiredPII(env: Env): Promise<void> {
   const db = env.DB;
@@ -521,14 +521,14 @@ export async function sweepExpiredPII(env: Env): Promise<void> {
   const cutoff = now - TWO_YEARS_MS;
 
   try {
-    // Find customers inactive for 2+ years with no confirmed/future bookings
+    // Find trns_customers inactive for 2+ years with no confirmed/future trns_bookings
     const stale = await db.prepare(
-      `SELECT c.id FROM customers c
+      `SELECT c.id FROM trns_customers c
        WHERE c.deleted_at IS NULL
          AND (c.last_active_at IS NULL AND c.created_at < ?)
             OR (c.last_active_at IS NOT NULL AND c.last_active_at < ?)
          AND NOT EXISTS (
-           SELECT 1 FROM bookings b
+           SELECT 1 FROM trns_bookings b
            WHERE b.customer_id = c.id
              AND b.deleted_at IS NULL
              AND b.status IN ('pending', 'confirmed')
@@ -544,14 +544,14 @@ export async function sweepExpiredPII(env: Env): Promise<void> {
     for (const row of stale.results) {
       try {
         await db.prepare(
-          `UPDATE customers
+          `UPDATE trns_customers
            SET name = 'ANONYMIZED', phone = ?, email = NULL, updated_at = ?
            WHERE id = ? AND deleted_at IS NULL`
         ).bind(`NDPR_REDACTED_${row.id}`, now, row.id).run();
 
         const evtId = `evt_ndpr_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
         await db.prepare(
-          `INSERT OR IGNORE INTO platform_events
+          `INSERT OR IGNORE INTO trns_platform_events
            (id, event_type, aggregate_id, aggregate_type, payload, status, created_at)
            VALUES (?, 'customer:PII_ANONYMIZED', ?, 'customer', ?, 'pending', ?)`
         ).bind(
@@ -573,7 +573,7 @@ export async function sweepExpiredPII(env: Env): Promise<void> {
 }
 
 /**
- * Soft-delete financial records (bookings + sales_transactions) older than 7 years.
+ * Soft-delete financial records (trns_bookings + trns_sales_transactions) older than 7 years.
  * NDPR Article 2.3 — financial records retained 7 years per FIRS requirements.
  * Uses soft-delete only — sets deleted_at for compliance audit trail.
  */
@@ -585,10 +585,10 @@ export async function purgeExpiredFinancialData(env: Env): Promise<void> {
   try {
     const [bookingResult, txResult] = await Promise.all([
       db.prepare(
-        `UPDATE bookings SET deleted_at = ? WHERE created_at < ? AND deleted_at IS NULL`
+        `UPDATE trns_bookings SET deleted_at = ? WHERE created_at < ? AND deleted_at IS NULL`
       ).bind(now, cutoff).run(),
       db.prepare(
-        `UPDATE sales_transactions SET deleted_at = ? WHERE created_at < ? AND deleted_at IS NULL`
+        `UPDATE trns_sales_transactions SET deleted_at = ? WHERE created_at < ? AND deleted_at IS NULL`
       ).bind(now, cutoff).run(),
     ]);
 
@@ -596,11 +596,11 @@ export async function purgeExpiredFinancialData(env: Env): Promise<void> {
     const txAffected = (txResult.meta as { changes?: number })?.changes ?? 0;
 
     if (bookingsAffected > 0 || txAffected > 0) {
-      console.warn(`[NDPR/Financial] Purged ${bookingsAffected} bookings, ${txAffected} transactions (7yr TTL)`);
+      console.warn(`[NDPR/Financial] Purged ${bookingsAffected} trns_bookings, ${txAffected} transactions (7yr TTL)`);
 
       const evtId = `evt_fin_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       await db.prepare(
-        `INSERT OR IGNORE INTO platform_events
+        `INSERT OR IGNORE INTO trns_platform_events
          (id, event_type, aggregate_id, aggregate_type, payload, status, created_at)
          VALUES (?, 'compliance:FINANCIAL_PURGE', 'batch', 'compliance', ?, 'pending', ?)`
       ).bind(
@@ -617,7 +617,7 @@ export async function purgeExpiredFinancialData(env: Env): Promise<void> {
 
 // ============================================================
 // P08-T4: Waitlist notification expiry sweeper
-// Re-opens seats and advances queue when a notified customer fails to book within 30 min
+// Re-opens trns_seats and advances queue when a notified customer fails to book within 30 min
 // ============================================================
 export async function sweepExpiredWaitlistNotifications(env: Env): Promise<void> {
   const db = env.DB;
@@ -626,7 +626,7 @@ export async function sweepExpiredWaitlistNotifications(env: Env): Promise<void>
   try {
     const expired = await db.prepare(
       `SELECT wl.id, wl.trip_id, wl.customer_id, wl.seat_class
-       FROM waiting_list wl
+       FROM trns_waiting_list wl
        WHERE wl.deleted_at IS NULL
          AND wl.notified_at IS NOT NULL
          AND wl.expires_at IS NOT NULL
@@ -640,30 +640,30 @@ export async function sweepExpiredWaitlistNotifications(env: Env): Promise<void>
     for (const wl of expired.results) {
       try {
         await db.prepare(
-          `UPDATE waiting_list SET deleted_at = ? WHERE id = ?`
+          `UPDATE trns_waiting_list SET deleted_at = ? WHERE id = ?`
         ).bind(now, wl.id).run();
 
         // Find next un-notified entry for the same trip + class
         type WL = { id: string; customer_id: string };
         const next = await db.prepare(
-          `SELECT id, customer_id FROM waiting_list
+          `SELECT id, customer_id FROM trns_waiting_list
            WHERE trip_id = ? AND seat_class = ? AND deleted_at IS NULL AND notified_at IS NULL
            ORDER BY position ASC LIMIT 1`
         ).bind(wl.trip_id, wl.seat_class).first<WL>();
 
         if (next) {
           const seat = await db.prepare(
-            `SELECT id FROM seats WHERE trip_id = ? AND seat_class = ? AND status = 'available' LIMIT 1`
+            `SELECT id FROM trns_seats WHERE trip_id = ? AND seat_class = ? AND status = 'available' LIMIT 1`
           ).bind(wl.trip_id, wl.seat_class).first<{ id: string }>();
 
           if (seat) {
             const expires_at = now + 10 * 60_000; // T4-5: 10-minute hold window
             await db.prepare(
-              `UPDATE waiting_list SET notified_at = ?, expires_at = ? WHERE id = ?`
+              `UPDATE trns_waiting_list SET notified_at = ?, expires_at = ? WHERE id = ?`
             ).bind(now, expires_at, next.id).run();
 
             const customer = await db.prepare(
-              `SELECT phone FROM customers WHERE id = ?`
+              `SELECT phone FROM trns_customers WHERE id = ?`
             ).bind(next.customer_id).first<{ phone: string }>();
 
             if (customer?.phone && !customer.phone.startsWith('NDPR_')) {
@@ -690,7 +690,7 @@ export async function sweepExpiredWaitlistNotifications(env: Env): Promise<void>
 
 // ============================================================
 // P09-T1: sweepVehicleMaintenanceDue — daily
-// Publish vehicle.maintenance_due_soon for vehicles with service due in ≤ 7 days
+// Publish vehicle.maintenance_due_soon for trns_vehicles with service due in ≤ 7 days
 // ============================================================
 export async function sweepVehicleMaintenanceDue(env: Env): Promise<void> {
   const db = env.DB;
@@ -701,8 +701,8 @@ export async function sweepVehicleMaintenanceDue(env: Env): Promise<void> {
     // Use the most recent maintenance record per vehicle to determine next service due
     const records = await db.prepare(
       `SELECT vmr.vehicle_id, vmr.next_service_due, v.plate_number, vmr.operator_id
-       FROM vehicle_maintenance_records vmr
-       JOIN vehicles v ON v.id = vmr.vehicle_id
+       FROM trns_vehicle_maintenance_records vmr
+       JOIN trns_vehicles v ON v.id = vmr.vehicle_id
        WHERE vmr.next_service_due IS NOT NULL
          AND vmr.next_service_due < ?
          AND v.deleted_at IS NULL
@@ -713,7 +713,7 @@ export async function sweepVehicleMaintenanceDue(env: Env): Promise<void> {
     for (const r of records.results) {
       try {
         await db.prepare(
-          `INSERT INTO platform_events (id, event_type, aggregate_id, aggregate_type, payload, tenant_id, created_at)
+          `INSERT INTO trns_platform_events (id, event_type, aggregate_id, aggregate_type, payload, tenant_id, created_at)
            VALUES (?, 'vehicle.maintenance_due_soon', ?, 'vehicle', ?, ?, ?)`
         ).bind(
           `evt_mnt_${r.vehicle_id}_${now}`,
@@ -724,7 +724,7 @@ export async function sweepVehicleMaintenanceDue(env: Env): Promise<void> {
         ).run();
       } catch { /* skip individual failures */ }
     }
-    console.warn(`[VehicleMaintenanceSweeper] Checked ${records.results.length} vehicles`);
+    console.warn(`[VehicleMaintenanceSweeper] Checked ${records.results.length} trns_vehicles`);
   } catch (err: unknown) {
     console.error(`[VehicleMaintenanceSweeper] Error: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -743,16 +743,16 @@ export async function sweepVehicleDocumentExpiry(env: Env): Promise<void> {
     const docs = await db.prepare(
       `SELECT vd.id, vd.vehicle_id, vd.doc_type, vd.expires_at,
               v.plate_number, o.id AS operator_id
-       FROM vehicle_documents vd
-       JOIN vehicles v ON v.id = vd.vehicle_id
-       JOIN operators o ON o.id = v.operator_id
+       FROM trns_vehicle_documents vd
+       JOIN trns_vehicles v ON v.id = vd.vehicle_id
+       JOIN trns_operators o ON o.id = v.operator_id
        WHERE vd.expires_at < ?`
     ).bind(cutoff).all<{ id: string; vehicle_id: string; doc_type: string; expires_at: number; plate_number: string; operator_id: string }>();
 
     for (const doc of docs.results) {
       try {
         await db.prepare(
-          `INSERT INTO platform_events (id, event_type, aggregate_id, aggregate_type, payload, tenant_id, created_at)
+          `INSERT INTO trns_platform_events (id, event_type, aggregate_id, aggregate_type, payload, tenant_id, created_at)
            VALUES (?, 'vehicle.document_expiring', ?, 'vehicle_document', ?, ?, ?)`
         ).bind(
           `evt_vdc_${doc.id}_${now}`,
@@ -782,16 +782,16 @@ export async function sweepDriverDocumentExpiry(env: Env): Promise<void> {
     const docs = await db.prepare(
       `SELECT dd.id, dd.driver_id, dd.doc_type, dd.expires_at,
               d.name AS driver_name, o.id AS operator_id
-       FROM driver_documents dd
-       JOIN drivers d ON d.id = dd.driver_id
-       JOIN operators o ON o.id = d.operator_id
+       FROM trns_driver_documents dd
+       JOIN trns_drivers d ON d.id = dd.driver_id
+       JOIN trns_operators o ON o.id = d.operator_id
        WHERE dd.expires_at < ?`
     ).bind(cutoff).all<{ id: string; driver_id: string; doc_type: string; expires_at: number; driver_name: string; operator_id: string }>();
 
     for (const doc of docs.results) {
       try {
         await db.prepare(
-          `INSERT INTO platform_events (id, event_type, aggregate_id, aggregate_type, payload, tenant_id, created_at)
+          `INSERT INTO trns_platform_events (id, event_type, aggregate_id, aggregate_type, payload, tenant_id, created_at)
            VALUES (?, 'driver.document_expiring', ?, 'driver_document', ?, ?, ?)`
         ).bind(
           `evt_ddc_${doc.id}_${now}`,
@@ -810,7 +810,7 @@ export async function sweepDriverDocumentExpiry(env: Env): Promise<void> {
 
 // ============================================================
 // P10-T3: sweepBookingReminders — every-minute cron
-// Sends SMS reminders to confirmed bookings:
+// Sends SMS reminders to confirmed trns_bookings:
 //   - 24h reminder: departure_time between now+23h and now+25h
 //   -  2h reminder: departure_time between now+105min and now+135min
 // Idempotent: reminder_24h_sent_at / reminder_2h_sent_at guard duplicates.
@@ -829,10 +829,10 @@ export async function sweepBookingReminders(env: Env): Promise<void> {
       `SELECT b.id, b.seat_ids,
               c.phone, c.name as customer_name, c.ndpr_consent,
               t.departure_time, r.origin, r.destination
-       FROM bookings b
-       JOIN customers c ON c.id = b.customer_id
-       JOIN trips t ON t.id = b.trip_id
-       JOIN routes r ON r.id = t.route_id
+       FROM trns_bookings b
+       JOIN trns_customers c ON c.id = b.customer_id
+       JOIN trns_trips t ON t.id = b.trip_id
+       JOIN trns_routes r ON r.id = t.route_id
        WHERE b.status = 'confirmed'
          AND b.deleted_at IS NULL
          AND t.departure_time BETWEEN ? AND ?
@@ -855,7 +855,7 @@ export async function sweepBookingReminders(env: Env): Promise<void> {
         })();
         const msg = `WebWaka: Reminder — your trip ${booking.origin} → ${booking.destination} departs in ~24 hours (${depTime}). ${seatCount} seat(s) reserved. Safe travels!`;
         await sendSms(booking.phone, msg, env);
-        await db.prepare(`UPDATE bookings SET reminder_24h_sent_at = ? WHERE id = ?`).bind(now, booking.id).run();
+        await db.prepare(`UPDATE trns_bookings SET reminder_24h_sent_at = ? WHERE id = ?`).bind(now, booking.id).run();
       } catch { /* skip individual — non-fatal */ }
     }
 
@@ -863,10 +863,10 @@ export async function sweepBookingReminders(env: Env): Promise<void> {
       `SELECT b.id, b.seat_ids,
               c.phone, c.name as customer_name, c.ndpr_consent,
               t.departure_time, r.origin, r.destination
-       FROM bookings b
-       JOIN customers c ON c.id = b.customer_id
-       JOIN trips t ON t.id = b.trip_id
-       JOIN routes r ON r.id = t.route_id
+       FROM trns_bookings b
+       JOIN trns_customers c ON c.id = b.customer_id
+       JOIN trns_trips t ON t.id = b.trip_id
+       JOIN trns_routes r ON r.id = t.route_id
        WHERE b.status = 'confirmed'
          AND b.deleted_at IS NULL
          AND t.departure_time BETWEEN ? AND ?
@@ -886,7 +886,7 @@ export async function sweepBookingReminders(env: Env): Promise<void> {
         });
         const msg = `WebWaka: Departing soon! ${booking.origin} → ${booking.destination} departs at ${depTime} (~2 hours). Please proceed to boarding. Safe travels!`;
         await sendSms(booking.phone, msg, env);
-        await db.prepare(`UPDATE bookings SET reminder_2h_sent_at = ? WHERE id = ?`).bind(now, booking.id).run();
+        await db.prepare(`UPDATE trns_bookings SET reminder_2h_sent_at = ? WHERE id = ?`).bind(now, booking.id).run();
       } catch { /* skip individual — non-fatal */ }
     }
 

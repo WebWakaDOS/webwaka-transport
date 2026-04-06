@@ -13,7 +13,7 @@
  *   await sendPush(subscription, {
  *     title: 'Booking Confirmed',
  *     body: 'Your trip departs at 08:00',
- *     url: '/bookings/bk_abc123',
+ *     url: '/trns_bookings/bk_abc123',
  *   });
  *
  * Non-fatal: if VAPID keys are absent or push fails, the error is logged

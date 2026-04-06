@@ -4,13 +4,13 @@
 -- This allows boarding-scan endpoints to match against the locally-issued
 -- ticket_number without requiring a separate lookup table.
 --
--- Note: sync_mutations.entity_type now also accepts 'ticket' (no CHECK
+-- Note: trns_sync_mutations.entity_type now also accepts 'ticket' (no CHECK
 -- constraint is enforced by SQLite, but API callers must pass one of:
 --   trip | seat | booking | transaction | ticket)
 
-ALTER TABLE sales_transactions ADD COLUMN ticket_number TEXT;
-ALTER TABLE receipts ADD COLUMN ticket_number TEXT;
+ALTER TABLE trns_sales_transactions ADD COLUMN ticket_number TEXT;
+ALTER TABLE trns_receipts ADD COLUMN ticket_number TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_sales_transactions_ticket_number
-  ON sales_transactions(ticket_number)
+  ON trns_sales_transactions(ticket_number)
   WHERE ticket_number IS NOT NULL;

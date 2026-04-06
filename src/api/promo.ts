@@ -5,7 +5,7 @@
  *   - Percentage discount codes (e.g., 20% off)
  *   - Flat-rate discount codes (e.g., ₦500 off)
  *   - Usage limits, expiry, min fare requirements
- *   - Audit trail via promo_code_uses table
+ *   - Audit trail via trns_promo_code_uses table
  *
  * Invariants: Nigeria-First (kobo), Multi-tenant, Idempotent validation
  */
@@ -36,7 +36,7 @@ promoRouter.post('/validate', async (c) => {
   const promo = await c.env.DB
     .prepare(`
       SELECT id, discount_type, discount_value, max_discount_kobo, min_fare_kobo, max_uses, used_count
-      FROM promo_codes
+      FROM trns_promo_codes
       WHERE code = ? AND is_active = 1
         AND valid_from <= ? AND valid_until >= ?
         AND deleted_at IS NULL
@@ -115,7 +115,7 @@ promoRouter.post('/apply', async (c) => {
   const promo = await c.env.DB
     .prepare(`
       SELECT id, discount_type, discount_value, max_discount_kobo, min_fare_kobo, max_uses, used_count
-      FROM promo_codes
+      FROM trns_promo_codes
       WHERE code = ? AND is_active = 1
         AND valid_from <= ? AND valid_until >= ?
         AND deleted_at IS NULL
@@ -148,9 +148,9 @@ promoRouter.post('/apply', async (c) => {
   // Increment usage + record use
   const useId = `puse_${nanoid()}`;
   await c.env.DB.batch([
-    c.env.DB.prepare(`UPDATE promo_codes SET used_count = used_count + 1 WHERE id = ?`).bind(promo.id),
+    c.env.DB.prepare(`UPDATE trns_promo_codes SET used_count = used_count + 1 WHERE id = ?`).bind(promo.id),
     c.env.DB.prepare(`
-      INSERT INTO promo_code_uses (id, promo_code_id, customer_id, booking_id, ride_request_id, discount_applied_kobo, used_at)
+      INSERT INTO trns_promo_code_uses (id, promo_code_id, customer_id, booking_id, ride_request_id, discount_applied_kobo, used_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `).bind(useId, promo.id, body.customer_id ?? null, body.booking_id ?? null, body.ride_request_id ?? null, discountKobo, now),
   ]);
@@ -199,7 +199,7 @@ promoRouter.post('/codes', async (c) => {
 
   try {
     await c.env.DB.prepare(`
-      INSERT INTO promo_codes (id, operator_id, code, description, discount_type, discount_value, max_uses, min_fare_kobo, max_discount_kobo, valid_from, valid_until, is_active, created_by, created_at)
+      INSERT INTO trns_promo_codes (id, operator_id, code, description, discount_type, discount_value, max_uses, min_fare_kobo, max_discount_kobo, valid_from, valid_until, is_active, created_by, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
     `).bind(
       promoId, body.operator_id ?? null, body.code.toUpperCase(),
@@ -224,7 +224,7 @@ promoRouter.get('/codes', async (c) => {
   const active = c.req.query('active');
   const now = Date.now();
 
-  let query = `SELECT * FROM promo_codes WHERE deleted_at IS NULL`;
+  let query = `SELECT * FROM trns_promo_codes WHERE deleted_at IS NULL`;
   const bindings: unknown[] = [];
 
   if (operatorId) { query += ' AND (operator_id = ? OR operator_id IS NULL)'; bindings.push(operatorId); }
@@ -242,6 +242,6 @@ promoRouter.get('/codes', async (c) => {
 // ============================================================
 promoRouter.patch('/codes/:id/deactivate', async (c) => {
   const id = c.req.param('id');
-  await c.env.DB.prepare(`UPDATE promo_codes SET is_active = 0 WHERE id = ?`).bind(id).run();
+  await c.env.DB.prepare(`UPDATE trns_promo_codes SET is_active = 0 WHERE id = ?`).bind(id).run();
   return c.json({ success: true, data: { id, is_active: false } });
 });

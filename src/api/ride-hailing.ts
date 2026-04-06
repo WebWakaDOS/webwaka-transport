@@ -2,7 +2,7 @@
  * WebWaka Transport — Ride Hailing API Router (TRN-5)
  *
  * Covers:
- *   - Real-time ride matching (Haversine, active_drivers)
+ *   - Real-time ride matching (Haversine, trns_active_drivers)
  *   - Dynamic surge pricing (AI-enhanced)
  *   - Carpooling / ride-sharing
  *   - Scheduled rides
@@ -11,9 +11,9 @@
  *   - Toll fee calculation
  *   - Promo code application
  *   - Driver tipping
- *   - Intercity bookings with luggage allowances
+ *   - Intercity trns_bookings with luggage allowances
  *
- * Auth: All routes require JWT (except GET /ride-hailing/surge for public fare display)
+ * Auth: All trns_routes require JWT (except GET /ride-hailing/surge for public fare display)
  */
 
 import { Hono } from 'hono';
@@ -38,7 +38,7 @@ function validateCoords(lat: unknown, lon: unknown): { latitude: number; longitu
 
 // ============================================================
 // POST /api/ride-hailing/request
-// Create a new ride request + match nearest drivers
+// Create a new ride request + match nearest trns_drivers
 // ============================================================
 rideHailingRouter.post('/request', async (c) => {
   const body = await c.req.json<{
@@ -84,7 +84,7 @@ rideHailingRouter.post('/request', async (c) => {
     promoCodeRecord = await db
       .prepare(`
         SELECT id, discount_type, discount_value, max_discount_kobo
-        FROM promo_codes
+        FROM trns_promo_codes
         WHERE code = ? AND is_active = 1
           AND valid_from <= ? AND valid_until >= ?
           AND deleted_at IS NULL
@@ -94,7 +94,7 @@ rideHailingRouter.post('/request', async (c) => {
       .first<typeof promoCodeRecord>();
   }
 
-  // Find nearest available drivers
+  // Find nearest available trns_drivers
   const matchResult = await findNearestDrivers(
     db,
     pickup,
@@ -104,7 +104,7 @@ rideHailingRouter.post('/request', async (c) => {
   // Insert ride request
   await db
     .prepare(`
-      INSERT INTO ride_requests
+      INSERT INTO trns_ride_requests
         (id, customer_id, operator_id, pickup_latitude, pickup_longitude, pickup_address,
          dropoff_latitude, dropoff_longitude, dropoff_address, status, surge_multiplier,
          is_scheduled, scheduled_for, is_carpooled, carpool_group_id, promo_code,
@@ -133,7 +133,7 @@ rideHailingRouter.post('/request', async (c) => {
     for (let i = 0; i < body.waypoints.length; i++) {
       const wp = body.waypoints[i]!;
       await db
-        .prepare(`INSERT INTO ride_waypoints (id, ride_request_id, sequence, latitude, longitude, address, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .prepare(`INSERT INTO trns_ride_waypoints (id, ride_request_id, sequence, latitude, longitude, address, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
         .bind(`wp_${nanoid()}`, rideId, i + 1, wp.latitude, wp.longitude, wp.address ?? null, now)
         .run();
     }
@@ -187,18 +187,18 @@ rideHailingRouter.patch('/:id/accept', async (c) => {
   const { driver_id, vehicle_id } = await c.req.json<{ driver_id: string; vehicle_id?: string }>();
 
   const now = Date.now();
-  const ride = await c.env.DB.prepare(`SELECT id, status FROM ride_requests WHERE id = ?`).bind(rideId).first<{ id: string; status: string }>();
+  const ride = await c.env.DB.prepare(`SELECT id, status FROM trns_ride_requests WHERE id = ?`).bind(rideId).first<{ id: string; status: string }>();
   if (!ride) return c.json({ success: false, error: 'Ride not found' }, 404);
   if (ride.status !== 'pending' && ride.status !== 'matched') {
     return c.json({ success: false, error: `Cannot accept ride in status: ${ride.status}` }, 409);
   }
 
   await c.env.DB.prepare(`
-    UPDATE ride_requests SET status = 'accepted', driver_id = ?, vehicle_id = ?, accepted_at = ?, updated_at = ? WHERE id = ?
+    UPDATE trns_ride_requests SET status = 'accepted', driver_id = ?, vehicle_id = ?, accepted_at = ?, updated_at = ? WHERE id = ?
   `).bind(driver_id, vehicle_id ?? null, now, now, rideId).run();
 
   // Mark driver as on_ride
-  await c.env.DB.prepare(`UPDATE active_drivers SET status = 'on_ride', last_seen_at = ? WHERE driver_id = ?`).bind(now, driver_id).run();
+  await c.env.DB.prepare(`UPDATE trns_active_drivers SET status = 'on_ride', last_seen_at = ? WHERE driver_id = ?`).bind(now, driver_id).run();
 
   return c.json({ success: true, data: { ride_request_id: rideId, status: 'accepted' } });
 });
@@ -210,7 +210,7 @@ rideHailingRouter.patch('/:id/accept', async (c) => {
 rideHailingRouter.patch('/:id/start', async (c) => {
   const rideId = c.req.param('id');
   const now = Date.now();
-  await c.env.DB.prepare(`UPDATE ride_requests SET status = 'in_progress', started_at = ?, updated_at = ? WHERE id = ? AND status = 'accepted'`).bind(now, now, rideId).run();
+  await c.env.DB.prepare(`UPDATE trns_ride_requests SET status = 'in_progress', started_at = ?, updated_at = ? WHERE id = ? AND status = 'accepted'`).bind(now, now, rideId).run();
   return c.json({ success: true, data: { ride_request_id: rideId, status: 'in_progress' } });
 });
 
@@ -228,7 +228,7 @@ rideHailingRouter.patch('/:id/complete', async (c) => {
   const now = Date.now();
 
   const ride = await c.env.DB
-    .prepare(`SELECT * FROM ride_requests WHERE id = ?`)
+    .prepare(`SELECT * FROM trns_ride_requests WHERE id = ?`)
     .bind(rideId)
     .first<{
       id: string; base_fare_kobo: number | null; surge_multiplier: number;
@@ -243,7 +243,7 @@ rideHailingRouter.patch('/:id/complete', async (c) => {
   const waitSeconds = body.wait_time_seconds ?? 0;
   if (ride.operator_id) {
     const cfg = await c.env.DB
-      .prepare(`SELECT free_wait_seconds, charge_per_minute_kobo FROM wait_time_config WHERE operator_id = ? AND is_active = 1`)
+      .prepare(`SELECT free_wait_seconds, charge_per_minute_kobo FROM trns_wait_time_config WHERE operator_id = ? AND is_active = 1`)
       .bind(ride.operator_id)
       .first<{ free_wait_seconds: number; charge_per_minute_kobo: number }>();
     if (cfg && waitSeconds > cfg.free_wait_seconds) {
@@ -259,7 +259,7 @@ rideHailingRouter.patch('/:id/complete', async (c) => {
   );
 
   await c.env.DB.prepare(`
-    UPDATE ride_requests SET
+    UPDATE trns_ride_requests SET
       status = 'completed', completed_at = ?, final_fare_kobo = ?,
       distance_km = ?, duration_minutes = ?,
       wait_time_seconds = ?, wait_time_charge_kobo = ?,
@@ -269,7 +269,7 @@ rideHailingRouter.patch('/:id/complete', async (c) => {
 
   // Mark driver as available again
   if (ride.driver_id) {
-    await c.env.DB.prepare(`UPDATE active_drivers SET status = 'available', last_seen_at = ? WHERE driver_id = ?`).bind(now, ride.driver_id).run();
+    await c.env.DB.prepare(`UPDATE trns_active_drivers SET status = 'available', last_seen_at = ? WHERE driver_id = ?`).bind(now, ride.driver_id).run();
   }
 
   // Notify central-mgmt ledger of completed ride fare (WWT-001: all financial transactions)
@@ -318,7 +318,7 @@ rideHailingRouter.post('/:id/tip', async (c) => {
   }
 
   const ride = await c.env.DB
-    .prepare(`SELECT driver_id, status FROM ride_requests WHERE id = ?`)
+    .prepare(`SELECT driver_id, status FROM trns_ride_requests WHERE id = ?`)
     .bind(rideId)
     .first<{ driver_id: string | null; status: string }>();
 
@@ -330,12 +330,12 @@ rideHailingRouter.post('/:id/tip', async (c) => {
   const tipId = `tip_${nanoid()}`;
 
   await c.env.DB.prepare(`
-    INSERT INTO driver_tips (id, driver_id, customer_id, ride_request_id, amount_kobo, payment_method, message, created_at)
+    INSERT INTO trns_driver_tips (id, driver_id, customer_id, ride_request_id, amount_kobo, payment_method, message, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(tipId, ride.driver_id, body.customer_id, rideId, body.amount_kobo, body.payment_method ?? 'card', body.message ?? null, now).run();
 
-  // Update ride_requests tip total
-  await c.env.DB.prepare(`UPDATE ride_requests SET tip_kobo = tip_kobo + ?, updated_at = ? WHERE id = ?`).bind(body.amount_kobo, now, rideId).run();
+  // Update trns_ride_requests tip total
+  await c.env.DB.prepare(`UPDATE trns_ride_requests SET tip_kobo = tip_kobo + ?, updated_at = ? WHERE id = ?`).bind(body.amount_kobo, now, rideId).run();
 
   return c.json({ success: true, data: { tip_id: tipId, amount_kobo: body.amount_kobo, driver_id: ride.driver_id } }, 201);
 });
@@ -348,9 +348,9 @@ rideHailingRouter.get('/:id', async (c) => {
   const rideId = c.req.param('id');
   const ride = await c.env.DB.prepare(`
     SELECT rr.*, d.name as driver_name, d.phone as driver_phone, v.plate_number, v.vehicle_type
-    FROM ride_requests rr
-    LEFT JOIN drivers d ON rr.driver_id = d.id
-    LEFT JOIN vehicles v ON rr.vehicle_id = v.id
+    FROM trns_ride_requests rr
+    LEFT JOIN trns_drivers d ON rr.driver_id = d.id
+    LEFT JOIN trns_vehicles v ON rr.vehicle_id = v.id
     WHERE rr.id = ?
   `).bind(rideId).first();
   if (!ride) return c.json({ success: false, error: 'Ride not found' }, 404);
@@ -367,7 +367,7 @@ rideHailingRouter.get('/', async (c) => {
   const status = c.req.query('status');
   const limit = Math.min(Number(c.req.query('limit') ?? 20), 100);
 
-  let query = `SELECT rr.*, d.name as driver_name FROM ride_requests rr LEFT JOIN drivers d ON rr.driver_id = d.id WHERE 1=1`;
+  let query = `SELECT rr.*, d.name as driver_name FROM trns_ride_requests rr LEFT JOIN trns_drivers d ON rr.driver_id = d.id WHERE 1=1`;
   const bindings: unknown[] = [];
 
   if (customerId) { query += ' AND rr.customer_id = ?'; bindings.push(customerId); }
@@ -405,7 +405,7 @@ rideHailingRouter.post('/carpool', async (c) => {
     }
     const groupId = `cp_${nanoid()}`;
     await db.prepare(`
-      INSERT INTO carpool_groups (id, operator_id, origin, destination, departure_time, max_passengers, base_fare_per_seat_kobo, current_passengers, status, created_at, updated_at)
+      INSERT INTO trns_carpool_groups (id, operator_id, origin, destination, departure_time, max_passengers, base_fare_per_seat_kobo, current_passengers, status, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'open', ?, ?)
     `).bind(groupId, body.operator_id ?? null, body.origin, body.destination, body.departure_time, body.max_passengers ?? 4, body.base_fare_per_seat_kobo, now, now).run();
 
@@ -414,14 +414,14 @@ rideHailingRouter.post('/carpool', async (c) => {
 
   if (body.action === 'join') {
     if (!body.carpool_group_id) return c.json({ success: false, error: 'carpool_group_id required to join' }, 400);
-    const group = await db.prepare(`SELECT id, current_passengers, max_passengers, status FROM carpool_groups WHERE id = ?`).bind(body.carpool_group_id).first<{ id: string; current_passengers: number; max_passengers: number; status: string }>();
+    const group = await db.prepare(`SELECT id, current_passengers, max_passengers, status FROM trns_carpool_groups WHERE id = ?`).bind(body.carpool_group_id).first<{ id: string; current_passengers: number; max_passengers: number; status: string }>();
     if (!group) return c.json({ success: false, error: 'Carpool group not found' }, 404);
     if (group.status !== 'open') return c.json({ success: false, error: `Carpool group is ${group.status}` }, 409);
     if (group.current_passengers >= group.max_passengers) return c.json({ success: false, error: 'Carpool group is full' }, 409);
 
     const newCount = group.current_passengers + 1;
     const newStatus = newCount >= group.max_passengers ? 'full' : 'open';
-    await db.prepare(`UPDATE carpool_groups SET current_passengers = ?, status = ?, updated_at = ? WHERE id = ?`).bind(newCount, newStatus, now, body.carpool_group_id).run();
+    await db.prepare(`UPDATE trns_carpool_groups SET current_passengers = ?, status = ?, updated_at = ? WHERE id = ?`).bind(newCount, newStatus, now, body.carpool_group_id).run();
 
     return c.json({ success: true, data: { carpool_group_id: body.carpool_group_id, current_passengers: newCount, status: newStatus } });
   }
@@ -438,7 +438,7 @@ rideHailingRouter.get('/carpool/search', async (c) => {
   const destination = c.req.query('destination');
   const date = c.req.query('date');
 
-  let query = `SELECT * FROM carpool_groups WHERE status = 'open'`;
+  let query = `SELECT * FROM trns_carpool_groups WHERE status = 'open'`;
   const bindings: unknown[] = [];
   if (origin) { query += ' AND LOWER(origin) LIKE ?'; bindings.push(`%${origin.toLowerCase()}%`); }
   if (destination) { query += ' AND LOWER(destination) LIKE ?'; bindings.push(`%${destination.toLowerCase()}%`); }
@@ -485,11 +485,11 @@ rideHailingRouter.get('/toll-fees', async (c) => {
   if (!routeId) return c.json({ success: false, error: 'route_id required' }, 400);
 
   const { results } = await c.env.DB
-    .prepare(`SELECT * FROM toll_gates WHERE route_id = ? AND is_active = 1 ORDER BY name`)
+    .prepare(`SELECT * FROM trns_toll_gates WHERE route_id = ? AND is_active = 1 ORDER BY name`)
     .bind(routeId)
     .all();
 
   const totalKobo = (results ?? []).reduce((sum: number, r: Record<string, unknown>) => sum + (Number(r['fee_kobo']) || 0), 0);
 
-  return c.json({ success: true, data: { toll_gates: results ?? [], total_toll_fee_kobo: totalKobo } });
+  return c.json({ success: true, data: { trns_toll_gates: results ?? [], total_toll_fee_kobo: totalKobo } });
 });

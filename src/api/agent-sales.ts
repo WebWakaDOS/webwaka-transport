@@ -33,15 +33,15 @@ function grpComputeFareByClass(baseFare: number, matrix: GrpFareMatrix | null, d
 export const agentSalesRouter = new Hono<AppContext>();
 
 // ============================================================
-// GET /agents — list agents
+// GET /trns_agents — list trns_agents
 // ============================================================
-agentSalesRouter.get('/agents', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'SUPERVISOR']), async (c) => {
+agentSalesRouter.get('/trns_agents', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'SUPERVISOR']), async (c) => {
   const q = c.req.query();
   const { status } = q;
   const { limit, offset } = parsePagination(q);
   const db = c.env.DB;
 
-  let query = `SELECT * FROM agents WHERE deleted_at IS NULL`;
+  let query = `SELECT * FROM trns_agents WHERE deleted_at IS NULL`;
   const params: unknown[] = [];
 
   const scoped = applyTenantScope(c, query, params);
@@ -56,21 +56,21 @@ agentSalesRouter.get('/agents', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STA
     const result = await db.prepare(query).bind(...params).all<DbAgent>();
     return c.json({ success: true, data: result.results, meta: metaResponse(result.results.length, limit, offset) });
   } catch {
-    return c.json({ success: false, error: 'Failed to fetch agents' }, 500);
+    return c.json({ success: false, error: 'Failed to fetch trns_agents' }, 500);
   }
 });
 
 // ============================================================
-// POST /agents — register an agent (SUPER_ADMIN or TENANT_ADMIN)
+// POST /trns_agents — register an agent (SUPER_ADMIN or TENANT_ADMIN)
 // ============================================================
-agentSalesRouter.post('/agents', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+agentSalesRouter.post('/trns_agents', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
   const body = await c.req.json() as Record<string, unknown>;
   const err = requireFields(body, ['operator_id', 'name', 'phone']);
   if (err) return c.json({ success: false, error: err }, 400);
 
-  const { operator_id, name, phone, email, role, bus_parks } = body as {
+  const { operator_id, name, phone, email, role, trns_bus_parks } = body as {
     operator_id: string; name: string; phone: string;
-    email?: string; role?: string; bus_parks?: string[];
+    email?: string; role?: string; trns_bus_parks?: string[];
   };
 
   const db = c.env.DB;
@@ -79,9 +79,9 @@ agentSalesRouter.post('/agents', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), a
 
   try {
     await db.prepare(
-      `INSERT INTO agents (id, operator_id, name, phone, email, role, bus_parks, status, created_at, updated_at)
+      `INSERT INTO trns_agents (id, operator_id, name, phone, email, role, trns_bus_parks, status, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`
-    ).bind(id, operator_id, name, phone, email ?? null, role ?? 'agent', JSON.stringify(bus_parks ?? []), now, now).run();
+    ).bind(id, operator_id, name, phone, email ?? null, role ?? 'agent', JSON.stringify(trns_bus_parks ?? []), now, now).run();
 
     return c.json({ success: true, data: { id, operator_id, name, phone, role: role ?? 'agent', status: 'active' } }, 201);
   } catch (e: unknown) {
@@ -155,16 +155,16 @@ agentSalesRouter.post('/transactions', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN
   // Build QR code payload: bookingId:seatId1,seatId2,...
   const qrCode = `${id}:${seat_ids.join(',')}`;
 
-  // Verify all seats are still available before recording sale
+  // Verify all trns_seats are still available before recording sale
   try {
     const seatChecks = await Promise.all(
       seat_ids.map(seatId =>
-        db.prepare(`SELECT id, status, trip_id FROM seats WHERE id = ?`)
+        db.prepare(`SELECT id, status, trip_id FROM trns_seats WHERE id = ?`)
           .bind(seatId).first<{ id: string; status: string; trip_id: string }>()
       )
     );
     for (const seat of seatChecks) {
-      if (!seat || seat.trip_id !== trip_id) return c.json({ success: false, error: 'One or more seats not found for this trip' }, 404);
+      if (!seat || seat.trip_id !== trip_id) return c.json({ success: false, error: 'One or more trns_seats not found for this trip' }, 404);
       if (seat.status === 'confirmed' || seat.status === 'blocked') {
         // Include conflicted_seats so the sync engine can build a precise
         // conflict reason (e.g. "Seat(s) already booked online: s_1A").
@@ -181,14 +181,14 @@ agentSalesRouter.post('/transactions', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN
 
   // Fetch seat numbers for receipt
   const seatRows = await db.prepare(
-    `SELECT id, seat_number FROM seats WHERE id IN (${seat_ids.map(() => '?').join(',')})`,
+    `SELECT id, seat_number FROM trns_seats WHERE id IN (${seat_ids.map(() => '?').join(',')})`,
   ).bind(...seat_ids).all<{ id: string; seat_number: string }>().catch(() => ({ results: [] as { id: string; seat_number: string }[] }));
   const seatNumbers = seatRows.results.map(s => s.seat_number);
 
   try {
     await db.batch([
       db.prepare(
-        `INSERT INTO sales_transactions
+        `INSERT INTO trns_sales_transactions
            (id, agent_id, trip_id, seat_ids, passenger_names, total_amount, payment_method,
             payment_status, sync_status, receipt_id, passenger_id_type, passenger_id_hash,
             park_id, ticket_number, next_of_kin_name, next_of_kin_phone, created_at)
@@ -201,12 +201,12 @@ agentSalesRouter.post('/transactions', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN
         next_of_kin_name ?? null, next_of_kin_phone ?? null, now
       ),
       db.prepare(
-        `INSERT INTO receipts (id, transaction_id, agent_id, trip_id, passenger_names, seat_numbers, total_amount, payment_method, qr_code, ticket_number, issued_at)
+        `INSERT INTO trns_receipts (id, transaction_id, agent_id, trip_id, passenger_names, seat_numbers, total_amount, payment_method, qr_code, ticket_number, issued_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).bind(receiptId, id, agent_id, trip_id, JSON.stringify(passenger_names), JSON.stringify(seatNumbers), total_amount, payment_method, qrCode, ticket_number ?? null, now),
       ...seat_ids.map(seatId =>
         db.prepare(
-          `UPDATE seats SET status = ?, confirmed_by = ?, confirmed_at = ?, updated_at = ? WHERE id = ?`
+          `UPDATE trns_seats SET status = ?, confirmed_by = ?, confirmed_at = ?, updated_at = ? WHERE id = ?`
         ).bind('confirmed', id, now, now, seatId)
       ),
     ]);
@@ -247,8 +247,8 @@ agentSalesRouter.get('/transactions', async (c) => {
   let query = `SELECT st.id, st.agent_id, st.trip_id, st.seat_ids, st.passenger_names,
     st.total_amount, st.payment_method, st.payment_status, st.sync_status, st.receipt_id,
     st.passenger_id_type, st.park_id, st.created_at, st.synced_at, st.deleted_at
-    FROM sales_transactions st
-    JOIN agents a ON st.agent_id = a.id
+    FROM trns_sales_transactions st
+    JOIN trns_agents a ON st.agent_id = a.id
     WHERE st.deleted_at IS NULL`;
   const params: unknown[] = [];
 
@@ -273,22 +273,22 @@ agentSalesRouter.get('/transactions', async (c) => {
 });
 
 // ============================================================
-// GET /receipts/:id — get a receipt (tenant-scoped)
+// GET /trns_receipts/:id — get a receipt (tenant-scoped)
 // ============================================================
-agentSalesRouter.get('/receipts/:id', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'SUPERVISOR']), async (c) => {
+agentSalesRouter.get('/trns_receipts/:id', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF', 'SUPERVISOR']), async (c) => {
   const id = c.req.param('id');
   const db = c.env.DB;
   const jwtUser = c.get('user');
   const isSuperAdmin = jwtUser?.role === 'SUPER_ADMIN';
 
   try {
-    const receipt = await db.prepare(`SELECT * FROM receipts WHERE id = ?`).bind(id).first<DbReceipt>();
+    const receipt = await db.prepare(`SELECT * FROM trns_receipts WHERE id = ?`).bind(id).first<DbReceipt>();
     if (!receipt) return c.json({ success: false, error: 'Receipt not found' }, 404);
 
     // Enforce tenant scope for non-SUPER_ADMIN callers
     if (!isSuperAdmin && jwtUser?.operatorId) {
       const agent = await db.prepare(
-        `SELECT operator_id FROM agents WHERE id = ?`
+        `SELECT operator_id FROM trns_agents WHERE id = ?`
       ).bind(receipt.agent_id).first<{ operator_id: string }>();
       if (!agent || agent.operator_id !== jwtUser.operatorId) {
         return c.json({ success: false, error: 'Receipt not found' }, 404);
@@ -302,9 +302,9 @@ agentSalesRouter.get('/receipts/:id', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN'
 });
 
 // ============================================================
-// PATCH /agents/:id — update agent profile / status
+// PATCH /trns_agents/:id — update agent profile / status
 // ============================================================
-agentSalesRouter.patch('/agents/:id', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
+agentSalesRouter.patch('/trns_agents/:id', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), async (c) => {
   const id = c.req.param('id');
   const body = await c.req.json<Record<string, unknown>>();
   const db = c.env.DB;
@@ -312,28 +312,28 @@ agentSalesRouter.patch('/agents/:id', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN'
 
   try {
     const agent = await db.prepare(
-      `SELECT * FROM agents WHERE id = ? AND deleted_at IS NULL`
+      `SELECT * FROM trns_agents WHERE id = ? AND deleted_at IS NULL`
     ).bind(id).first<DbAgent>();
     if (!agent) return c.json({ success: false, error: 'Agent not found' }, 404);
 
-    const { name, phone, email, role, status, bus_parks } = body as {
+    const { name, phone, email, role, status, trns_bus_parks } = body as {
       name?: string; phone?: string; email?: string;
-      role?: string; status?: string; bus_parks?: string[];
+      role?: string; status?: string; trns_bus_parks?: string[];
     };
 
     await db.prepare(
-      `UPDATE agents
+      `UPDATE trns_agents
        SET name = COALESCE(?, name),
            phone = COALESCE(?, phone),
            email = COALESCE(?, email),
            role = COALESCE(?, role),
            status = COALESCE(?, status),
-           bus_parks = COALESCE(?, bus_parks),
+           trns_bus_parks = COALESCE(?, trns_bus_parks),
            updated_at = ?
        WHERE id = ?`
     ).bind(
       name ?? null, phone ?? null, email ?? null, role ?? null, status ?? null,
-      bus_parks != null ? JSON.stringify(bus_parks) : null,
+      trns_bus_parks != null ? JSON.stringify(trns_bus_parks) : null,
       now, id
     ).run();
 
@@ -365,7 +365,7 @@ agentSalesRouter.post('/sync', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAF
     try {
       const id = (txn['id'] as string | undefined) ?? genId('txn');
       await db.prepare(
-        `INSERT OR IGNORE INTO sales_transactions
+        `INSERT OR IGNORE INTO trns_sales_transactions
          (id, agent_id, trip_id, seat_ids, passenger_names, total_amount, payment_method, payment_status, sync_status, created_at, synced_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', 'synced', ?, ?)`
       ).bind(
@@ -393,7 +393,7 @@ agentSalesRouter.get('/dashboard', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', '
   const todayStart = new Date().setHours(0, 0, 0, 0);
 
   let statsQuery = `SELECT COUNT(*) as txn_count, COALESCE(SUM(total_amount), 0) as total_revenue
-    FROM sales_transactions WHERE deleted_at IS NULL AND created_at >= ?`;
+    FROM trns_sales_transactions WHERE deleted_at IS NULL AND created_at >= ?`;
   const params: unknown[] = [todayStart];
   if (agent_id) { statsQuery += ` AND agent_id = ?`; params.push(agent_id); }
 
@@ -419,7 +419,7 @@ agentSalesRouter.get('/parks', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAF
   const jwtUser = c.get('user');
   const isSuperAdmin = jwtUser?.role === 'SUPER_ADMIN';
 
-  let query = `SELECT * FROM bus_parks WHERE deleted_at IS NULL`;
+  let query = `SELECT * FROM trns_bus_parks WHERE deleted_at IS NULL`;
   const params: unknown[] = [];
   if (!isSuperAdmin && jwtUser?.operatorId) {
     query += ` AND operator_id = ?`;
@@ -457,7 +457,7 @@ agentSalesRouter.post('/parks', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), as
 
   try {
     await db.prepare(
-      `INSERT INTO bus_parks (id, operator_id, name, city, state, latitude, longitude, created_at)
+      `INSERT INTO trns_bus_parks (id, operator_id, name, city, state, latitude, longitude, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(id, operator_id, name, city, state, latitude ?? null, longitude ?? null, now).run();
 
@@ -473,9 +473,9 @@ agentSalesRouter.post('/parks', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN']), as
 });
 
 // ============================================================
-// P07-T4: POST /parks/:id/agents — assign agent to park (SUPERVISOR+)
+// P07-T4: POST /parks/:id/trns_agents — assign agent to park (SUPERVISOR+)
 // ============================================================
-agentSalesRouter.post('/parks/:id/agents', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR']), async (c) => {
+agentSalesRouter.post('/parks/:id/trns_agents', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR']), async (c) => {
   const parkId = c.req.param('id');
   const body = await c.req.json() as Record<string, unknown>;
   const err = requireFields(body, ['agent_id']);
@@ -487,8 +487,8 @@ agentSalesRouter.post('/parks/:id/agents', requireRole(['SUPER_ADMIN', 'TENANT_A
   try {
     // T4-7: Fetch park and agent together to validate cross-operator assignment
     const [park, agent] = await Promise.all([
-      db.prepare(`SELECT id, operator_id FROM bus_parks WHERE id = ? AND deleted_at IS NULL`).bind(parkId).first<{ id: string; operator_id: string }>(),
-      db.prepare(`SELECT id, operator_id FROM agents WHERE id = ? AND deleted_at IS NULL`).bind(agent_id).first<{ id: string; operator_id: string }>(),
+      db.prepare(`SELECT id, operator_id FROM trns_bus_parks WHERE id = ? AND deleted_at IS NULL`).bind(parkId).first<{ id: string; operator_id: string }>(),
+      db.prepare(`SELECT id, operator_id FROM trns_agents WHERE id = ? AND deleted_at IS NULL`).bind(agent_id).first<{ id: string; operator_id: string }>(),
     ]);
     if (!park) return c.json({ success: false, error: 'Bus park not found' }, 404);
     if (!agent) return c.json({ success: false, error: 'Agent not found' }, 404);
@@ -499,7 +499,7 @@ agentSalesRouter.post('/parks/:id/agents', requireRole(['SUPER_ADMIN', 'TENANT_A
     }
 
     await db.prepare(
-      `INSERT OR IGNORE INTO agent_bus_parks (agent_id, park_id) VALUES (?, ?)`
+      `INSERT OR IGNORE INTO trns_agent_bus_parks (agent_id, park_id) VALUES (?, ?)`
     ).bind(agent_id, parkId).run();
 
     return c.json({ success: true, data: { agent_id, park_id: parkId } }, 201);
@@ -509,16 +509,16 @@ agentSalesRouter.post('/parks/:id/agents', requireRole(['SUPER_ADMIN', 'TENANT_A
 });
 
 // ============================================================
-// P07-T4: DELETE /parks/:id/agents/:agentId — unassign agent (SUPERVISOR+)
+// P07-T4: DELETE /parks/:id/trns_agents/:agentId — unassign agent (SUPERVISOR+)
 // ============================================================
-agentSalesRouter.delete('/parks/:id/agents/:agentId', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR']), async (c) => {
+agentSalesRouter.delete('/parks/:id/trns_agents/:agentId', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR']), async (c) => {
   const parkId = c.req.param('id');
   const agentId = c.req.param('agentId');
   const db = c.env.DB;
 
   try {
     await db.prepare(
-      `DELETE FROM agent_bus_parks WHERE agent_id = ? AND park_id = ?`
+      `DELETE FROM trns_agent_bus_parks WHERE agent_id = ? AND park_id = ?`
     ).bind(agentId, parkId).run();
     return c.json({ success: true, data: { agent_id: agentId, park_id: parkId, removed: true } });
   } catch {
@@ -553,7 +553,7 @@ agentSalesRouter.post('/reconciliation', requireRole(['SUPER_ADMIN', 'TENANT_ADM
 
   // Prevent duplicate reconciliation for same agent+date
   const existing = await db.prepare(
-    `SELECT id FROM float_reconciliation WHERE agent_id = ? AND period_date = ?`
+    `SELECT id FROM trns_float_reconciliation WHERE agent_id = ? AND period_date = ?`
   ).bind(agent_id, period_date).first<{ id: string }>();
   if (existing) {
     return c.json({ success: false, error: 'Reconciliation already submitted for this date' }, 409);
@@ -563,7 +563,7 @@ agentSalesRouter.post('/reconciliation', requireRole(['SUPER_ADMIN', 'TENANT_ADM
   const dateStart = new Date(`${period_date}T00:00:00.000Z`).getTime();
   const dateEnd = new Date(`${period_date}T23:59:59.999Z`).getTime();
   const expectedRow = await db.prepare(
-    `SELECT COALESCE(SUM(total_amount), 0) AS expected FROM sales_transactions
+    `SELECT COALESCE(SUM(total_amount), 0) AS expected FROM trns_sales_transactions
      WHERE agent_id = ? AND payment_status = 'completed' AND payment_method = 'cash'
        AND created_at >= ? AND created_at <= ? AND deleted_at IS NULL`
   ).bind(agent_id, dateStart, dateEnd).first<{ expected: number }>();
@@ -577,7 +577,7 @@ agentSalesRouter.post('/reconciliation', requireRole(['SUPER_ADMIN', 'TENANT_ADM
   const id = genId('rec');
   try {
     await db.prepare(
-      `INSERT INTO float_reconciliation
+      `INSERT INTO trns_float_reconciliation
        (id, agent_id, operator_id, period_date, expected_kobo, submitted_kobo, discrepancy_kobo, status, notes, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
     ).bind(id, agent_id, operator_id, period_date, expected_kobo, submitted_kobo, discrepancy_kobo, notes ?? null, now).run();
@@ -587,7 +587,7 @@ agentSalesRouter.post('/reconciliation', requireRole(['SUPER_ADMIN', 'TENANT_ADM
       await publishEvent(db, {
         event_type: 'agent.reconciliation.filed',
         aggregate_id: id,
-        aggregate_type: 'float_reconciliation',
+        aggregate_type: 'trns_float_reconciliation',
         payload: { reconciliation_id: id, agent_id, operator_id, period_date, expected_kobo, submitted_kobo, discrepancy_kobo },
         timestamp: now,
       });
@@ -604,7 +604,7 @@ agentSalesRouter.post('/reconciliation', requireRole(['SUPER_ADMIN', 'TENANT_ADM
 
 // ============================================================
 // P07-T1: GET /reconciliation — list float reconciliations
-// STAFF (agents) see only their own; SUPERVISOR+ see all for operator
+// STAFF (trns_agents) see only their own; SUPERVISOR+ see all for operator
 // ============================================================
 agentSalesRouter.get('/reconciliation', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR', 'STAFF']), async (c) => {
   const q = c.req.query();
@@ -615,7 +615,7 @@ agentSalesRouter.get('/reconciliation', requireRole(['SUPER_ADMIN', 'TENANT_ADMI
   const isSuperAdmin = jwtUser?.role === 'SUPER_ADMIN';
   const isAgent = jwtUser?.role === 'STAFF';
 
-  let query = `SELECT * FROM float_reconciliation WHERE 1=1`;
+  let query = `SELECT * FROM trns_float_reconciliation WHERE 1=1`;
   const params: unknown[] = [];
 
   // Tenant scope: non-SUPER_ADMIN scoped to operator
@@ -665,7 +665,7 @@ agentSalesRouter.patch('/reconciliation/:id', requireRole(['SUPER_ADMIN', 'TENAN
   const now = Date.now();
 
   try {
-    const rec = await db.prepare(`SELECT * FROM float_reconciliation WHERE id = ?`).bind(id).first<{ id: string; status: string; operator_id: string }>();
+    const rec = await db.prepare(`SELECT * FROM trns_float_reconciliation WHERE id = ?`).bind(id).first<{ id: string; status: string; operator_id: string }>();
     if (!rec) return c.json({ success: false, error: 'Reconciliation not found' }, 404);
     if (rec.status !== 'pending') return c.json({ success: false, error: `Cannot update reconciliation with status '${rec.status}'` }, 409);
     if (jwtUser?.role !== 'SUPER_ADMIN' && jwtUser?.operatorId && rec.operator_id !== jwtUser.operatorId) {
@@ -673,7 +673,7 @@ agentSalesRouter.patch('/reconciliation/:id', requireRole(['SUPER_ADMIN', 'TENAN
     }
 
     await db.prepare(
-      `UPDATE float_reconciliation SET status = ?, reviewed_by = ?, reviewed_at = ?, notes = COALESCE(?, notes) WHERE id = ?`
+      `UPDATE trns_float_reconciliation SET status = ?, reviewed_by = ?, reviewed_at = ?, notes = COALESCE(?, notes) WHERE id = ?`
     ).bind(status, jwtUser?.id ?? 'system', now, notes ?? null, id).run();
 
     return c.json({ success: true, data: { id, status, reviewed_at: now } });
@@ -683,11 +683,11 @@ agentSalesRouter.patch('/reconciliation/:id', requireRole(['SUPER_ADMIN', 'TENAN
 });
 
 // ============================================================
-// P08-T5: POST /group-bookings — create a group booking (STAFF+)
+// P08-T5: POST /group-trns_bookings — create a group booking (STAFF+)
 // Creates booking + group_bookings + sales_transaction + receipt atomically.
-// seat_ids.length must be in [2, 50]; returns 422 if insufficient seats available.
+// seat_ids.length must be in [2, 50]; returns 422 if insufficient trns_seats available.
 // ============================================================
-agentSalesRouter.post('/group-bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
+agentSalesRouter.post('/group-trns_bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
   const body = await c.req.json() as Record<string, unknown>;
   const missing = requireFields(body, ['trip_id', 'agent_id', 'group_name', 'leader_name', 'leader_phone', 'seat_ids', 'passenger_names', 'payment_method']);
   if (missing) return c.json({ success: false, error: missing }, 400);
@@ -703,7 +703,7 @@ agentSalesRouter.post('/group-bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADM
   };
 
   if (!Array.isArray(seat_ids) || seat_ids.length < 2 || seat_ids.length > 50) {
-    return c.json({ success: false, error: 'seat_ids must be an array of 2–50 seats' }, 400);
+    return c.json({ success: false, error: 'seat_ids must be an array of 2–50 trns_seats' }, 400);
   }
   if (!Array.isArray(passenger_names) || passenger_names.length !== seat_ids.length) {
     return c.json({ success: false, error: 'passenger_names must have one entry per seat_id' }, 400);
@@ -721,24 +721,24 @@ agentSalesRouter.post('/group-bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADM
   try {
     const trip = await db.prepare(
       `SELECT t.id, t.state, t.operator_id, t.departure_time, r.base_fare, r.fare_matrix
-       FROM trips t JOIN routes r ON t.route_id = r.id WHERE t.id = ? AND t.deleted_at IS NULL`
+       FROM trns_trips t JOIN trns_routes r ON t.route_id = r.id WHERE t.id = ? AND t.deleted_at IS NULL`
     ).bind(trip_id).first<{ id: string; state: string; operator_id: string; departure_time: number; base_fare: number; fare_matrix: string | null }>();
     if (!trip) return c.json({ success: false, error: 'Trip not found' }, 404);
     if (!['scheduled', 'boarding'].includes(trip.state)) {
       return c.json({ success: false, error: `Cannot book on a trip in '${trip.state}' state` }, 409);
     }
 
-    // Verify all requested seats exist, belong to this trip, and are available
+    // Verify all requested trns_seats exist, belong to this trip, and are available
     const placeholders = seat_ids.map(() => '?').join(',');
     const seatRows = await db.prepare(
-      `SELECT id, seat_number, seat_class, status FROM seats WHERE id IN (${placeholders}) AND trip_id = ?`
+      `SELECT id, seat_number, seat_class, status FROM trns_seats WHERE id IN (${placeholders}) AND trip_id = ?`
     ).bind(...seat_ids, trip_id).all<{ id: string; seat_number: string; seat_class: string; status: string }>();
 
     const availableSeats = seatRows.results.filter(s => s.status === 'available');
     if (availableSeats.length < seat_ids.length) {
       return c.json({
         success: false,
-        error: 'One or more requested seats are not available',
+        error: 'One or more requested trns_seats are not available',
         available_count: availableSeats.length,
         requested_count: seat_ids.length,
       }, 422);
@@ -769,7 +769,7 @@ agentSalesRouter.post('/group-bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADM
     await db.batch([
       // 1. Master booking record
       db.prepare(
-        `INSERT INTO bookings (id, customer_id, trip_id, seat_ids, passenger_names, total_amount, status, payment_status, payment_method, payment_reference, group_booking_id, is_guest, created_at)
+        `INSERT INTO trns_bookings (id, customer_id, trip_id, seat_ids, passenger_names, total_amount, status, payment_status, payment_method, payment_reference, group_booking_id, is_guest, created_at)
          VALUES (?, NULL, ?, ?, ?, ?, 'confirmed', 'completed', ?, ?, ?, 0, ?)`
       ).bind(booking_id, trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, payment_method, payment_reference, group_id, now),
 
@@ -781,20 +781,20 @@ agentSalesRouter.post('/group-bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADM
 
       // 3. Sales transaction (POS record)
       db.prepare(
-        `INSERT INTO sales_transactions (id, agent_id, trip_id, seat_ids, passenger_names, total_amount, payment_method, payment_status, sync_status, receipt_id, passenger_id_type, passenger_id_hash, park_id, created_at)
+        `INSERT INTO trns_sales_transactions (id, agent_id, trip_id, seat_ids, passenger_names, total_amount, payment_method, payment_status, sync_status, receipt_id, passenger_id_type, passenger_id_hash, park_id, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', 'synced', ?, NULL, NULL, NULL, ?)`
       ).bind(txn_id, agent_id ?? jwtUser?.id ?? 'unknown', trip_id, JSON.stringify(seat_ids), JSON.stringify(passenger_names), total_amount, payment_method, receipt_id, now),
 
       // 4. Receipt with QR code
       db.prepare(
-        `INSERT INTO receipts (id, transaction_id, agent_id, trip_id, passenger_names, seat_numbers, total_amount, payment_method, qr_code, issued_at)
+        `INSERT INTO trns_receipts (id, transaction_id, agent_id, trip_id, passenger_names, seat_numbers, total_amount, payment_method, qr_code, issued_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).bind(receipt_id, txn_id, agent_id ?? jwtUser?.id ?? 'unknown', trip_id, JSON.stringify(passenger_names), JSON.stringify(seatNumbers), total_amount, payment_method, qrCode, now),
 
-      // 5. Confirm all seats atomically
+      // 5. Confirm all trns_seats atomically
       ...seat_ids.map(seatId =>
         db.prepare(
-          `UPDATE seats SET status = 'confirmed', confirmed_by = ?, confirmed_at = ?, updated_at = ? WHERE id = ?`
+          `UPDATE trns_seats SET status = 'confirmed', confirmed_by = ?, confirmed_at = ?, updated_at = ? WHERE id = ?`
         ).bind(booking_id, now, now, seatId)
       ),
     ]);
@@ -832,9 +832,9 @@ agentSalesRouter.post('/group-bookings', requireRole(['SUPER_ADMIN', 'TENANT_ADM
 });
 
 // ============================================================
-// P08-T5: GET /group-bookings/:id — fetch group booking details (STAFF+)
+// P08-T5: GET /group-trns_bookings/:id — fetch group booking details (STAFF+)
 // ============================================================
-agentSalesRouter.get('/group-bookings/:id', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
+agentSalesRouter.get('/group-trns_bookings/:id', requireRole(['SUPER_ADMIN', 'TENANT_ADMIN', 'STAFF']), async (c) => {
   const id = c.req.param('id');
   const db = c.env.DB;
   try {
@@ -843,9 +843,9 @@ agentSalesRouter.get('/group-bookings/:id', requireRole(['SUPER_ADMIN', 'TENANT_
               b.payment_status, b.payment_reference, b.total_amount,
               r.id AS receipt_id, r.qr_code, r.seat_numbers, r.issued_at
        FROM group_bookings gb
-       JOIN bookings b ON gb.booking_id = b.id
-       LEFT JOIN receipts r ON r.transaction_id = (
-         SELECT id FROM sales_transactions WHERE trip_id = gb.trip_id AND seat_ids = b.seat_ids LIMIT 1
+       JOIN trns_bookings b ON gb.booking_id = b.id
+       LEFT JOIN trns_receipts r ON r.transaction_id = (
+         SELECT id FROM trns_sales_transactions WHERE trip_id = gb.trip_id AND seat_ids = b.seat_ids LIMIT 1
        )
        WHERE gb.id = ?`
     ).bind(id).first();

@@ -2,7 +2,7 @@
  * WebWaka Transport — Real-Time Ride Matching Engine
  *
  * Uses Haversine formula for geospatial distance computation.
- * Queries `active_drivers` D1 table to find nearest available drivers
+ * Queries `trns_active_drivers` D1 table to find nearest available trns_drivers
  * within a configurable radius bounding box, then sorts by exact distance.
  *
  * Emits a `transport.ride.requested` platform event on match.
@@ -92,19 +92,19 @@ export interface MatchDb {
 }
 
 /**
- * Find the `maxResults` nearest available drivers to a rider's location.
+ * Find the `maxResults` nearest available trns_drivers to a rider's location.
  *
  * Steps:
  *  1. Bounding-box pre-filter on D1 (cheap index scan).
  *  2. Exact Haversine sort in JS.
- *  3. Reject stale drivers (last_seen_at > DRIVER_STALE_MS ago).
+ *  3. Reject stale trns_drivers (last_seen_at > DRIVER_STALE_MS ago).
  *  4. Emit `transport.ride.requested` event.
  *
  * @param db         D1Database (Cloudflare) or any compatible interface
  * @param rider      Rider's GPS coordinates
  * @param operatorId Optional: restrict to a specific operator
  * @param radiusKm   Search radius in km (default: 5)
- * @param maxResults Max drivers to return (default: 5)
+ * @param maxResults Max trns_drivers to return (default: 5)
  */
 export async function findNearestDrivers(
   db: MatchDb,
@@ -120,7 +120,7 @@ export async function findNearestDrivers(
   let query = `
     SELECT ad.driver_id, ad.operator_id, ad.latitude, ad.longitude,
            ad.status, ad.vehicle_id, ad.last_seen_at
-    FROM active_drivers ad
+    FROM trns_active_drivers ad
     WHERE ad.status = 'available'
       AND ad.latitude  BETWEEN ? AND ?
       AND ad.longitude BETWEEN ? AND ?
@@ -198,7 +198,7 @@ export async function emitRideRequestedEvent(
 // ── Driver presence management ────────────────────────────────────────────────
 
 /**
- * Upsert driver location heartbeat in `active_drivers`.
+ * Upsert driver location heartbeat in `trns_active_drivers`.
  * Called by the driver app every 30 seconds.
  */
 export async function upsertDriverLocation(
@@ -213,7 +213,7 @@ export async function upsertDriverLocation(
   const now = Date.now();
   await db
     .prepare(`
-      INSERT INTO active_drivers (driver_id, operator_id, latitude, longitude, status, vehicle_id, last_seen_at, created_at)
+      INSERT INTO trns_active_drivers (driver_id, operator_id, latitude, longitude, status, vehicle_id, last_seen_at, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(driver_id) DO UPDATE SET
         latitude = excluded.latitude,
