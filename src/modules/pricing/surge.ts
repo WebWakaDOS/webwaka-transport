@@ -3,7 +3,7 @@
  *
  * Calculates surge multipliers based on:
  *   1. Real-time demand: ratio of active_riders to available_drivers in a zone.
- *   2. AI context: weather, time of day, local events via OpenRouter.
+ *   2. AI context: weather, time of day, local events via webwaka-ai-platform (vendor-neutral gateway).
  *   3. Configurable surge caps to prevent price gouging (Nigeria Consumer Protection).
  *
  * Design:
@@ -22,7 +22,7 @@
 import { getAICompletion, type AiEnv } from '../../lib/ai.js';
 
 // QA-TRA-2: getAICompletion() is the certified AI completion function.
-// callOpenRouter is the underlying implementation; getAICompletion is the canonical alias.
+// callOpenRouter alias: routes all AI calls through webwaka-ai-platform. No direct provider calls.
 const callOpenRouter = getAICompletion;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -183,7 +183,7 @@ Respond with JSON only:
  * Calculate effective surge multiplier for a zone.
  *
  * @param db      D1Database interface
- * @param env     Worker env (needs OPENROUTER_API_KEY for AI features)
+ * @param env     Worker env (needs AI_PLATFORM_URL + AI_PLATFORM_TOKEN for AI features)
  * @param context Zone + optional operator scope
  * @returns       SurgeResult with multiplier and diagnostic metadata
  */
