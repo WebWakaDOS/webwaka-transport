@@ -1,13 +1,9 @@
 -- WebWaka Transport Suite — Migration 005
--- Payment provider tracking and timestamp on trns_bookings
--- Supports Paystack / Flutterwave / manual / cash
+-- Payment provider tracking and timestamp on trsp_bookings
+-- NOTE: payment_provider, paid_at, payment_reference were already added in
+--       001_transport_schema.sql — the ALTER TABLE statements are omitted here
+--       to prevent "duplicate column" errors on the shared production database.
 -- ============================================================
 
--- Track which payment provider processed the transaction
-ALTER TABLE trns_bookings ADD COLUMN payment_provider TEXT DEFAULT 'manual';
-
--- Timestamp when payment was confirmed by the gateway
-ALTER TABLE trns_bookings ADD COLUMN paid_at INTEGER;
-
--- Index: look up trns_bookings by payment_reference (webhook + verify)
-CREATE INDEX IF NOT EXISTS idx_bookings_payment_ref ON trns_bookings(payment_reference);
+-- Index: look up trsp_bookings by payment_reference (webhook + verify)
+CREATE INDEX IF NOT EXISTS idx_bookings_payment_ref ON trsp_bookings(payment_reference);
