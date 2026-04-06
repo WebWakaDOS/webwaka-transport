@@ -301,7 +301,7 @@ export async function publishEvent(db: D1LikeDB, event: PlatformEvent): Promise<
   const id = nanoid('evt');
   await db
     .prepare(
-      `INSERT OR IGNORE INTO platform_events
+      `INSERT OR IGNORE INTO trns_platform_events
        (id, event_type, aggregate_id, aggregate_type, payload, tenant_id, correlation_id, status, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
     )
